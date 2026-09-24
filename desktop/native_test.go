@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -299,5 +300,204 @@ func TestTheFirstLineThatCarriesSomethingIsTheAnswer(t *testing.T) {
 		if got := firstLine(out); got != want {
 			t.Errorf("firstLine(%q) = %q, want %q", out, got, want)
 		}
+	}
+}
+
+// The agent is told where the host terminal daemon keeps its endpoint, and that is inside the
+// runtime directory, which the agent's policy seals: the token there opens a shell as the operator.
+func TestTheAgentIsToldWhereTheHostTerminalsAre(t *testing.T) {
+	paths, err := NewPaths(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envMap(supervisorEnv(paths, nil, nil))
+	if env["TERMINALS_HOST_DIR"] != ptydRunDir(paths) {
+		t.Fatalf("TERMINALS_HOST_DIR = %q", env["TERMINALS_HOST_DIR"])
+	}
+	if !strings.HasPrefix(env["TERMINALS_HOST_DIR"], paths.Runtime+string(filepath.Separator)) {
+		t.Fatalf("the run directory %q is outside the sealed runtime", env["TERMINALS_HOST_DIR"])
+	}
+	argv := ptydArgv("/opt/ptyd", paths)
+	want := []string{"/opt/ptyd", "serve", "--env", "host", "--run-dir", ptydRunDir(paths), "--state-dir", ptydStateDir(paths), "--listen"}
+	if strings.Join(argv[:len(want)], " ") != strings.Join(want, " ") {
+		t.Fatalf("argv %q", argv)
+	}
+}
+
+type recorded struct {
+	name string
+	log  *[]string
+}
+
+func (r recorded) Start(context.Context) { *r.log = append(*r.log, "start "+r.name) }
+func (r recorded) Stop(context.Context)  { *r.log = append(*r.log, "stop "+r.name) }
+
+// The agent detaches from its terminals before the daemon goes, and the key proxy it needed until
+// then goes last; all three are forgotten, so the next start reads the env file again.
+func TestStoppingTheAgentComesBeforeItsTerminals(t *testing.T) {
+	var log []string
+	n := &Native{supervisor: recorded{"supervisor", &log}, ptyd: recorded{"ptyd", &log}, keyproxy: recorded{"keyproxy", &log}}
+	n.Stop(context.Background())
+	if got := strings.Join(log, ", "); got != "stop supervisor, stop ptyd, stop keyproxy" {
+		t.Fatalf("stopped in the order %s", got)
+	}
+	if n.supervisor != nil || n.ptyd != nil || n.keyproxy != nil {
+		t.Fatal("a stopped process was kept for the next start")
+	}
+	// A build without a daemon has none to stop.
+	log = nil
+	n = &Native{supervisor: recorded{"supervisor", &log}, keyproxy: recorded{"keyproxy", &log}}
+	n.Stop(context.Background())
+	if got := strings.Join(log, ", "); got != "stop supervisor, stop keyproxy" {
+		t.Fatalf("without a daemon: %s", got)
+	}
+}
+
+// DAEDALUS_PTYD wins; then the daemon beside the launcher, which in a macOS bundle is
+// Contents/MacOS; then nothing.
+func TestTheDaemonIsFoundWhereTheReleasePutsIt(t *testing.T) {
+	name := "ptyd"
+	if runtime.GOOS == "windows" {
+		name = "ptyd.exe"
+	}
+	exe := filepath.Join("apps", "Daedalus.app", "Contents", "MacOS", "daedalus-desktop")
+	beside := filepath.Join(filepath.Dir(exe), name)
+	env := func(value string) func(string) string {
+		return func(key string) string {
+			if key == "DAEDALUS_PTYD" {
+				return value
+			}
+			return ""
+		}
+	}
+	has := func(paths ...string) func(string) bool {
+		return func(p string) bool {
+			for _, q := range paths {
+				if p == q {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if got := ptydBinary(exe, env("/built/ptyd"), has(beside)); got != "/built/ptyd" {
+		t.Errorf("DAEDALUS_PTYD: %q", got)
+	}
+	if got := ptydBinary(exe, env(""), has(beside)); got != beside {
+		t.Errorf("beside the launcher: %q", got)
+	}
+	if got := ptydBinary(exe, env(""), has()); got != "" {
+		t.Errorf("none: %q", got)
+	}
+}
+
+// A build without a daemon says so where the agent looks, and the note goes once a daemon starts.
+func TestAMissingDaemonLeavesItsReason(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "run")
+	if err := markPtyd(run, noPtydReason); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(run, unavailableFile))
+	if err != nil || strings.TrimSpace(string(body)) != noPtydReason {
+		t.Fatalf("note %q, %v", body, err)
+	}
+	if err := markPtyd(run, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(run, unavailableFile)); err == nil {
+		t.Fatal("the note outlived the daemon's start")
+	}
+}
+
+// A host terminal is the operator's shell: their PATH first, the runtime's tools after it.
+func TestAHostTerminalFindsTheOperatorsToolsFirst(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	env := envMap(ptydEnv([]string{"HOME=/home/someone", "PATH=/usr/local/bin" + sep + "/usr/bin"}, []string{"/data/runtime/bin"}))
+	if env["PATH"] != "/usr/local/bin"+sep+"/usr/bin"+sep+"/data/runtime/bin" {
+		t.Fatalf("PATH = %q", env["PATH"])
+	}
+	if env["HOME"] != "/home/someone" {
+		t.Fatal("the operator's environment was not passed on")
+	}
+}
+
+// A socket path too long for a unix socket makes the daemon listen on loopback TCP instead of
+// failing to start.
+func TestADeepFolderMakesTheDaemonListenOnTCP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if ptydListen(`C:\d`) != "tcp:127.0.0.1:0" {
+			t.Fatal("Windows is not on TCP")
+		}
+		return
+	}
+	if got := ptydListen("/d/runtime/ptyd/run"); got != "unix" {
+		t.Errorf("short: %q", got)
+	}
+	if got := ptydListen("/" + strings.Repeat("deep/", 20) + "runtime/ptyd/run"); got != "tcp:127.0.0.1:0" {
+		t.Errorf("long: %q", got)
+	}
+}
+
+// The status counts the daemon only when something answers at its endpoint.
+func TestTheDaemonCountsOnlyWhenItAnswers(t *testing.T) {
+	run := t.TempDir()
+	if ptydAnswers(run) {
+		t.Fatal("an empty directory answered")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, "endpoint"), []byte("tcp:"+ln.Addr().String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !ptydAnswers(run) {
+		t.Fatal("a listening daemon did not count")
+	}
+	ln.Close()
+	if ptydAnswers(run) {
+		t.Fatal("an endpoint left by a stopped daemon counted")
+	}
+	if err := os.WriteFile(filepath.Join(run, "endpoint"), []byte("tcp:192.0.2.1:1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ptydAnswers(run) {
+		t.Fatal("an endpoint off the loopback interface counted")
+	}
+}
+
+// A crashed daemon is started again with the same backoff as the supervisor.
+func TestACrashedDaemonIsStartedAgain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake daemon is a POSIX shell")
+	}
+	dir := t.TempDir()
+	paths, err := NewPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(dir, "ptyd")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho started >> \""+filepath.Join(dir, "starts")+"\"\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DAEDALUS_PTYD", fake)
+	n := NewNative(paths, func(string, ...any) {})
+	pr, ok := n.newPtyd().(*Process)
+	if !ok {
+		t.Fatal("no daemon process for a daemon that exists")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr.Start(ctx)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && pr.Starts() < 2 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	pr.Stop(ctx)
+	if pr.Starts() < 2 {
+		t.Fatalf("a daemon that exited was started %d time(s)", pr.Starts())
+	}
+	if _, err := os.Stat(filepath.Join(paths.RuntimeLogs, "ptyd.log")); err != nil {
+		t.Fatalf("the daemon's output was not kept: %v", err)
 	}
 }

@@ -168,3 +168,13 @@ def test_the_notes_about_owners_hold_without_unix_ids(tmp_path: Path, monkeypatc
     assert ep.owned_by_root(tmp_path) == ""
     detail = ep.permission_detail(tmp_path / "token", PermissionError(13, "Access is denied"))
     assert "this user" in detail and "uid" not in detail
+
+
+def test_a_launcher_without_a_daemon_says_why(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "unavailable").write_text("this build carries no ptyd; host terminals are unavailable\n")
+    with pytest.raises(EndpointMissing) as missing:
+        read_endpoint(run)
+    assert missing.value.reason == "not_installed"
+    assert missing.value.detail == "this build carries no ptyd; host terminals are unavailable"

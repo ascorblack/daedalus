@@ -5,6 +5,8 @@
 #   export PKG_CONFIG_PATH="$(libghostty/build.sh)"
 #   go build ./cmd/ptyd
 #
+# (../release.sh does this for each platform a release carries.)
+#
 # Everything is fetched into a cache (PTYD_CACHE, default ptyd/.cache) and verified: the Zig tarball
 # by its published SHA-256, the Ghostty source by its commit hash, Zig's own dependencies by the
 # hashes in Ghostty's build.zig.zon. A second run with the same pins and patches builds nothing.
@@ -69,6 +71,13 @@ if ! command -v zig >/dev/null 2>&1 || [ "$(zig version)" != "$ZIG_VERSION" ]; t
     rm -f "$tarball"
   fi
   zig="$zig_dir/zig"
+fi
+
+# `build.sh zig` prints the compiler and stops: a cross build of the daemon uses the same Zig as its
+# C compiler, so the pinned one is the only one either side ever sees.
+if [ "${1:-}" = zig ]; then
+  command -v "$zig"
+  exit 0
 fi
 
 # The output directory is named by everything that affects the library, so a changed pin or patch

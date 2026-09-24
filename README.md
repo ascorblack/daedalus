@@ -421,6 +421,13 @@ where that needs polkit, it prints the one `sudo loginctl enable-linger` to run)
   remove`, which also deletes the unit and the binary. `bash deploy/host-terminal.sh status` says where
   it stands, and `daedalus doctor` names the fix for each way it can be down.
 
+### Host terminals on the desktop
+
+A native desktop install has host terminals only: shells on your own machine, as you, served by the
+`ptyd` each release carries beside the launcher. Restarting or updating the agent leaves them running;
+quitting the launcher ends them, as it ends the agent. On Windows the shell is PowerShell.
+[desktop/README.md](desktop/README.md#host-terminals) has the details.
+
 ### The install ends in the app: add a model
 
 **Whichever way you installed it.** A provider key is an address, not a choice of model, so nothing

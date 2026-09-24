@@ -9,6 +9,7 @@ sides of the mount.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 ENDPOINT_FILE = "endpoint"
 TOKEN_FILE = "token"
+UNAVAILABLE_FILE = "unavailable"
 
 
 class EndpointMissing(Exception):
@@ -68,6 +70,11 @@ def read_endpoint(run_dir: Path) -> Endpoint:
         # An empty directory is what setup leaves whether or not the service was installed, so it
         # reads as not installed. One a daemon has used (its lock, its token) held a daemon that
         # stopped — it removes its endpoint first thing when it does.
+        # A native launcher that has no daemon to run leaves its reason here instead.
+        note = run_dir / UNAVAILABLE_FILE
+        if note.is_file():
+            with contextlib.suppress(OSError):
+                raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or "the terminal service is not available") from None
         if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock")):
             raise EndpointMissing("not_running", f"the terminal service in {run_dir} is not running") from None
         raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}{owned_by_root(run_dir)}") from None

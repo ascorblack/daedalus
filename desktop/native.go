@@ -254,14 +254,22 @@ func (pr *Process) logf(format string, args ...any) {
 	}
 }
 
+// child is a process the launcher keeps alive. Native holds its three through this, so the order
+// they are stopped in can be tested without starting anything.
+type child interface {
+	Start(ctx context.Context)
+	Stop(ctx context.Context)
+}
+
 // Native is the whole of the native installation the launcher owns: the runtime it downloads, the
-// supervisor it keeps alive and the key proxy beside it.
+// supervisor it keeps alive, the key proxy beside it and the terminal daemon.
 type Native struct {
 	paths Paths
 	log   func(string, ...any)
 
-	supervisor *Process
-	keyproxy   *Process
+	supervisor child
+	keyproxy   child
+	ptyd       child
 	git        string
 
 	// What the progress page is told: which piece of a start this is, and how far through the one
@@ -535,6 +543,9 @@ func supervisorEnv(p Paths, base []string, settings map[string]string) []string 
 	// to refuse a tool that reaches for it, which it cannot do for a file it has never been told about.
 	add("DAEDALUS_ENV_FILE", p.Env)
 	add("DAEDALUS_SSH_SOURCE", p.SSH)
+	// The host terminals: the daemon the launcher runs writes its endpoint and token here. Always
+	// given, daemon or not — the directory then says why there is none.
+	add("TERMINALS_HOST_DIR", ptydRunDir(p))
 	// The Mini App as a release archive carries it, beside the launcher. It is not the checkout's
 	// own miniapp/dist: that is the thing this would be a fallback for, and pointing one at the
 	// other makes the fallback a no-op that looks like a copy.
@@ -632,11 +643,62 @@ func (n *Native) Start(ctx context.Context) error {
 			Log:     n.log,
 		}
 	}
+	if n.ptyd == nil {
+		n.ptyd = n.newPtyd()
+	}
+	// The terminal daemon first, so the agent finds it on its first look rather than on a retry.
+	if n.ptyd != nil {
+		n.ptyd.Start(ctx)
+	}
 	n.keyproxy.Start(ctx)
 	n.supervisor.Start(ctx)
 	n.enter(StageStart)
 	n.log("waiting for the app to answer")
 	return WaitReadyNative(ctx, APIPort(n.paths), nativeReadyTimeout)
+}
+
+// newPtyd is the terminal daemon's process, or nil when this build carries none; then the run
+// directory is left saying so, and the app shows host terminals unavailable with that reason.
+func (n *Native) newPtyd() child {
+	exe, _ := os.Executable()
+	binary := ptydBinary(exe, os.Getenv, exists)
+	run := ptydRunDir(n.paths)
+	if binary == "" {
+		n.log("%s", noPtydReason)
+		if err := markPtyd(run, noPtydReason); err != nil {
+			n.log("the terminal daemon's directory: %v", err)
+		}
+		return nil
+	}
+	if err := markPtyd(run, ""); err != nil {
+		n.log("the terminal daemon's directory: %v", err)
+	}
+	base := environWithout("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_PYTHON", "PYTHONPATH")
+	return &Process{
+		Name:    "terminal daemon",
+		Argv:    ptydArgv(binary, n.paths),
+		Dir:     n.paths.Data,
+		Env:     ptydEnv(base, n.runtimeTools()),
+		LogPath: filepath.Join(n.paths.RuntimeLogs, "ptyd.log"),
+		Log:     n.log,
+	}
+}
+
+// runtimeTools are the runtime's own directories of programs: ripgrep, and on Windows MinGit, and
+// node once it is installed.
+func (n *Native) runtimeTools() []string {
+	dirs := []string{n.paths.RuntimeBin}
+	if runtime.GOOS == "windows" {
+		dirs = append(dirs, filepath.Join(n.paths.RuntimeGit, "cmd"))
+	}
+	if exists(n.paths.RuntimeNode) {
+		node := n.paths.RuntimeNode
+		if runtime.GOOS != "windows" {
+			node = filepath.Join(node, "bin")
+		}
+		dirs = append(dirs, node)
+	}
+	return dirs
 }
 
 // bundledApp is the prebuilt Mini App shipped next to the launcher, or an empty string when this
@@ -680,24 +742,27 @@ func (n *Native) ensureApp(ctx context.Context) error {
 // machine to wake, and the environment was already built before the supervisor was started.
 const nativeReadyTimeout = 90 * time.Second
 
-// Stop ends both processes. Native mode does not leave the agent running behind a closed launcher,
+// Stop ends the three processes. Native mode does not leave the agent running behind a closed launcher,
 // and that is deliberate rather than a setting: a container is visible in `docker ps` and has a
 // restart policy of its own, while a supervisor started from here is an ordinary process with
 // nothing above it and no window to say it is there. An agent the operator cannot see is one they
 // cannot stop. A run in flight is not lost — the supervisor gives the bot 25 seconds to drain, the
 // run is snapshotted, and it resumes on the next start.
+//
+// The supervisor goes first, so the agent detaches from its terminals cleanly and records them as
+// ended rather than finding a daemon gone under it; then the terminal daemon, which ends every host
+// terminal; then the key proxy, which the agent needed until it stopped.
 func (n *Native) Stop(ctx context.Context) {
-	if n.supervisor != nil {
-		n.supervisor.Stop(ctx)
+	for _, c := range []child{n.supervisor, n.ptyd, n.keyproxy} {
+		if c != nil {
+			c.Stop(ctx)
+		}
 	}
-	if n.keyproxy != nil {
-		n.keyproxy.Stop(ctx)
-	}
-	// Both are forgotten rather than kept for the next Start. A Process reads its environment once,
-	// when it is built, while APIPort and WaitReadyNative read the env file every time: a stop, an
-	// edit to the ports and a start would otherwise bring the old ports back up and then wait on the
-	// new ones, which is a launcher hanging on a port nothing is serving.
-	n.supervisor, n.keyproxy = nil, nil
+	// All three are forgotten rather than kept for the next Start. A Process reads its environment
+	// once, when it is built, while APIPort and WaitReadyNative read the env file every time: a stop,
+	// an edit to the ports and a start would otherwise bring the old ports back up and then wait on
+	// the new ones, which is a launcher hanging on a port nothing is serving.
+	n.supervisor, n.keyproxy, n.ptyd = nil, nil, nil
 }
 
 // Running counts what is answering rather than what this process started. A `status` from a second
@@ -713,6 +778,9 @@ func (n *Native) Running() int {
 		if portAnswers(port) {
 			count++
 		}
+	}
+	if ptydAnswers(ptydRunDir(n.paths)) {
+		count++
 	}
 	return count
 }
