@@ -109,16 +109,19 @@ async def test_a_claude_turn_with_hooks_runs_in_under_three_seconds() -> None:
         launch = await rig.register()
         started = time.monotonic()
         term = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch), "--permission-mode", "manual", "echo:hello"], launch_id=launch["launch_id"])
-        screen = await rig.screen_until(term, "Do you trust the files in this folder")
-        assert "❯ 1. Yes, proceed" in screen
+        screen = await rig.screen_until(term, "Quick safety check")
+        assert "❯ No, exit" in screen and "Yes, I trust this folder" in screen  # unnumbered, the refusal highlighted
         assert rig.hooks() == []  # nothing is posted before trust is accepted
+        await term.write(keys=["Down"])
+        await rig.screen_until(term, "❯ Yes, I trust this folder")
         await term.write(keys=["Enter"])
         stop = await rig.event("hook", where={"name": "Stop"})
         elapsed = time.monotonic() - started
         assert elapsed < 3.0, f"a fake turn took {elapsed:.2f} s"
         assert [h["name"] for h in rig.hooks()] == ["SessionStart", "UserPromptSubmit", "Stop"]
         start = rig.hooks("SessionStart")[0]["body"]
-        assert start["session_id"] == SESSION and start["source"] == "startup" and start["permission_mode"] == "default"
+        assert start["session_id"] == SESSION and start["source"] == "startup" and "permission_mode" not in start
+        assert rig.hooks("UserPromptSubmit")[0]["body"]["permission_mode"] == "default"
         assert rig.hooks("UserPromptSubmit")[0]["body"]["prompt"] == "echo:hello"
         assert stop["data"]["body"]["last_assistant_message"] == "hello"
         records = [json.loads(line) for line in Path(start["transcript_path"]).read_text().splitlines()]
@@ -137,8 +140,11 @@ async def test_claude_asks_trust_once_per_folder_and_refuses_a_used_session_id()
     async with Rig() as rig:
         launch = await rig.register()
         first = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch)], launch_id=launch["launch_id"])
-        await rig.screen_until(first, "trust the files")
-        await first.write(text="1")
+        await rig.screen_until(first, "Quick safety check")
+        await first.write(text="1")  # the trust rows take no digit
+        await first.write(keys=["Down"])
+        await rig.screen_until(first, "❯ Yes, I trust this folder")
+        await first.write(keys=["Enter"])
         await rig.event("hook", where={"name": "SessionStart"})
         second_launch = await rig.register()
         again = await rig.spawn(["claude", "--session-id", "5f0b8b8e-1111-4d38-9a57-6f1f0b0e8a11", "--settings", claude_settings(second_launch)], launch_id=second_launch["launch_id"])
@@ -149,18 +155,22 @@ async def test_claude_asks_trust_once_per_folder_and_refuses_a_used_session_id()
         assert "already in use" in await reused.screen()
 
 
-async def test_claude_permission_answered_by_a_held_hook_never_shows_a_dialog() -> None:
+async def test_claude_permission_answered_by_a_held_hook_closes_its_dialog() -> None:
     async with Rig() as rig:
         trust(rig, rig.work)
         launch = await rig.register(hold_max_ms=10_000)
-        await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch, hold_ms=10_000), "perm:npm install grammy"], launch_id=launch["launch_id"])
+        term = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch, hold_ms=10_000), "perm:npm install grammy"], launch_id=launch["launch_id"])
         request = await rig.event("hook", where={"name": "PermissionRequest"})
-        assert request["data"]["body"]["tool_name"] == "Bash" and request["data"]["body"]["tool_input"]["command"] == "npm install grammy"
+        body = request["data"]["body"]
+        assert body["tool_name"] == "Bash" and body["tool_input"]["command"] == "npm install grammy" and "tool_use_id" not in body
+        # The dialog is drawn while the hook is held (measured), so the terminal can answer it too.
+        await rig.screen_until(term, "Do you want to proceed")
         decision = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
         await rig.client.call("hooks.reply", {"reply_id": request["data"]["reply_id"], "status": 200, "body": decision})
         await rig.event("hook", where={"name": "Stop"})
         assert [h["name"] for h in rig.hooks()][-3:] == ["PermissionRequest", "PostToolUse", "Stop"]
-        assert not [d for d in log_events(rig, "dialog_opened") if d["kind"] == "permission"]
+        assert "Allowed by PermissionRequest hook" in await term.screen()
+        assert [d["kind"] for d in log_events(rig, "dialog_opened")] == ["permission"] and not log_events(rig, "dialog_answered")
 
 
 async def test_claude_permission_dialog_answered_with_keys_and_its_late_notification() -> None:
@@ -197,10 +207,12 @@ async def test_claude_queues_a_message_typed_while_busy_and_esc_interrupts_witho
         await term.write(keys=["Esc"])
         await wait(lambda: bool(log_events(rig, "turn_ended")))
         assert log_events(rig, "turn_ended")[0]["outcome"] == "cancelled"
-        await rig.screen_until(term, "Interrupted by user")
+        await rig.screen_until(term, "Interrupted · What should Claude do instead")
         assert rig.hooks("Stop") == []  # one turn, interrupted: no Stop at all
         transcript = Path(rig.hooks("SessionStart")[0]["body"]["transcript_path"]).read_text()
-        assert "[Request interrupted by user]" in transcript
+        assert "[Request interrupted by user" in transcript
+        # The queued message's prompt hook fired when it was queued (measured), and the transcript says so.
+        assert '"operation": "enqueue"' in transcript
         # Esc twice on an idle composer opens the rewind dialog: an adapter sends it once.
         await term.write(keys=["Esc"])
         await term.write(keys=["Esc"])
@@ -218,7 +230,7 @@ async def test_claude_paste_collapse_burst_guard_and_the_swallowed_enter() -> No
         # machine is: the Enter is inside the burst window by construction.
         await term.write(text=f"\x1b[200~{long}\x1b[201~\r")
         await wait(lambda: len(log_events(rig, "enter_swallowed")) == 1)
-        screen = await rig.screen_until(term, r"\[Pasted text #1 \+3 lines\]")
+        screen = await rig.screen_until(term, r"\[Pasted text #1 \+2 lines\]")
         await asyncio.sleep(0.5)  # a lower bound past the window, counted from after the TUI had it
         await term.write(keys=["Enter"])  # the fault: swallowed once more
         await wait(lambda: len(log_events(rig, "enter_swallowed")) == 2)
@@ -251,14 +263,19 @@ async def test_claude_team_tools_go_through_the_launchs_mcp_server() -> None:
         mcp = {"mcpServers": {"daedalus_team": {"command": str(rig.bin / "ptyd"), "args": ["team-mcp"], "env": {"DAEDALUS_ASK_HOLD_MS": "10000"}}}}
         allow = ["mcp__daedalus_team__Report", "mcp__daedalus_team__AskOrchestrator"]
         term = await rig.spawn(
-            ["claude", "--session-id", SESSION, "--settings", claude_settings(launch, allow=allow), "--mcp-config", json.dumps(mcp), "report:done:the task is finished; askorch:Which branch?|main|dev"],
+            ["claude", "--session-id", SESSION, "--settings", claude_settings(launch, allow=allow), "--mcp-config", json.dumps(mcp), "--", "report:done:the task is finished; askorch:Which branch?|main|dev"],
             launch_id=launch["launch_id"],
         )
-        report = await rig.event("hook", where={"name": "team"})
+        report = await team_call(rig, "report")
+        call_id = report["data"]["body"].pop("call_id")
         assert report["data"]["body"] == {"tool": "report", "kind": "done", "note": "the task is finished", "artifacts": []}
+        assert call_id.startswith(f"{launch['launch_id']}:")
         await rig.client.call("hooks.reply", {"reply_id": report["data"]["reply_id"], "status": 200, "body": {"text": "recorded"}})
-        ask = await rig.event("hook", where={"name": "team"}, after=rig.events.index(report) + 1)
+        ask = await team_call(rig, "ask")
         assert ask["data"]["body"]["tool"] == "ask" and ask["data"]["body"]["options"] == ["main", "dev"] and ask["data"]["reply_id"]
+        assert ask["data"]["body"]["call_id"] != call_id
+        # Loading the tools was announced, unheld, before any call.
+        assert {h["body"]["stage"] for h in rig.hooks("team") if h["body"]["tool"] == "hello"} == {"initialize", "tools/list"}
         await rig.client.call("hooks.reply", {"reply_id": ask["data"]["reply_id"], "status": 200, "body": {"text": "dev"}})
         await rig.screen_until(term, "AskOrchestrator: dev")
         assert not log_events(rig, "dialog_opened")  # allowed by rule: no permission dialog
@@ -274,7 +291,7 @@ async def test_claude_says_what_blocks_it_before_it_is_ready() -> None:
         trust(rig, rig.work)
         term = await rig.spawn(["claude", "--session-id", SESSION, "--permission-mode", "bypassPermissions"])
         screen = await rig.screen_until(term, "Bypass Permissions mode")
-        assert "❯ 1. No, exit" in screen  # the default row refuses
+        assert "❯ No, exit" in screen  # the default row refuses
         refused = await rig.spawn(["claude", "--permission-mode", "default"])
         await rig.event("terminal.exited", where={"exit_code": 2})
         assert "manual" in await refused.screen()
@@ -651,6 +668,12 @@ async def wait(predicate: Any, timeout: float = 30) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.01)
+
+
+async def team_call(rig: Rig, tool: str) -> dict[str, Any]:
+    """The first team post of a tool: the announcements that the tools loaded come first."""
+    await wait(lambda: any(e["type"] == "hook" and e["data"].get("name") == "team" and e["data"]["body"].get("tool") == tool for e in rig.events))
+    return next(e for e in rig.events if e["type"] == "hook" and e["data"].get("name") == "team" and e["data"]["body"].get("tool") == tool)
 
 
 async def wait_event(events: list[dict[str, Any]], kind: str) -> dict[str, Any]:

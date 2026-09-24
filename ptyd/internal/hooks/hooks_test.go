@@ -3,6 +3,7 @@ package hooks
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -166,12 +167,57 @@ func TestRegisterWritesFilesAndUnregisterRemovesThem(t *testing.T) {
 	}
 }
 
+func TestNestedFilesAndFilesAddedLater(t *testing.T) {
+	f := start(t)
+	skill := ".claude/skills/daedalus-team/SKILL.md"
+	r, err := f.reg.Register(Spec{ID: "L1", Files: map[string][]byte{skill: []byte("# team"), ".claude/skills/other/SKILL.md": []byte("x"), "settings.json": []byte("{}")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(r.Dir, ".claude", "skills", "daedalus-team", "SKILL.md")); err != nil || string(b) != "# team" {
+		t.Fatalf("%q %v", b, err)
+	}
+	if st, err := os.Stat(filepath.Join(r.Dir, ".claude", "skills")); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("%v %v", st, err)
+	}
+	path, err := f.reg.PutFile("L1", "message-sm-1.md", []byte("a long message"))
+	if err != nil || path != filepath.Join(r.Dir, "message-sm-1.md") {
+		t.Fatalf("%q %v", path, err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("%v %v", st, err)
+	}
+	// A file added later is one new plain name: never a path, never over something already there,
+	// never through a link the launch's programs planted.
+	for _, name := range []string{"message-sm-1.md", "a/b.md", "../x", ""} {
+		if _, err := f.reg.PutFile("L1", name, []byte("x")); err == nil {
+			t.Errorf("%q was written", name)
+		}
+	}
+	if err := os.Symlink("/tmp/elsewhere", filepath.Join(r.Dir, "planted.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.reg.PutFile("L1", "planted.md", []byte("x")); err == nil {
+		t.Error("a planted link was followed")
+	}
+	if _, err := f.reg.PutFile("L1", "big.md", make([]byte, config.MaxLaunchFileBytes+1)); err == nil {
+		t.Error("an oversized file was written")
+	}
+	f.reg.Unregister("L1", "done")
+	if _, err := f.reg.PutFile("L1", "late.md", []byte("x")); !errors.Is(err, ErrNoLaunch) {
+		t.Fatalf("a file for an ended launch: %v", err)
+	}
+}
+
 func TestRegisterRefusesBadInput(t *testing.T) {
 	f := start(t)
 	for _, s := range []Spec{
 		{ID: "../x"},
 		{ID: "ok", Files: map[string][]byte{"../escape": nil}},
-		{ID: "ok", Files: map[string][]byte{"a/b": nil}},
+		{ID: "ok", Files: map[string][]byte{"a/../../b": nil}},
+		{ID: "ok", Files: map[string][]byte{"/etc/passwd": nil}},
+		{ID: "ok", Files: map[string][]byte{"a//b": nil}},
+		{ID: "ok", Files: map[string][]byte{"a/b/c/d/e/f/g": nil}},
 		{ID: "ok", Files: map[string][]byte{"..": nil}},
 		{ID: "ok", Files: map[string][]byte{"big": make([]byte, config.MaxLaunchFileBytes+1)}},
 		{ID: "ok", Ports: []int{70000}},

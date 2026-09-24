@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from daedalus.config import HarnessConfig
+from daedalus.harness import team as protocol
 from daedalus.harness.contract import (
     LAUNCH_DIR,
     Answer,
@@ -48,6 +49,7 @@ from daedalus.harness.contract import (
     StaffEvent,
     Turn,
 )
+from daedalus.harness.delivery import DeliveryWorker, Pending, normalised, pending_of
 from daedalus.harness.env import terminal_environment
 from daedalus.harness.state import OpenRequest, StaffState, StateContext, next_state
 from daedalus.staff_runtime import (
@@ -78,11 +80,17 @@ the operator attaching later takes the size over anyway; this one fits a CLI's d
 GATE_ANSWERS_MAX = 4
 """Dialogs the readiness gate answers in one launch (folder trust, then perhaps a mode warning).
 More than that is a CLI asking something the adapter misreads, and typing on would be guessing."""
+GATE_REPEAT_S = 3.0
+"""A dialog still on screen, unchanged, this long after its keys were typed is answered again: a TUI
+that draws its dialog before it reads the keyboard drops keys typed in that moment (the real Claude
+Code's trust question did). Counted against ``GATE_ANSWERS_MAX``, so a CLI that ignores them fails."""
 HOLD_MARGIN_MS = 30_000
 """What a launch's longest hold exceeds the ask hold by, so the listener never cuts a question short."""
 READ_TRANSCRIPT_TURNS = 400
 DIFF_TIMEOUT = 30.0
 SCREEN_TAIL_CHARS = 1200
+CALLS_REMEMBERED = 256
+"""Team call ids a session keeps for spotting a repeat; a replay is of the latest posts."""
 """How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
 
 Lookup = Callable[[str], Awaitable[LiveSession | None]]
@@ -128,8 +136,10 @@ class RuntimeTerminal:
     def env(self) -> Any:
         return self._env
 
-    async def write(self, *, text: str | None = None, paste: str | None = None, keys: list[str] | None = None, note: str = "") -> None:
-        await self.terminals.write(self._id, text=text, paste=paste, keys=keys, origin=Origin(self.actor, self.launch_id, note))
+    async def write(self, *, text: str | None = None, paste: str | None = None, keys: list[str] | None = None, note: str = "", wait_keyboard: bool = True) -> None:
+        """``wait_keyboard`` false only for the operator's own message: it does not wait for the
+        operator to stop typing, while anyone else's words wait for a person to finish."""
+        await self.terminals.write(self._id, text=text, paste=paste, keys=keys, origin=Origin(self.actor, self.launch_id, note), wait_keyboard=wait_keyboard)
 
     async def screen(self, *, scrollback: int = 0) -> str:
         result = await self.terminals.read_screen(self._id, format="text", scrollback=scrollback)
@@ -163,6 +173,9 @@ class RuntimeTerminal:
         except NotFound:
             return False
         return True
+
+    async def put_file(self, name: str, data: bytes) -> str:
+        return await self.terminals.put_launch_file(self._env, self.launch_id, name, data, actor=self.actor)
 
 
 class RuntimeEnvironment:
@@ -249,6 +262,23 @@ class CliSession:
     quiet_checked: float = 0.0
     stopping: bool = False
     finished: bool = False
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set by every event applied, so a message waiting for its window looks again at once."""
+    worker: DeliveryWorker | None = None
+    reported: bool = False
+    """A Report arrived in the current turn; a turn that ends without one is reported for it."""
+    resend_first: bool = False
+    """After a restart during the start: the first message still has to go by channel once ready."""
+    channel: dict[str, str] = field(default_factory=dict)
+    """What the host last heard on each channel of the launch: ``hook``, ``team`` (a call),
+    ``hello`` (the team tools loaded), and the team tools' state (``connected`` or ``missing``)."""
+    calls: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    """Team calls by their call id: a post seen twice is answered as the first was, never acted on twice."""
+    asked: dict[str, str] = field(default_factory=dict)
+    """Open team questions by their text, to the request's reference: asked again, it is the same request."""
+    held_for: dict[str, list[str]] = field(default_factory=dict)
+    """A team request's reference to the later held posts that asked it again, newest last."""
+    pending_after_restart: list[Pending] = field(default_factory=list)
 
 
 class CliStaffRuntime:
@@ -341,12 +371,25 @@ class CliStaffRuntime:
         return await self._launch(req, resume_ref=prior.cli_session_id or "")
 
     def _spec(self, req: StartRequest, launch_id: str, resume_ref: str) -> LaunchSpec:
+        cfg = self.config()
+        facts = protocol.TeamFacts(
+            staff_name=req.staff.name,
+            project_name=req.project.name,
+            role=req.staff.role,
+            task_id=req.task.id if req.task is not None else "",
+            task_title=req.task.title if req.task is not None else "",
+            branch=req.worktree.branch if req.worktree is not None else "",
+        )
+        block = protocol.mandatory_block(facts) + (f"\n\n{req.brief_text.strip()}" if req.brief_text.strip() else "")
+        # The protocol's first line leads the first prompt too: a CLI that reads its system channel
+        # late, or a model that skims it, meets it again where the task begins.
+        first = f"{protocol.first_line(facts)}\n\n{req.first_message}" if req.first_message else None
         return LaunchSpec(
             harness=self.kind,
             env=req.env,  # type: ignore[arg-type]
             cwd=str(req.cwd),
             launch_id=launch_id,
-            first_prompt=req.first_message or None,
+            first_prompt=first,
             brief_text=req.brief_text,
             model=req.model,
             effort=req.effort,
@@ -354,6 +397,12 @@ class CliStaffRuntime:
             permission_mode=req.permission_mode,
             permission_level=req.permission_level,
             session_ref=resume_ref,
+            title=f"{req.staff.name} · {req.task.title}" if req.task is not None else req.staff.name,
+            team_block=block,
+            team_skill=protocol.skill_markdown(facts),
+            ask_hold_ms=cfg.ask_hold_s * 1000,
+            report_hold_ms=cfg.report_hold_s * 1000,
+            permission_hold_ms=cfg.permission_hold_s * 1000,
         )
 
     async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
@@ -378,7 +427,7 @@ class CliStaffRuntime:
         # restarted host could never take up or end.
         await self.store.open_launch(record)
         cfg = self.config()
-        hold = max([cfg.ask_hold_s * 1000 + HOLD_MARGIN_MS, *plan.hooks.hold_ms.values()])
+        hold = max([cfg.ask_hold_s * 1000 + HOLD_MARGIN_MS, cfg.permission_hold_s * 1000 + HOLD_MARGIN_MS, *plan.hooks.hold_ms.values()])
         registered = False
         created: list[str] = []
         try:
@@ -450,11 +499,15 @@ class CliStaffRuntime:
         for terminal_id in session.companions:
             self._by_terminal[terminal_id] = session
         name = f"harness-{self.kind}-{session.staff_session_id}"
+        session.worker = DeliveryWorker(self.adapter, session, self.lookup, self.ingress, self.store, self.config, self._in_transcript)
         session.tasks = [
             asyncio.create_task(self._pump_hooks(session), name=f"{name}-hooks"),
             asyncio.create_task(self._consume(session), name=f"{name}-events"),
             asyncio.create_task(self._watch_quiet(session), name=f"{name}-quiet"),
+            session.worker.start(),
         ]
+        if self.adapter.capabilities.team_tools == "mcp":
+            session.tasks.append(asyncio.create_task(self._watch_team_tools(session), name=f"{name}-team"))
         if gate:
             session.tasks.append(asyncio.create_task(self._gate(session), name=f"{name}-gate"))
 
@@ -468,6 +521,7 @@ class CliStaffRuntime:
         deadline = self.clock() + cfg.ready_timeout_s
         answered = 0
         last_answered = ""
+        answered_at = 0.0
         screen = ""
         try:
             while not session.ready.is_set():
@@ -478,13 +532,14 @@ class CliStaffRuntime:
                 if step.action == "fail":
                     await self._failed(session, step.reason or "the command-line agent will not start", screen)
                     return
-                if step.action == "keys" and step.keys and screen != last_answered:
+                if step.action == "keys" and step.keys and (screen != last_answered or self.clock() - answered_at >= GATE_REPEAT_S):
                     if answered >= GATE_ANSWERS_MAX:
                         await self._failed(session, "it kept asking questions before it was ready", screen)
                         return
                     await session.term.write(keys=list(step.keys), note=f"readiness: {step.reason or 'dialog'}")
                     answered += 1
                     last_answered = screen
+                    answered_at = self.clock()
                 if self.clock() >= deadline:
                     await self._failed(session, f"not ready after {cfg.ready_timeout_s:g} s", screen)
                     return
@@ -492,6 +547,8 @@ class CliStaffRuntime:
                     await asyncio.wait_for(session.ready.wait(), cfg.ready_poll_ms / 1000)
             if session.plan is not None:
                 await self.adapter.after_spawn(session.term, session.launch, session.plan)
+            elif session.resend_first:
+                await self._resend_first(session)
         except asyncio.CancelledError:
             raise
         except TerminalError as exc:
@@ -512,6 +569,7 @@ class CliStaffRuntime:
         try:
             async for hook in self.terminals.hook_events(session.launch.launch_id):
                 post = HookPost(name=hook.name, body=hook.body, at=hook.at, reply_id=hook.reply_id, hold_ms=hook.hold_ms)
+                session.channel["team" if hook.name == "team" else "hook"] = hook.at or _now()
                 if hook.name == "team":
                     try:
                         await self._team(session, post)
@@ -567,8 +625,11 @@ class CliStaffRuntime:
 
     async def _apply_locked(self, session: CliSession, live: LiveSession, event: StaffEvent) -> None:
         kind = event.kind
+        session.changed.set()
         if kind in (EventKind.READY, EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED, EventKind.PERMISSION_REQUESTED, EventKind.QUESTION_ASKED, EventKind.TURN_COMPLETED):
             session.ready.set()
+        if kind is EventKind.PROMPT_ACKNOWLEDGED or (kind is EventKind.TURN_STARTED and live.session.status != StaffState.WORKING.value):
+            session.reported = False
         if kind is EventKind.TRANSCRIPT:
             await self._located(session, live, event)
         if kind is EventKind.PROMPT_ACKNOWLEDGED:
@@ -582,9 +643,12 @@ class CliStaffRuntime:
             # not, on its own screen. The team's own answers come back through ``answer`` with theirs.
             if session.open.pop(event.native_id, None) is not None and (event.payload.get("via") or "terminal") == "terminal":
                 await self.ingress.resolved(live, event.native_id, by="operator", via="terminal")
+            self._forget_question(session, event.native_id)
         elif kind in (EventKind.TURN_CANCELLED, EventKind.SESSION_ENDED, EventKind.PROCESS_EXITED):
             withdrawn = list(session.open)
             session.open.clear()
+            for ref in withdrawn:
+                self._forget_question(session, ref)
         try:
             current = StaffState(live.session.status)
         except ValueError:
@@ -621,8 +685,18 @@ class CliStaffRuntime:
             await self.ingress.signal(live)
         if kind is EventKind.TURN_COMPLETED and step.state is StaffState.TURN_DONE_UNSEEN:
             self._spawn(self._record_usage(session), f"harness-usage-{session.staff_session_id}")
+            if not session.reported:
+                await self._implicit_report(live, str(event.payload.get("last_message") or ""))
+            session.reported = False
         if step.reconcile:
             self._spawn(self._reconcile_screen(session), f"harness-reconcile-{session.staff_session_id}")
+
+    @staticmethod
+    def _forget_question(session: CliSession, ref: str) -> None:
+        for text, known in list(session.asked.items()):
+            if known == ref:
+                del session.asked[text]
+        session.held_for.pop(ref, None)
 
     def _ending(self, event: StaffEvent) -> str:
         label = self.adapter.capabilities.label
@@ -643,6 +717,8 @@ class CliStaffRuntime:
 
     async def _acknowledged(self, session: CliSession, event: StaffEvent) -> None:
         message_id = str(event.payload.get("message_id") or "")
+        if session.worker is not None and session.worker.acknowledge(str(event.payload.get("prompt") or ""), message_id):
+            return  # the worker reports the message it was delivering
         if not message_id and session.first_prompt_pending and session.first_message_id:
             # The first prompt went on the command line; the CLI taking a prompt before anything else
             # was sent is that one.
@@ -661,6 +737,61 @@ class CliStaffRuntime:
             return
         if snapshot is not None:
             await self.ingress.usage(live, snapshot)
+
+    async def _implicit_report(self, live: LiveSession, last_message: str) -> None:
+        """A turn that ended without a Report still reaches the orchestrator: the end of its last
+        message, marked as no report, and as needing input when it ends by asking something. Nothing
+        is answered for the member; the orchestrator decides."""
+        kind = "needs_input" if protocol.looks_like_question(last_message) else "turn_done"
+        words = protocol.excerpt(last_message)
+        text = f"{words} ({protocol.NO_REPORT})" if words else f"The turn ended without a message ({protocol.NO_REPORT})."
+        try:
+            await self.ingress.implicit_report(live, kind, text)
+        except Exception:  # noqa: BLE001 — the status already says the turn ended; this is its gloss
+            logger.warning("the implicit report of %s was not made", live.id, exc_info=True)
+
+    async def _in_transcript(self, session: CliSession, text: str) -> bool:
+        """Whether the CLI's own transcript has the message as a prompt it took."""
+        if not session.transcript_ref:
+            return False
+        wanted = normalised(text)[:200]
+        try:
+            turns = await self.adapter.transcript(session.env_port, session.transcript_ref)
+        except Exception:  # noqa: BLE001 — unreadable is "not found", which never resends anything
+            logger.info("the transcript of %s could not be read", session.staff_session_id, exc_info=True)
+            return False
+        return any(t.role in ("user", "orchestrator") and wanted and normalised(t.text).startswith(wanted) for t in turns[-READ_TRANSCRIPT_TURNS:])
+
+    async def _watch_team_tools(self, session: CliSession) -> None:
+        """The team tools must say they loaded within a while of the CLI being ready. If they do not,
+        the member's card says so and the orchestrator hears it once; the member works on, with its
+        status still coming from hooks and the screen, and messages still reaching it."""
+        await session.ready.wait()
+        wait = self.config().team_hello_s
+        deadline = self.clock() + wait
+        while self.clock() < deadline:
+            if session.channel.get("hello"):
+                return
+            await asyncio.sleep(min(1.0, wait / 10))
+        if session.channel.get("hello") or session.finished:
+            return
+        session.channel["team_tools"] = "missing"
+        live = await self.lookup(session.staff_session_id)
+        if live is not None:
+            await self.ingress.channel(live, "missing", f"no team tools {wait:g} s after {self.adapter.capabilities.label} was ready: its reports and questions cannot arrive")
+
+    def channel(self, live: LiveSession) -> dict[str, Any]:
+        """What the host last heard on each of the session's channels, for the staff view."""
+        session = self.sessions.get(live.id)
+        if session is None:
+            return {}
+        return {
+            "team_tools": session.channel.get("team_tools") or ("connected" if session.channel.get("hello") else "waiting"),
+            "last_hook_at": session.channel.get("hook") or None,
+            "last_team_call_at": session.channel.get("team") or None,
+            "team_hello_at": session.channel.get("hello") or None,
+            "queued_messages": session.worker.size() if session.worker is not None else 0,
+        }
 
     # -- silence ---------------------------------------------------------------------------------
 
@@ -715,22 +846,46 @@ class CliStaffRuntime:
     # -- the team tools --------------------------------------------------------------------------
 
     async def _team(self, session: CliSession, post: HookPost) -> None:
-        """``Report`` and ``AskOrchestrator`` from the team bridge. A report is answered with what the
-        team made of it (a refusal as an error the worker reads); a question is held open and answered
-        when someone answers it, with the ask carrying the held post's id as its reference."""
+        """``Report`` and ``AskOrchestrator`` from the team bridge, and its word that the tools loaded.
+
+        A report is answered with what the team made of it (a refusal as an error the worker reads);
+        a question is held open and answered when someone answers it, with the ask carrying the held
+        post's id as its reference. Every call carries a call id: a post seen again — a replay after
+        the host restarted — is answered as the first one was and acted on once. A question asked
+        again while the first is open (the CLI retried, the model asked twice) is the same request,
+        and its answer goes to the newest post that still waits.
+        """
         body = post.body if isinstance(post.body, dict) else {}
         tool = str(body.get("tool") or "")
+        if tool == "hello":
+            first = not session.channel.get("hello")
+            session.channel["hello"] = post.at or _now()
+            if first or session.channel.get("team_tools") == "missing":
+                was_missing = session.channel.get("team_tools") == "missing"
+                session.channel["team_tools"] = "connected"
+                live = await self.lookup(session.staff_session_id)
+                if live is not None and was_missing:
+                    await self.ingress.channel(live, "connected", "the team tools loaded late")
+            return
         live = await self.lookup(session.staff_session_id)
         if live is None:
             if post.reply_id:
                 await session.term.reply(post.reply_id, {"text": "this session is no longer connected to its team", "error": True})
             return
+        call_id = str(body.get("call_id") or "")
+        seen = session.calls.get(call_id) if call_id else None
         if tool == "report":
+            session.reported = True
+            if seen is not None:
+                if post.reply_id:
+                    await session.term.reply(post.reply_id, seen[1])
+                return
             try:
-                told = await self.ingress.report(live, str(body.get("kind") or ""), str(body.get("note") or ""), [str(a) for a in body.get("artifacts") or []], str(body.get("remember") or "") or None)
+                told = await self.ingress.report(live, str(body.get("kind") or ""), str(body.get("note") or ""), [str(a) for a in body.get("artifacts") or []], str(body.get("remember") or "") or None, call_id=call_id or None)
                 reply: dict[str, Any] = {"text": told}
             except (ValueError, RuntimeError) as exc:
                 reply = {"text": str(exc), "error": True}
+            self._remember_call(session, call_id, ("report", reply))
             await self._apply(session, StaffEvent(EventKind.ACTIVITY, post.at, {"team": "report"}, launch_id=session.launch.launch_id))
             if post.reply_id:
                 await session.term.reply(post.reply_id, reply)
@@ -738,12 +893,29 @@ class CliStaffRuntime:
             question = str(body.get("question") or "").strip()
             context = str(body.get("context") or "").strip()
             text = question + (f"\n\nContext: {context}" if context else "")
+            earlier = seen[1] if seen is not None else session.asked.get(normalised(question))
+            if earlier and earlier in session.open:
+                # The same question again: no second request; the answer goes to this post too.
+                if post.reply_id:
+                    session.held_for.setdefault(earlier, []).append(post.reply_id)
+                self._remember_call(session, call_id, ("ask", earlier))
+                return
             # The reference names the held post, so the answer finds its way back even after the
             # host restarted; an ask nobody holds gets a reference of its own and goes as a message.
             ref = f"team:{post.reply_id}" if post.reply_id else f"team-message:{uuid.uuid4().hex[:12]}"
+            session.asked[normalised(question)] = ref
+            self._remember_call(session, call_id, ("ask", ref))
             await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []]}, native_id=ref, launch_id=session.launch.launch_id))
         elif post.reply_id:
             await session.term.reply(post.reply_id, {"text": f"the team has no tool {tool!r}", "error": True})
+
+    @staticmethod
+    def _remember_call(session: CliSession, call_id: str, what: tuple[str, Any]) -> None:
+        if not call_id:
+            return
+        session.calls[call_id] = what
+        while len(session.calls) > CALLS_REMEMBERED:
+            session.calls.pop(next(iter(session.calls)))
 
     # -- the team's calls ------------------------------------------------------------------------
 
@@ -754,15 +926,15 @@ class CliStaffRuntime:
         return session
 
     async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt:
-        """Hand a message to the adapter and report how far it got. The adapter's own delivery (the
-        paste, the Enter, the acknowledgement it waits for) decides the receipt; a later
-        acknowledgement arrives as an event and moves the message on."""
+        """Queue a message for the session's delivery worker and say so. The worker reports every
+        later state (``written``, ``submitted``, ``acknowledged`` or ``failed``) through the ingress;
+        a mode this CLI cannot do is named in ``degraded_to`` at once."""
         session = self._session(live)
+        assert session.worker is not None
         text = msg.text if msg.origin == "operator" else f"[orchestrator] {msg.text}"
-        delivery = await self.adapter.send(session.term, msg.id, text, msg.mode)
-        with contextlib.suppress(Exception):
-            await self.store.record_delivery(session.launch.launch_id, delivery)
-        return Receipt(delivery.state, delivery.error, degraded_to=delivery.degraded_to or None)
+        degraded = session.worker.degraded(msg.mode)
+        session.worker.put(Pending(msg.id, text, msg.mode, msg.origin, degraded_to=degraded))
+        return Receipt("queued", degraded_to=degraded or None)  # type: ignore[arg-type]
 
     async def interrupt(self, live: LiveSession) -> None:
         await self.adapter.interrupt(self._session(live).term)
@@ -776,9 +948,16 @@ class CliStaffRuntime:
         text = (decision.text or "").strip() or ", ".join(decision.selected)
         if ref.startswith(("team:", "team-message:")):
             words = text or ("yes" if decision.allow else "no" if decision.allow is False else "")
-            held = ref.startswith("team:") and await session.term.reply(ref.removeprefix("team:"), {"text": words})
+            posts = [*reversed(session.held_for.get(ref, [])), *([ref.removeprefix("team:")] if ref.startswith("team:") else [])]
+            held = False
+            for reply_id in posts:
+                # The newest post that still waits takes the answer; the others ended on their own.
+                if await session.term.reply(reply_id, {"text": words}):
+                    held = True
+                    break
             if not held:
-                await self.adapter.send(session.term, "", f"[the {decision.by} answers your question] {words}", "queue")
+                assert session.worker is not None
+                session.worker.put(Pending("", f"[the {decision.by} answers your question] {words}", "queue", "system"))
         else:
             if ask.kind == "permission":
                 choice = "allow_once" if decision.allow else "deny_with_note" if text else "deny"
@@ -804,6 +983,10 @@ class CliStaffRuntime:
                     return _clip(turn.text.strip(), req.max_chars, cursor)
             return ReadPage("(no reply yet)", cursor, False)
         return _clip(_render(fresh, max(1, req.turns)), req.max_chars, cursor)
+
+    async def turns(self, live: LiveSession) -> list[Turn]:
+        """The session's turns from its CLI's own transcript, for the staff view."""
+        return await self._turns(live)
 
     async def _turns(self, live: LiveSession) -> list[Turn]:
         session = self.sessions.get(live.id)
@@ -971,11 +1154,49 @@ class CliStaffRuntime:
                 last_signal=self.clock(),
             )
             await self.adapter.attach(session.term, launch)
+            starting = live.session.status == StaffState.STARTING.value
+            await self._take_up_messages(session, live, starting=starting)
             # A session still starting when the host went has its gate run again: the dialog it was
             # stuck on may still be on screen, and reading a screen twice is harmless.
-            self._run(session, gate=live.session.status == StaffState.STARTING.value)
+            self._run(session, gate=starting)
+            if session.worker is not None:
+                for pending in session.pending_after_restart:
+                    session.worker.put(pending)
+                session.pending_after_restart.clear()
             attached += 1
         return attached
+
+    async def _take_up_messages(self, session: CliSession, live: LiveSession, *, starting: bool) -> None:
+        """The messages a previous host left on their way. A queued one is delivered as if just sent;
+        one already written or submitted is looked for, never typed again. The first message of a
+        session still starting is its first prompt: on the command line the CLI submits it itself,
+        and its acknowledgement is still to come; through a channel, it goes once the CLI is ready
+        again — the plan that would have sent it is gone with the previous host."""
+        messages = await self.ingress.messages_of(live)
+        if not messages:
+            return
+        first = messages[0]
+        for message in messages:
+            if message.state in ("acknowledged", "failed"):
+                continue
+            if message is first and starting:
+                session.first_message_id = message.id
+                if self.adapter.capabilities.first_prompt == "channel":
+                    session.resend_first = True
+                else:
+                    session.first_prompt_pending = True
+                continue
+            session.pending_after_restart.append(pending_of(message, first=message is first))
+
+    async def _resend_first(self, session: CliSession) -> None:
+        live = await self.lookup(session.staff_session_id)
+        if live is None or session.worker is None:
+            return
+        message = next((m for m in await self.ingress.messages_of(live) if m.id == session.first_message_id), None)
+        if message is None or message.state in ("acknowledged", "failed"):
+            return
+        session.resend_first = False
+        session.worker.put(Pending(message.id, message.text, "queue", message.origin))
 
 
 def _render(turns: list[Turn], count: int) -> str:

@@ -231,6 +231,8 @@ class Terminals(SideChannels):
         """Taken by every change of a row's status, so a reconcile and an exit event cannot both end a
         terminal, and the second cannot overwrite the first's exit code with an unknown one."""
         self._freed = asyncio.Event()
+        self._line_moved = asyncio.Event()
+        """Set, and replaced, whenever a launch joins or leaves the line for a place under the cap."""
         self._subscribers: list[Subscriber] = []
         self._tasks: list[asyncio.Task[None]] = []
         self._closing = False
@@ -605,6 +607,21 @@ class Terminals(SideChannels):
         """Launches waiting for a place under the cap, oldest first, with who asked."""
         return [w.view() for w in self._queue]
 
+    async def wait_queue(self, predicate: Callable[[builtins.list[dict[str, Any]]], bool], *, timeout: float) -> bool:
+        """Wait until the line for a place under the cap satisfies ``predicate``; false on timeout.
+        Woken by the line moving, not by polling, so a loaded machine only makes it slower."""
+        try:
+            async with asyncio.timeout(timeout):
+                while not predicate(self.queue()):
+                    await self._line_moved.wait()
+        except TimeoutError:
+            return False
+        return True
+
+    def _line_changed(self) -> None:
+        self._line_moved.set()
+        self._line_moved = asyncio.Event()
+
     def _wake_waiters(self) -> None:
         if self._queue:
             self._freed.set()
@@ -642,6 +659,7 @@ class Terminals(SideChannels):
                     if waiter is None:
                         waiter = Waiter(actor=spec.created_by, env=spec.env, profile=spec.profile, owner=spec.owner, since=now_iso())
                         self._queue.append(waiter)
+                        self._line_changed()
                         logger.info("terminal launch by %s waits for a place: %d running, cap %d", spec.created_by, running, cap)
                     freed = self._freed
                 remaining = deadline - time.monotonic()
@@ -652,6 +670,7 @@ class Terminals(SideChannels):
         finally:
             if waiter is not None and waiter in self._queue:
                 self._queue.remove(waiter)
+                self._line_changed()
                 self._wake_waiters()  # the next in line may already fit
 
     async def _insert(self, row: dict[str, Any]) -> None:

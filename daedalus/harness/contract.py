@@ -204,6 +204,20 @@ class LaunchSpec:
     container and unreachable from the terminals container."""
     session_ref: str = ""
     """The CLI session to resume; empty for a new one."""
+    title: str = ""
+    """The session's display name (``Ada · Menu page``), for a CLI that shows one."""
+    team_block: str = ""
+    """The mandatory lines about the team (``harness.team.mandatory_block``) followed by the standing
+    brief, for the CLI's system-level channel. Composed by the runtime; the adapter only places it."""
+    team_skill: str = ""
+    """The ``daedalus-team`` skill's text, for a CLI that loads skills; the adapter writes it where
+    its CLI finds skills in the launch directory, never into the project folder."""
+    ask_hold_ms: int = 300_000
+    """How long ``AskOrchestrator`` is held for an answer; a CLI's own timeout on a tool call must be
+    set above it, or the CLI cuts the question short."""
+    report_hold_ms: int = 15_000
+    permission_hold_ms: int = 300_000
+    """How long a CLI's permission or question hook may be held for an answer given elsewhere."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +386,10 @@ class TerminalPort(Protocol):
 
     async def reply(self, reply_id: str, body: Any) -> bool:
         """Answer a held post; false when nothing waits any more (the hold expired, the CLI went)."""
+        ...
+
+    async def put_file(self, name: str, data: bytes) -> str:
+        """Add a file to the launch directory (a message too long to type) and return its path."""
         ...
 
 

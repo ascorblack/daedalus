@@ -697,6 +697,18 @@ its screen read: an idle prompt seen twice ends the turn, anything less shows as
 a failure. Its team tools post to the terminal service's hook listener and are answered there. The
 CLIs keep running when the host restarts, and the host takes them up again where they were.
 
+Claude Code is the first CLI that works as staff. Each launch gets its own settings overlay (hooks
+through the terminal service, the team tools allowed), a short statement of how to talk to the team
+in its system prompt, and a `daedalus-team` skill, all in the launch's directory and never in your
+own configuration or the project. Its permission requests and questions go to the orchestrator or to
+you as requests, answered through the held hook while Claude's own dialog stays on screen for you to
+answer there too. Messages go one at a time, only when the CLI can take them and never into a dialog,
+and each shows how far it got (`GET /api/staff/{id}/messages`); a turn that ends without a report is
+passed on with its last words. `GET /api/staff/{id}/session`, `…/transcript`, `…/events` and
+`…/changes` are what the staff view reads, and `POST /api/staff/{id}/messages` and `…/seen` its
+composer and its "read". The self-check after an update runs one short session, with one tiny prompt
+on the cheapest model.
+
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
 bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.

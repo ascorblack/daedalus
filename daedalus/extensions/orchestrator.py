@@ -49,6 +49,7 @@ CURSOR_KEY = "orchestrator_cursor:{project_id}"
 WAKE_TYPES = (
     "staff.status",
     "staff.report",
+    "staff.channel",
     "ask.pending",
     "ask.answered",
     "permission.pending",
@@ -730,7 +731,13 @@ class Orchestrators:
                 return None
             return Wake(f"staff:{event.staff_id}", urgent=status == "error")
         if kind == "staff.report":
+            if p.get("implicit") and event.staff_id:
+                # Made from a turn that ended with no report: it is that turn's end, and replaces the
+                # plain "finished a turn" line rather than following it.
+                return Wake(f"staff:{event.staff_id}", urgent=p.get("kind") in URGENT_REPORTS)
             return Wake(f"report:{event.seq}", urgent=p.get("kind") in URGENT_REPORTS)
+        if kind == "staff.channel":
+            return Wake(f"channel:{event.staff_id or event.seq}", urgent=False) if event.staff_id else None
         if kind in ("ask.pending", "permission.pending"):
             if not event.staff_id:
                 return None
@@ -812,7 +819,15 @@ class Orchestrators:
                 return f"{who(member)}'s session ended{': ' + detail if detail else ''}"
             return f"{who(member)} has gone silent{await self._on_task(member)}{': ' + detail if detail else ''} (silent is not failed)"
         if kind == "staff.report":
+            if p.get("implicit"):
+                name = member.name if member else ""
+                ending = "ended a turn with a question and no report" if p.get("kind") == "needs_input" else "finished a turn without a report"
+                return f"{who(member)} {ending}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\" — ReadStaff(\"{name}\") for the whole turn"
             return f"{who(member)} reported {p.get('kind')}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\""
+        if kind == "staff.channel":
+            if p.get("team_tools") == "missing":
+                return f"{who(member)}'s team tools are not connected: {_one_line(str(p.get('detail') or ''), 200)}. They keep working, but will not Report or AskOrchestrator; Tell and ReadStaff still work"
+            return f"{who(member)}'s team tools are connected now"
         if kind in ("ask.pending", "permission.pending"):
             ask = await self._ask_for_event(p)
             short = f" [{ask.short_id}]" if ask is not None else ""

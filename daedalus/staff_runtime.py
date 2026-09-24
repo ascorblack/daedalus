@@ -245,8 +245,9 @@ class TeamIngress(Protocol):
     async def message_state(self, message_id: str, state: str, error: str = "") -> None:
         """A later receipt for a message: a terminal write is ``written``, never ``acknowledged``."""
 
-    async def report(self, live: LiveSession, kind: str, note: str, artifacts: list[str] | None = None, remember: str | None = None) -> str:
-        """``checkpoint · needs_input · stuck · done``; returns what the reporter is told."""
+    async def report(self, live: LiveSession, kind: str, note: str, artifacts: list[str] | None = None, remember: str | None = None, *, call_id: str | None = None) -> str:
+        """``checkpoint · needs_input · stuck · done``; returns what the reporter is told. A report
+        with a ``call_id`` already recorded is not made again: it was a replay of the same call."""
 
     async def ask(self, live: LiveSession, question: str, options: list[str] | None = None, context: str = "") -> str:
         """A question for the orchestrator from the team server; returns the request's id at once."""
@@ -270,6 +271,18 @@ class TeamIngress(Protocol):
     async def ended(self, live: LiveSession, reason: str) -> None:
         """The executor ended on its own — the command-line agent exited — rather than being stopped.
         The session ends with that reason and its open requests are withdrawn."""
+
+    async def implicit_report(self, live: LiveSession, kind: str, text: str) -> None:
+        """A turn ended without the member reporting: ``turn_done`` with the end of its last message,
+        or ``needs_input`` when that message asks something. Published as a report the host made."""
+
+    async def channel(self, live: LiveSession, team_tools: str, detail: str = "") -> None:
+        """The member's team tools are ``connected`` or ``missing``: whether its reports and
+        questions can reach the team at all."""
+
+    async def messages_of(self, live: LiveSession) -> list[Any]:
+        """The session's messages, oldest first, with their receipt states: what a runtime taking a
+        session up after a restart still has to deliver or look for."""
 
 
 @dataclass

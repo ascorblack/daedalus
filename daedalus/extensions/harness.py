@@ -10,13 +10,15 @@ previous host left running.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from typing import TYPE_CHECKING, cast
 
-from daedalus.harness import ADAPTERS
+from daedalus.harness import ADAPTERS, claude  # noqa: F401 — importing an adapter registers it
 from daedalus.harness.manager import HarnessManager
 from daedalus.harness.ports import TerminalRunner
 from daedalus.harness.runtime import CliStaffRuntime, RuntimeEnvironment, install_runtimes
+from daedalus.harness.selfcheck import session_check
 from daedalus.stores.harness import HarnessStore
 
 if TYPE_CHECKING:
@@ -86,6 +88,10 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     tasks = [asyncio.create_task(harness.run(), name="harness-check"), asyncio.create_task(closer(), name="harness-close")]
     team = cast("Team | None", app.extensions.get("staff"))
     terminals = cast("Terminals | None", app.extensions.get("terminals"))
+    if terminals is not None:
+        # The session part of each CLI's self-check: one short session through the adapter.
+        for name, factory in ADAPTERS.items():
+            harness.self_checks[name] = functools.partial(session_check, factory(), terminals, lambda: app.config.harness)
     if team is None or terminals is None:
         # Without the team or the terminals there is nothing to run a CLI for or in; command-line
         # members are then refused at assignment with the runtime's absence as the reason.
