@@ -321,12 +321,12 @@ async def test_the_self_check_runs_a_codex_session_through_every_channel(setting
         assert running == []  # the app servers went with their checks
 
 
-async def test_installing_the_extension_registers_the_codex_runtime(settings: Settings, db: Database) -> None:
+async def test_installing_the_extension_registers_the_codex_and_opencode_runtimes(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **codex()) as s:
         app = SimpleNamespace(manager=s.manager, extensions={"terminals": s.terminals, "staff": s.team}, config=SimpleNamespace(harness=s.harness), db=db)
         tasks = await install_harness(app)  # type: ignore[arg-type]
         try:
-            for name in ("codex",):
+            for name in ("codex", "opencode"):
                 assert isinstance(s.team.runtimes[name], CliStaffRuntime)
                 assert name in app.extensions["harness"].self_checks
         finally:

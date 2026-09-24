@@ -14,6 +14,7 @@ import pytest
 
 import daedalus.harness.claude  # noqa: F401 — registers the adapters there are, whichever test ran first
 import daedalus.harness.codex  # noqa: F401
+import daedalus.harness.opencode  # noqa: F401
 from daedalus.harness.catalog import HarnessCatalog
 from daedalus.harness.contract import (
     AgentEntry,
@@ -163,6 +164,6 @@ async def test_the_catalog_lists_every_harness_with_what_is_derived_from_the_cod
     assert (entries["opencode"]["tested"], entries["opencode"]["supported"]) == (False, False)
     assert (entries["codex"]["installed"], entries["codex"]["tested"], entries["codex"]["logged_in"]) == (False, False, "unknown")
     # The listing says which can run rather than offering a harness nothing can run.
-    assert [name for name, e in entries.items() if e["adapter"]] == ["claude", "codex"]
+    assert [name for name, e in entries.items() if e["adapter"]] == ["claude", "codex", "opencode"]
     assert all(not e["installed"] for e in await catalog.harnesses("host"))
     assert catalog.capabilities("grok").steer == "cancel_and_send"

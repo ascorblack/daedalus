@@ -21,6 +21,7 @@ import pytest
 
 import daedalus.harness.claude  # noqa: F401 — registers the adapters there are, whichever test ran first
 import daedalus.harness.codex  # noqa: F401
+import daedalus.harness.opencode  # noqa: F401
 from daedalus.config import HarnessConfig
 from daedalus.harness.contract import CheckResult, CheckStep, EnvironmentPort
 from daedalus.harness.manager import NODE, HarnessManager, HarnessRefused
