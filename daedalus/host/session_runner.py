@@ -593,8 +593,13 @@ class SessionManager:
         return state.run_origin in OPERATOR_ORIGINS and not any(state.metadata.get(key) for key in NOT_OPERATOR_FACING)
 
     def _telegram_delivers(self, state: SessionState) -> bool:
-        """Whether the Telegram front shows this session's answers, questions and approvals itself."""
-        return bool(self.settings.telegram_bot_token) and not state.metadata.get("telegram_detached")
+        """Whether the Telegram front shows this session's answers, questions and approvals itself.
+
+        A subagent never speaks in Telegram (the front refuses it an outbox), so counting it as
+        delivered there would hide its result from push and the unread mark as well.
+        """
+        metadata = state.metadata
+        return bool(self.settings.telegram_bot_token) and not metadata.get("telegram_detached") and not metadata.get("subagent_of")
 
     @staticmethod
     def _event_ids(state: SessionState) -> dict[str, str | None]:

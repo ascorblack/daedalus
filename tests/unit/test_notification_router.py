@@ -520,6 +520,21 @@ async def test_telegram_lines_go_to_the_session_topic_and_never_to_a_detached_on
         await host.close()
 
 
+async def test_a_subagent_is_kept_off_telegram_even_when_its_leader_is_bound(settings: Settings, db: Database) -> None:
+    front = FakeFront()
+    host, service = await host_with(settings, db, front=front)
+    try:
+        leader = await host.manager.create_session("leader")
+        worker = await host.manager.create_session("worker", metadata={"subagent_of": leader.session.id})
+        await service.post(Draft("permission", "Worker waits", session_id=worker.session.id, request_ref=f"policy:{worker.session.id}:0123456789ab"))
+        assert front.topics == []
+        assert front.notified == []
+        delivered = {e["title"]: e["delivered"]["telegram"] for e in await entries(service)}
+        assert delivered == {"Worker waits": "skipped: kept off Telegram"}
+    finally:
+        await host.close()
+
+
 async def test_the_router_writes_in_the_operators_language(settings: Settings, db: Database) -> None:
     host, service = await host_with(settings, db)
     try:

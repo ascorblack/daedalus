@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from daedalus.terminals import load as load_math
 from daedalus.terminals import wire
-from daedalus.terminals.client import PtydClient, Unavailable
+from daedalus.terminals.client import Channel, PtydClient, Unavailable
 from daedalus.terminals.endpoint import remember_hook_port
 from daedalus.terminals.model import (
     ENVS,
@@ -164,6 +164,23 @@ class Waiter:
 
     def view(self) -> dict[str, Any]:
         return {"id": self.id, "actor": self.actor, "env": self.env, "profile": self.profile, "owner": {"kind": self.owner.kind, "id": self.owner.id}, "since": self.since}
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """One browser's channel to one terminal, as the daemon opened it."""
+
+    terminal_id: str
+    env: str
+    client_id: str
+    channel: Channel
+    client: PtydClient
+
+    @property
+    def service_alive(self) -> bool:
+        """Whether the connection the channel runs over is still up. A channel that closed while it
+        is tells "the terminal let go of this client" apart from "the terminal service went away"."""
+        return self.client.connected
 
 
 Subscriber = Callable[[TerminalEvent], Awaitable[None]]
@@ -1106,6 +1123,38 @@ class Terminals:
         await self._call(row["env"], "terminal.resize", {"id": terminal_id, "cols": cols, "rows": rows}, what="resizing the terminal")
         await self.db.execute("UPDATE terminals SET cols = ?, rows = ? WHERE id = ?", (cols, rows, terminal_id))
 
+    # -- attachments ------------------------------------------------------------------------
+
+    async def attachable(self, terminal_id: str) -> dict[str, Any]:
+        """The row of a terminal a browser may be handed a ticket for; raises what the ticket answers.
+
+        A lost terminal went with its daemon, so there is nothing to show and it is refused as
+        unknown. An exited one is still attachable: the daemon keeps its last screen until it is
+        forgotten, and that screen is what a person opening it wants to see.
+        """
+        row = await self._row(terminal_id)
+        if row["status"] == "lost":
+            raise NotFound(f"terminal {terminal_id} was lost with its terminal service")
+        self._client(row["env"])
+        return row
+
+    async def attach(self, terminal_id: str, *, read_only: bool, label: str, via: str) -> Attachment:
+        """Open an attachment channel for a browser; the caller relays it and closes it.
+
+        ``read_only`` goes to the daemon with the client, which ORs it with what the browser's own
+        ATTACH says, so a browser can lower its rights and never raise them.
+        """
+        row = await self.attachable(terminal_id)
+        client = self._client(row["env"])
+        params = {"id": terminal_id, "client": {"kind": "viewer" if read_only else "human", "label": label[:256], "via": via[:256], "read_only": read_only}}
+        try:
+            result = await client.call("terminal.attach", params)
+        except Unavailable as exc:
+            raise EnvUnavailable(f"attaching: the {row['env']} terminal service is not available: {exc.detail}", env=row["env"], reason=exc.reason) from None
+        except wire.RpcError as exc:
+            raise rpc_failure(exc, "attaching") from None
+        return Attachment(terminal_id=terminal_id, env=row["env"], client_id=str(result.get("client_id") or ""), channel=client.channel(int(result["channel"])), client=client)
+
     async def agent_service(self, op: str, **kwargs: Any) -> Any:
         """What a session's own agent may ask of its terminals: read them, never write them.
 
@@ -1127,4 +1176,4 @@ class Terminals:
         raise InvalidRequest(f"unknown terminal operation {op!r}")
 
 
-__all__ = ["Terminals", "TerminalView", "Waiter", "iso", "now_iso"]
+__all__ = ["Attachment", "Terminals", "TerminalView", "Waiter", "iso", "now_iso"]
