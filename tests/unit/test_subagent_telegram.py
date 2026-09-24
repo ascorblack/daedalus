@@ -12,11 +12,11 @@ from typing import Any
 from aiogram.filters import CommandObject
 from aiogram.types import Message
 
-from daedalus.extensions.inbox import Inbox
+from daedalus.extensions.notifications import NotificationService
 from daedalus.extensions.scheduler import Scheduler
 from daedalus.transport.telegram.front import TelegramFront
 from tests.unit.test_front import RecordingBot, _message, front  # noqa: F401 — the fixture is reused here
-from tests.unit.test_inbox_heartbeat_scheduler import FakeFront, app  # noqa: F401 — the fixture is reused here
+from tests.unit.test_heartbeat_scheduler import FakeFront, app  # noqa: F401 — the fixture is reused here
 
 
 def _said(message: Message, replies: list[str]) -> Message:
@@ -119,12 +119,18 @@ async def test_use_will_not_point_the_private_chat_at_a_subagent(front: Telegram
 async def test_a_subagent_s_reminder_goes_to_the_inbox_and_not_to_the_chat(app: Any) -> None:  # noqa: F811
     leader = await app.manager.create_session("leader")
     worker = await app.manager.create_session("[sub] worker", metadata={"subagent_of": leader.session.id})
+
+    async def metadata(session_id: str) -> Any:
+        state = app.manager.live_state(session_id)
+        return state.metadata if state is not None else None
+
+    # The router reads a session's marks as the installed service does, so it learns this is a subagent.
+    app.notifications = NotificationService(app.db, app.manager.bus, front=lambda: app.front, session_metadata=metadata)
     scheduler = Scheduler(app)
     created = await scheduler.create(name="check", prompt="look again", cron=None, run_at="2026-01-01T00:00:00Z", kind="message", created_by_session=worker.session.id)
     row = await app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (created["id"],))
     await scheduler.fire(dict(row))
     fake: FakeFront = app.front
     assert fake.outbox.sent == [] and fake.notified == []
-    inbox: Inbox = app.extensions["inbox"]
-    entries = await inbox.list()
-    assert [(e["kind"], e["severity"]) for e in entries] == [("reminder", "notice")]
+    entries = (await app.notifications.list())["entries"]
+    assert [(e["kind"], e["category"]) for e in entries] == [("reminder", "reminder")]
