@@ -45,6 +45,9 @@ func Prepare(runDir, listen string) (*Endpoint, error) {
 	if err := os.Chmod(runDir, 0o700); err != nil {
 		return nil, err
 	}
+	if err := RestrictDir(runDir); err != nil {
+		return nil, err
+	}
 	unlock, err := lockDir(filepath.Join(runDir, LockFile))
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %v", ErrHeld, runDir, err)
@@ -131,6 +134,10 @@ func (e *Endpoint) Release() {
 func writeAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := restrictFile(tmp); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)

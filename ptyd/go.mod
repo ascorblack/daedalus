@@ -9,4 +9,6 @@ require (
 	// The Go bindings of libghostty-vt, the screen emulator, pinned to one commit. The library
 	// itself is built from the commit in libghostty/pins.env; the two are bumped together.
 	go.mitchellh.com/libghostty v0.0.0-20260920220152-31b65cdc24cf
+	// Windows: the pseudoconsole, job objects and access lists, which the standard library leaves out.
+	golang.org/x/sys v0.48.0
 )

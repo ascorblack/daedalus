@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -159,10 +160,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 				integrate = *p.Shell.Integration
 			}
 		}
-		argv = []string{shell}
-		if login {
-			argv = append(argv, "-l")
-		}
+		argv = shellint.PlainArgs(shell, login, runtime.GOOS)
 		if kind := shellint.KindOf(shell); integrate && kind != "" && d.ShellDir != "" {
 			userZdotdir, hasZdotdir := lookupEnv(env, "ZDOTDIR")
 			if l, ok := shellint.Rewrite(kind, shell, login, d.ShellDir, nonce, userZdotdir, hasZdotdir); ok {

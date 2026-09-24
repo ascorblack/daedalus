@@ -113,6 +113,7 @@ if [ "$platform" = "macos" ]; then
 else
   tar -xzf "$work/$asset" -C "$target"
   chmod +x "$target/daedalus-desktop"
+  if [ -f "$target/ptyd" ]; then chmod +x "$target/ptyd"; fi
   say ""
   say "Installed $tag into $target."
   say "Run it:  cd '$target' && ./daedalus-desktop"

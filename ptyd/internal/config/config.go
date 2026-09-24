@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -77,7 +78,7 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&c.Env, "env", "", "environment name (container or host)")
 	fs.StringVar(&c.RunDir, "run-dir", "", "run directory: endpoint, token and socket")
 	fs.StringVar(&c.StateDir, "state-dir", "", "state directory: logs and journals")
-	fs.StringVar(&c.Listen, "listen", "unix", `"unix" or "tcp:127.0.0.1:<port>"`)
+	fs.StringVar(&c.Listen, "listen", DefaultListen(runtime.GOOS), `"unix" or "tcp:127.0.0.1:<port>"`)
 	fs.StringVar(&c.Home, "home", "", "home directory of spawned shells (default $HOME)")
 	fs.StringVar(&c.Shell, "shell", "", "login shell (default $SHELL, then the passwd entry)")
 	fs.StringVar(&c.HooksListen, "hooks-listen", "127.0.0.1:0", "loopback address of the hook listener")
@@ -191,6 +192,17 @@ func (c *Config) load(path string) error {
 	return nil
 }
 
+// DefaultListen is where a daemon listens unless told otherwise: its run directory's socket, and on
+// Windows a loopback TCP port. Windows has unix sockets, but the host's Python has no client for
+// them there (asyncio opens unix connections only on Unix), which is also why the supervisor listens
+// on TCP on Windows.
+func DefaultListen(goos string) string {
+	if goos == "windows" {
+		return "tcp:127.0.0.1:0"
+	}
+	return "unix"
+}
+
 // checkLoopback refuses a hook listener address off the loopback interface. The listener speaks
 // for running CLIs with nothing but a bearer token, and that token is not meant to cross a network.
 func checkLoopback(addr string) error {
@@ -212,7 +224,7 @@ func checkLoopback(addr string) error {
 // when nothing did, which is the case inside a container started with a bare environment.
 func DefaultShell() string {
 	if runtime.GOOS == "windows" {
-		return "powershell.exe"
+		return WindowsShell(exec.LookPath)
 	}
 	if s := os.Getenv("SHELL"); s != "" && executable(s) {
 		return s
@@ -226,6 +238,16 @@ func DefaultShell() string {
 		}
 	}
 	return "/bin/sh"
+}
+
+// WindowsShell is the shell of a Windows host: PowerShell 7 (pwsh) when it is installed, else the
+// Windows PowerShell every Windows has. By name, not by path: the terminal's own PATH resolves it,
+// as it resolves every program.
+func WindowsShell(lookPath func(string) (string, error)) string {
+	if _, err := lookPath("pwsh.exe"); err == nil {
+		return "pwsh.exe"
+	}
+	return "powershell.exe"
 }
 
 func passwdShell(uid int) string {
@@ -250,8 +272,18 @@ func executable(path string) bool {
 	return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
 }
 
-// Shells lists the login shells installed here, from /etc/shells, for `daemon.info`.
+// Shells lists the login shells installed here, from /etc/shells, for `daemon.info`. Windows has
+// no such list; there it is the shells a terminal may be asked for that PATH finds.
 func Shells() []string {
+	if runtime.GOOS == "windows" {
+		var out []string
+		for _, name := range []string{"pwsh.exe", "powershell.exe", "cmd.exe"} {
+			if p, err := exec.LookPath(name); err == nil {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
 	data, err := os.ReadFile("/etc/shells")
 	if err != nil {
 		return nil

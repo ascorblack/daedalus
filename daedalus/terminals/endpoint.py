@@ -9,9 +9,10 @@ sides of the mount.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 ENDPOINT_FILE = "endpoint"
 TOKEN_FILE = "token"
+UNAVAILABLE_FILE = "unavailable"
 
 
 class EndpointMissing(Exception):
@@ -48,8 +50,10 @@ def permission_detail(path: Path, exc: OSError) -> str:
     userns-remap is an unprivileged user on the host and does not, and nothing in the container can
     change that.
     """
+    # Windows has no uid; there the access list of the run directory is the whole story.
+    who = f"uid {os.getuid()}" if hasattr(os, "getuid") else "this user"
     return (
-        f"{path}: {exc.strerror or exc} — this process runs as uid {os.getuid()} and may not open the terminal service's files; "
+        f"{path}: {exc.strerror or exc} — this process runs as {who} and may not open the terminal service's files; "
         "with rootless Docker or userns-remap, root in the container is not root on the host"
     )
 
@@ -66,6 +70,11 @@ def read_endpoint(run_dir: Path) -> Endpoint:
         # An empty directory is what setup leaves whether or not the service was installed, so it
         # reads as not installed. One a daemon has used (its lock, its token) held a daemon that
         # stopped — it removes its endpoint first thing when it does.
+        # A native launcher that has no daemon to run leaves its reason here instead.
+        note = run_dir / UNAVAILABLE_FILE
+        if note.is_file():
+            with contextlib.suppress(OSError):
+                raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or "the terminal service is not available") from None
         if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock")):
             raise EndpointMissing("not_running", f"the terminal service in {run_dir} is not running") from None
         raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}{owned_by_root(run_dir)}") from None
@@ -97,6 +106,10 @@ def owned_by_root(run_dir: Path) -> str:
     cannot write its files into that directory, so installing it would fail until it is handed over.
     Inside the container the directory's owner is the one fact available; the fix is on the host.
     """
+    if os.name == "nt":
+        # Windows reports every file as owned by uid 0, so the note would always be wrong there; and
+        # nothing there is a Docker bind-mount source for a host daemon.
+        return ""
     try:
         owner = run_dir.stat().st_uid
     except OSError:
@@ -122,7 +135,9 @@ and dial sockets, and the journal of agent writes."""
 
 
 def remember_state_dir(run_dir: Path, state_dir: str) -> None:
-    if state_dir.startswith("/"):
+    # Absolute by the rules of the daemon's system: a Windows daemon reports "C:\\...", which a
+    # startswith("/") test used to drop, leaving its launch overlays unsealed natively on Windows.
+    if state_dir.startswith("/") or PureWindowsPath(state_dir).is_absolute():
         _state_dirs[str(run_dir)] = state_dir
     else:
         _state_dirs.pop(str(run_dir), None)

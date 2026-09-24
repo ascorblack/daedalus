@@ -10,6 +10,12 @@
 # with `-tags nowebview` and no cgo at all: a Linux binary linked against WebKitGTK cannot start on
 # a machine without it, so the Linux archives keep the browser fallback and keep running everywhere.
 # That is also why both Linux architectures still come off one runner.
+#
+# Each archive also carries ptyd, the terminal daemon a native installation runs for its host
+# terminals. It is Go with a C library linked in (the screen emulator, which Zig builds), so it is
+# built by ptyd/release.sh rather than by `go build` alone: Linux and Windows cross-compiled from one
+# Linux runner with the pinned Zig as the C compiler (Linux fully static against musl, so it starts
+# on any distribution), the Mac on the Mac runner with Apple's compiler.
 name: desktop
 
 # `test` and `window` run on every change to the launcher, not only on a tag: `window` is the only
@@ -20,9 +26,9 @@ on:
   push:
     tags: ["desktop-v*"]
     branches: [main]
-    paths: ["desktop/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "ptyd/**", ".github/workflows/desktop.yml"]
   pull_request:
-    paths: ["desktop/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "ptyd/**", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 
 permissions:
@@ -65,6 +71,82 @@ jobs:
         working-directory: desktop
       - run: go vet ./...
         working-directory: desktop
+
+  # The daemon's tests on each system it ships for. Linux and the Mac build the emulator and test with
+  # it; Windows tests without cgo, which is what runs its pseudoconsole and job object for real — the
+  # daemon's Windows half is otherwise only cross-compiled, and this job is the first place it runs.
+  ptyd-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ptyd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ptyd/go.mod
+          cache-dependency-path: ptyd/go.sum
+      - name: Test with the emulator
+        if: runner.os != 'Windows'
+        run: |
+          command -v pkg-config >/dev/null || brew install pkgconf
+          PKG_CONFIG_PATH="$(libghostty/build.sh)"
+          export PKG_CONFIG_PATH
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test ./...
+          GOOS=windows go vet ./...
+          GOOS=windows GOARCH=arm64 go vet ./...
+      - name: Test the pseudoconsole
+        if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go test ./...
+
+  ptyd:
+    needs: [ptyd-test]
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            targets: "linux/amd64 linux/arm64 windows/amd64 windows/arm64"
+          - runner: macos-latest
+            targets: "darwin/amd64 darwin/arm64"
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ptyd/go.mod
+          cache-dependency-path: ptyd/go.sum
+      - name: Build
+        run: |
+          command -v pkg-config >/dev/null || brew install pkgconf
+          mkdir -p ptyd-dist
+          for t in ${{ matrix.targets }}; do
+            goos=${t%/*} goarch=${t#*/}
+            out="ptyd-dist/ptyd-$goos-$goarch"
+            case "$goos" in windows) out="$out.exe";; esac
+            ptyd/release.sh "$goos" "$goarch" "$PWD/$out"
+          done
+          ls -l ptyd-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ptyd-${{ runner.os }}
+          path: ptyd-dist
+          retention-days: 1
 
   binaries:
     needs: [test, window]
@@ -138,7 +220,7 @@ jobs:
   # notarytool. It is the last job, so it is also the one that publishes: the checksums have to
   # cover every archive, including its own.
   package:
-    needs: binaries
+    needs: [binaries, ptyd]
     if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: macos-latest
     steps:
@@ -149,6 +231,12 @@ jobs:
           pattern: desktop-*
           merge-multiple: true
           path: desktop/dist/bin
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ptyd-*
+          merge-multiple: true
+          path: desktop/dist/ptyd
 
       # The app itself, built once and put in every archive. A native installation has no image to
       # bake it into and may have no node to build it with, so without this the launcher would fetch
@@ -170,15 +258,18 @@ jobs:
           # The tarball keeps the executable's mode, which is the whole point of shipping one: the
           # file comes out of it runnable, with nothing to chmod first. An artifact does not keep
           # that mode, so it is set again here.
+          # ptyd goes beside the launcher, where it looks for it.
           cp -R ../miniapp/dist stage/miniapp-dist
           for arch in amd64 arm64; do
             cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
-            chmod +x stage/daedalus-desktop
-            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop miniapp-dist
-            rm stage/daedalus-desktop
+            cp "dist/ptyd/ptyd-linux-$arch" stage/ptyd
+            chmod +x stage/daedalus-desktop stage/ptyd
+            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop ptyd miniapp-dist
+            rm stage/daedalus-desktop stage/ptyd
           done
           cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
-          (cd stage && zip -qr ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe miniapp-dist)
+          cp dist/ptyd/ptyd-windows-amd64.exe stage/ptyd.exe
+          (cd stage && zip -qr ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe ptyd.exe miniapp-dist)
           rm -rf stage
           ls -l dist/archives
 
@@ -191,7 +282,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          chmod +x dist/bin/daedalus-desktop-darwin-*
+          chmod +x dist/bin/daedalus-desktop-darwin-* dist/ptyd/ptyd-darwin-*
+          export PTYD_AMD64=dist/ptyd/ptyd-darwin-amd64 PTYD_ARM64=dist/ptyd/ptyd-darwin-arm64
           MINIAPP_DIST=../miniapp/dist ./package-macos.sh "${{ github.ref_name }}" \
             dist/bin/daedalus-desktop-darwin-amd64 \
             dist/bin/daedalus-desktop-darwin-arm64 \

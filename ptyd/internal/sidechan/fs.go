@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -62,6 +63,9 @@ func NewFS(cfgRoots, cfgDeny, sealed []string, home string) (*FS, error) {
 // relative pattern would match nothing, silently.
 func compilePattern(pattern string) ([]string, error) {
 	p := filepath.ToSlash(pattern)
+	if foldPaths {
+		p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	}
 	if !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "**/") {
 		return nil, fmt.Errorf("deny pattern %q must be absolute or start with **/", pattern)
 	}
@@ -141,7 +145,7 @@ func (f *FS) rootRefusal(clean, real string) string {
 	if r, err := filepath.EvalSymlinks(f.home); err == nil {
 		homes = append(homes, r)
 	}
-	if clean == "/" || real == "/" {
+	if isVolumeRoot(clean) || isVolumeRoot(real) {
 		return "is the root of the filesystem"
 	}
 	reason := ""
@@ -156,6 +160,11 @@ func (f *FS) rootRefusal(clean, real string) string {
 		}
 	}
 	return reason
+}
+
+// isVolumeRoot reports "/" or, on Windows, a drive's or a share's root (`C:\`, `\\host\share\`).
+func isVolumeRoot(p string) bool {
+	return p == "/" || filepath.Dir(p) == p
 }
 
 // checkRoot resolves a path the host is about to make a root and holds it to the rules a root is
@@ -242,15 +251,32 @@ func (f *FS) Roots() []string {
 }
 
 // under reports whether p is dir or inside it.
-func under(dir, p string) bool {
-	if dir == "/" {
-		return true
+func under(dir, p string) bool { return underPath(dir, p, filepath.Separator, foldPaths) }
+
+// foldPaths says that a path names the same file whatever its case, as on Windows. There every
+// comparison of paths with roots, the sealed directories and the deny list is made in lower case:
+// otherwise ".SSH\id_ed25519" would pass a rule written for ".ssh".
+var foldPaths = runtime.GOOS == "windows"
+
+// underPath is under with the separator and the case rule given, so the Windows rules are tested
+// everywhere. A directory that ends in its separator is a volume's root ("C:\" or "/").
+func underPath(dir, p string, sep byte, fold bool) bool {
+	if fold {
+		dir, p = strings.ToLower(dir), strings.ToLower(p)
 	}
-	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
+	if dir == "/" || (len(dir) > 0 && dir[len(dir)-1] == sep) {
+		return strings.HasPrefix(p, dir)
+	}
+	return p == dir || strings.HasPrefix(p, dir+string(sep))
 }
 
 func (f *FS) denied(p string) bool {
-	segs := strings.Split(strings.TrimPrefix(filepath.ToSlash(p), "/"), "/")
+	p = filepath.ToSlash(p)
+	if foldPaths {
+		// A Windows path, spelled with either separator, in lower case.
+		p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	for _, pat := range f.deny {
 		if matchSegments(pat, segs) {
 			return true

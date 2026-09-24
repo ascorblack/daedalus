@@ -110,11 +110,22 @@ func (p *Prober) probe(done chan struct{}) {
 	close(done)
 }
 
+// platformName is how the operator knows the system: the reason is shown in the app as it is.
+func platformName(goos string) string {
+	switch goos {
+	case "windows":
+		return "Windows"
+	case "darwin":
+		return "macOS"
+	}
+	return goos
+}
+
 func (p *Prober) check() string {
 	if p.goos != "linux" {
 		// bubblewrap is a Linux facility built on user namespaces; elsewhere there is nothing to probe,
 		// and probing would report missing software rather than the platform it is.
-		return "not available on " + p.goos
+		return "not available on " + platformName(p.goos)
 	}
 	if p.bwrap == "" {
 		return "bwrap is not installed"
