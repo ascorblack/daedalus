@@ -49,6 +49,8 @@ class FakeTerminal:
     commands: list[dict[str, Any]] | None = None
     """The shell's commands, likewise; without, ``terminal.commands`` says the program reports none."""
     pid: int = field(default_factory=lambda: 1000 + secrets.randbelow(30000))
+    sandbox: dict[str, Any] | None = None
+    """What ``terminal.create`` was asked to make writable, when it was sandboxed."""
 
     def info(self, preview_rows: int = 0) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -57,7 +59,7 @@ class FakeTerminal:
             "last_output_at": None, "last_input_at": None, "last_human_input_at": None, "cols": self.cols, "rows": self.rows,
             "size_owner": None, "clients": [], "last_detach_at": None, "keyboard": {"owner": "auto", "until": None},
             "modes": {"alt_screen": False, "bracketed_paste": False, "mouse": False, "app_cursor": False}, "busy": False,
-            "last_command": None, "labels": self.labels, "launch_id": "", "sandbox": False, "output_seq": len(self.output),
+            "last_command": None, "labels": self.labels, "launch_id": "", "sandbox": self.sandbox is not None, "output_seq": len(self.output),
         }
         if preview_rows and self.preview is not None:
             out["preview"] = self.preview[-preview_rows:]
@@ -97,6 +99,9 @@ class FakePtyd:
         self.daemon: dict[str, Any] = {"pid": 1, "rss_bytes": 30 << 20, "cpu_percent": 0.5}
         self.rss: dict[str, int] = {}
         self.home = "/root"
+        self.sandbox = "not available in this build"
+        """The sandbox capability: ``ok`` makes ``terminal.create {sandbox}`` succeed, leaving read-only
+        every writable folder that does not exist here, as the real daemon does."""
         # Side channels: scripted programs, real files under the roots the host sets, echoing byte
         # streams, and launches whose hook posts a test makes with ``post_hook``.
         self.exec_allow = {"claude", "codex", "opencode", "pi", "grok", "npm", "npx", "node", "git", "uname"}
@@ -319,26 +324,33 @@ class FakePtyd:
         if method == "daemon.info":
             running = sum(1 for t in self.terminals.values() if t.status == "running")
             return {"version": "fake", "protocol": self.protocol, "instance": self.instance, "env": self.env, "home": self.home, "shell": "/bin/bash",
-                    "capabilities": {"sandbox": "not available in this build", "emulator": "fake@1", "stats": "ok"}, "hooks": {"listen": ""},
+                    "capabilities": {"sandbox": self.sandbox, "emulator": "fake@1", "stats": "ok"}, "hooks": {"listen": ""},
                     "side_channels": {"exec_allow": sorted(self.exec_allow), "fs_roots": self.roots, "state_dir": f"{self.run_dir}-state"},
                     "counts": {"running": running, "exited": len(self.terminals) - running}, "machine": self.machine}
         if method == "events.unsubscribe":
             return {}
         if method == "terminal.create":
-            if params.get("sandbox"):
-                raise _RpcFail(1007, "the sandbox is not available in this build")
+            box = params.get("sandbox")
+            if box is not None and self.sandbox != "ok":
+                raise _RpcFail(1007, f"the sandbox is not available: {self.sandbox}")
             if params["id"] in self.terminals:
                 raise _RpcFail(1004, "id in use")
             cwd = params.get("cwd") or self.home
             fallback = not Path(cwd).is_dir()
             term = FakeTerminal(params["id"], params.get("argv") or ["/bin/bash", "-l"], self.home if fallback else cwd, dict(params.get("labels") or {}), params.get("cols") or 80, params.get("rows") or 24, title=params.get("title") or "")
+            reply: dict[str, Any] = {}
+            if box is not None:
+                writable = [p for p in box.get("writable") or [] if Path(p).is_dir()]
+                skipped = [{"path": p, "reason": "missing"} for p in box.get("writable") or [] if p not in writable]
+                term.sandbox = {"writable": writable, "skipped": skipped}
+                reply["sandbox"] = term.sandbox
             self.terminals[term.id] = term
             if params.get("launch_id") and params["launch_id"] not in self.launches:
                 del self.terminals[term.id]
                 raise _RpcFail(1008, "launch is not registered or has ended")
             self.emit("terminal.created", term.id, {"pid": term.pid, "argv": term.argv, "cwd": term.cwd, "labels": term.labels, "launch_id": params.get("launch_id") or ""})
             integration = "" if params.get("argv") else "bash"
-            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "shell_integration": integration, "created_at": term.created_at}
+            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "shell_integration": integration, "created_at": term.created_at, **reply}
         if method == "terminal.list":
             ids = params.get("ids")
             return {"terminals": [t.info(int(params.get("preview_rows") or 0)) for t in self.terminals.values() if not ids or t.id in ids]}

@@ -281,6 +281,24 @@ func (r *Registry) env(l *Launch, base string) map[string]string {
 	}
 }
 
+// Paths is what a program started with a launch reaches on disk: the overlay files, the dial
+// directory, the directory of the hook command, and the daemon executable that command is. A
+// sandbox that hides the daemon's state directory binds these back.
+type Paths struct {
+	Dir, Dial, Bin, Exe string
+}
+
+// Paths returns the launch's paths, and whether the launch is open.
+func (r *Registry) Paths(launchID string) (Paths, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l := r.launches[launchID]
+	if l == nil || l.closed {
+		return Paths{}, false
+	}
+	return Paths{Dir: l.Dir, Dial: l.DialDir, Bin: r.binDir(), Exe: r.ptyd}, true
+}
+
 // Env is the environment of a terminal started with the launch, and whether the launch is open.
 func (r *Registry) Env(launchID string) (map[string]string, bool) {
 	r.mu.Lock()

@@ -66,7 +66,9 @@ class EnvStatus:
     ``unreachable``, ``permission_denied``, ``protocol_mismatch``; empty when available."""
     detail: str = ""
     version: str = ""
-    sandbox: bool = False
+    sandbox: str = ""
+    """``ok`` when the environment's daemon can run a terminal in the sandbox; otherwise why not, in
+    the daemon's words; empty while the environment is unavailable."""
     shell: str = ""
     home: str = ""
     port_range: str = ""

@@ -5,7 +5,7 @@ import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
 import type { OnboardingState } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
-import { back, migrateLegacyLocation, navigate, pathFor, projectPagePath, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
+import { back, migrateLegacyLocation, navigate, pathFor, projectHome, projectPagePath, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { Sidebar, useSidebar } from "./sidebar";
 import { NavMenu } from "./navmenu";
@@ -25,6 +25,8 @@ import { startEvents } from "./events";
 import { useSummary } from "./notifications";
 import { NotificationToasts } from "./toasts";
 import { listenForOpen, syncPush } from "./push";
+import { Icon } from "./icons";
+import { focusView } from "./project/focus";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -67,8 +69,8 @@ const TerminalsScreen = lazy(screen(() => import("./screens/Terminals").then((m)
 const TerminalFullScreen = lazy(screen(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
 const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
-const TeamPage = lazy(screen(() => import("./team/TeamPage").then((m) => ({ default: m.TeamPage }))));
-const ProjectBoard = lazy(screen(() => import("./board/ProjectBoard").then((m) => ({ default: m.ProjectBoard }))));
+const ProjectScreen = lazy(screen(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
+const ProjectSidebar = lazy(screen(() => import("./project/ProjectSidebar").then((m) => ({ default: m.ProjectSidebar }))));
 const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
@@ -277,8 +279,13 @@ export function App() {
     };
   }, []);
 
+  // A project's focus mode: entering a project's route swaps the sessions column for the project's own
+  // and puts the project in the centre. The decision is made here and nowhere else, so every other
+  // screen keeps the shell it always had.
+  const focusProject = route.screen === "project" ? route.project : null;
+  const focusChat = !!focusProject && (route.page === null || route.page === "s");
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
-  const inDetail = !!route.session || !!route.detail;
+  const inDetail = !!route.session || !!route.detail || !!focusProject;
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
@@ -287,12 +294,12 @@ export function App() {
       tg.enableVerticalSwipes?.();
       return;
     }
-    const onBack = () => back(pathFor(route.screen));
+    const onBack = () => back(focusProject ? pathFor("agents") : pathFor(route.screen));
     tg.BackButton.onClick(onBack);
     tg.BackButton.show();
     tg.disableVerticalSwipes?.();
     return () => tg.BackButton?.offClick(onBack);
-  }, [inDetail, route.screen]);
+  }, [inDetail, route.screen, focusProject]);
 
   // The list screens come back where the reader left them.
   const main = useRef<HTMLDivElement>(null);
@@ -349,6 +356,7 @@ export function App() {
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
       { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
       ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => pickProject(p.id) })),
+      ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `open-${p.id}`, label: t("focus.palette", { name: p.name }), icon: "conductor" as const, run: () => navigate(projectHome(p.id)) })),
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `team-${p.id}`, label: t("shell.search.team", { name: p.name }), icon: "bots" as const, run: () => navigate(projectPagePath(p.id, "team")) })),
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `board-${p.id}`, label: t("shell.search.board", { name: p.name }), icon: "board" as const, run: () => navigate(projectPagePath(p.id, "board")) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
@@ -425,14 +433,11 @@ export function App() {
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
         {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
-        {/* A project's pages: its board, and its team, which the pages not built yet also show. */}
         {route.screen === "project" &&
           (!route.project ? (
             <div className="empty"><b>{t("team.noproject")}</b></div>
-          ) : route.page === "board" ? (
-            <ProjectBoard projectId={route.project} toast={showToast} selected={route.query.get("task")} />
           ) : (
-            <TeamPage projectId={route.project} toast={showToast} />
+            <ProjectScreen projectId={route.project} page={route.page} inner={route.inner} toast={showToast} wide={wide} />
           ))}
       </ErrorBoundary>
     );
@@ -442,9 +447,34 @@ export function App() {
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
   const terminalOpen = route.screen === "terminals" && !!route.detail;
+  const menuButtonEl = (
+    <button ref={menuButton} className={`sidebar-menu ${strip ? "iconbtn quiet" : ""}`} onClick={() => setMenu((m) => !m)} title={t("nav.menu.title")} aria-label={t("nav.menu")} aria-haspopup="menu" aria-expanded={menu}>
+      <Icon name="more" size={18} />
+      {!strip && <span className="sidebar-text">{t("nav.menu")}</span>}
+      {!strip && <kbd>⌘⇧M</kbd>}
+      {(counts.inbox ?? 0) + (counts.changes ?? 0) > 0 && <span className="badge-dot" aria-hidden />}
+    </button>
+  );
   return (
     <div className="app" style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
-      {wide && (
+      {wide && focusProject && (
+        <ErrorBoundary key={focusProject}>
+        <Suspense fallback={<nav className="sidebar project-sidebar" />}>
+          <ProjectSidebar
+            projectId={focusProject}
+            view={focusView(route.page, route.inner)}
+            terminal={route.page === "terminals" ? route.query.get("t") : null}
+            collapsed={strip}
+            onToggle={toggleSidebar}
+            width={sidebarWidth}
+            onWidth={setSidebarWidth}
+            menu={menuButtonEl}
+            toast={showToast}
+          />
+        </Suspense>
+        </ErrorBoundary>
+      )}
+      {wide && !focusProject && (
         <Sidebar
           screen={route.screen}
           session={sessionId}
@@ -466,7 +496,7 @@ export function App() {
         />
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
-      <div ref={main} className={`main ${sessionId || terminalOpen ? "chat-open" : ""}`}>
+      <div ref={main} className={`main ${sessionId || focusChat || terminalOpen ? "chat-open" : ""}`}>
         <MaintenanceNotice />
         {offline && <div className="offline-strip" role="status">{t("app.offline")}</div>}
         <ChangeStrip caps={caps} />
@@ -475,7 +505,7 @@ export function App() {
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
-      {!wide && !sessionId && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {!wide && !sessionId && !focusChat && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
       <NotificationToasts />

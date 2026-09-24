@@ -12,6 +12,7 @@ import (
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
+	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
@@ -71,8 +72,9 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	if !validID.MatchString(p.ID) {
 		return nil, bad("id must be 1-64 letters, digits, '-' or '_'")
 	}
-	if len(p.Sandbox) > 0 && string(p.Sandbox) != "null" {
-		return nil, wire.Errorf(wire.CodeUnsupported, "the sandbox is not available in this build")
+	box, err := sandboxRequest(p.Sandbox)
+	if err != nil {
+		return nil, err
 	}
 	if len(p.Argv) > 0 && p.Shell != nil {
 		return nil, bad("give argv or shell, not both")
@@ -128,6 +130,9 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	for k, v := range p.Env {
 		extra[k] = v
 	}
+	if _, set := extra["HISTFILE"]; box != nil && !set {
+		extra["HISTFILE"] = sandbox.HistoryFile
+	}
 	// The launch's variables go last: the host's own env cannot replace a launch's token or URL.
 	if err := d.launchEnv(p.LaunchID, extra); err != nil {
 		return nil, err
@@ -173,6 +178,14 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	if !ok {
 		return nil, bad("%q is not an executable on the terminal's PATH", argv[0])
 	}
+	var program []string
+	var plan sandbox.Plan
+	if box != nil {
+		if plan, err = d.wrapSandbox(ctx, box, path, argv, cwd, p.LaunchID); err != nil {
+			return nil, err
+		}
+		program, argv, path = argv, plan.Argv, plan.Argv[0]
+	}
 	logPath := ""
 	if p.LogToDisk {
 		logPath = filepath.Join(d.Config.StateDir, "terminals", p.ID+".log")
@@ -184,7 +197,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	t, err := d.Registry.Create(term.Spec{
 		ID: p.ID, Path: path, Argv: argv, Cwd: cwd, CwdFallback: fallback, Env: env, Cols: p.Cols, Rows: p.Rows,
 		Title: p.Title, RingBytes: ring, LogPath: logPath, InputIdle: idle, LaunchID: p.LaunchID, Labels: labels,
-		Shell: shell, Nonce: nonce, Integration: integration,
+		Shell: shell, Nonce: nonce, Integration: integration, Sandbox: box != nil, Program: program,
 	})
 	d.launchStarted(t, p.LaunchID, p.ID)
 	if err != nil {
@@ -193,9 +206,23 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 		}
 		return nil, wire.Errorf(wire.CodeInternal, "starting %s: %v", argv[0], err)
 	}
-	d.Log.Info("terminal created", "terminal", t.ID, "pid", t.Pid, "program", filepath.Base(path))
-	return map[string]any{"id": t.ID, "pid": t.Pid, "cwd": cwd, "cwd_fallback": fallback, "shell": shell,
-		"shell_integration": integration, "created_at": t.CreatedAt}, nil
+	name := filepath.Base(path)
+	if program != nil {
+		name = filepath.Base(program[0])
+	}
+	d.Log.Info("terminal created", "terminal", t.ID, "pid", t.Pid, "program", name, "sandbox", box != nil)
+	reply := map[string]any{"id": t.ID, "pid": t.Pid, "cwd": cwd, "cwd_fallback": fallback, "shell": shell,
+		"shell_integration": integration, "created_at": t.CreatedAt}
+	if box != nil {
+		// What the sandbox made writable, and each folder it left read-only with the reason: the host
+		// tells the operator rather than letting a write fail later with no explanation.
+		skipped := plan.Skipped
+		if skipped == nil {
+			skipped = []sandbox.Skip{}
+		}
+		reply["sandbox"] = map[string]any{"writable": plan.Writable, "skipped": skipped}
+	}
+	return reply, nil
 }
 
 // lookupEnv finds a variable in an environment list; the last assignment wins, as for a process.

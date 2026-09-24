@@ -11,7 +11,7 @@ import { useEvent, useStreamUp } from "../events";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
 import { plural, t } from "../i18n";
-import { navigate, pathFor, projectPagePath, sessionPath } from "../router";
+import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath } from "../router";
 import { PageHeader, useMedia } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { HarnessBadge, StaffAvatar } from "../team/parts";
@@ -51,7 +51,12 @@ function launchText(launch: Launch): string | null {
   return launch.detail ? t("pboard.launch.refused", { detail: launch.detail }) : t("pboard.launch.other", { state: launch.state });
 }
 
-export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { projectId: string; toast: (text: string) => void; selected?: string | null; layout?: "auto" | "list" }) {
+/**
+ * `embedded` is the board as a tab of focus mode's right panel: no page header of its own, the list
+ * layout whatever the window, and the open task kept in the panel instead of the address — the address
+ * belongs to the conversation beside it. `back` is the page header's way back (null for none).
+ */
+export function ProjectBoard({ projectId, toast, selected, layout = "auto", embedded = false, back }: { projectId: string; toast: (text: string) => void; selected?: string | null; layout?: "auto" | "list"; embedded?: boolean; back?: string | null }) {
   const [showDone, setShowDone] = useState(false);
   const key = `${boardKey(projectId)}?include_done=${showDone ? 1 : 0}`;
   // While the event stream is up the board is read again when its project changes; the poll is only
@@ -62,7 +67,8 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { 
     if (event.project_id === projectId) invalidate(boardKey(projectId));
   }, [projectId]);
   const wideWindow = useMedia("(min-width: 1024px)");
-  const wide = layout === "auto" && wideWindow;
+  const wide = layout === "auto" && !embedded && wideWindow;
+  const [picked, setPicked] = useState<string | null>(null);
   const [filter, setFilter] = useState<Column | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -73,15 +79,16 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { 
   };
   const arranged = useMemo<Arranged>(() => arrange(data ?? { tasks: [], needs_you: [] }), [data]);
   const titles = useMemo(() => Object.fromEntries((data?.tasks ?? []).map((task) => [task.id, { title: task.title, status: task.status }])), [data]);
-  const open = selected ? data?.tasks.find((task) => task.id === selected) ?? null : null;
+  const chosen = embedded ? picked : selected;
+  const open = chosen ? data?.tasks.find((task) => task.id === chosen) ?? null : null;
   // A link to a finished task widens the board so the task can be shown.
   useEffect(() => {
-    if (selected && data && !open && !showDone) setShowDone(true);
-  }, [selected, data, open, showDone]);
+    if (chosen && data && !open && !showDone) setShowDone(true);
+  }, [chosen, data, open, showDone]);
 
   const boardPath = projectPagePath(projectId, "board");
-  const openTask = (task: ProjectTask) => navigate(`${boardPath}?task=${encodeURIComponent(task.id)}`);
-  const closeTask = () => navigate(boardPath, { replace: true });
+  const openTask = (task: ProjectTask) => (embedded ? setPicked(task.id) : navigate(`${boardPath}?task=${encodeURIComponent(task.id)}`));
+  const closeTask = () => (embedded ? setPicked(null) : navigate(boardPath, { replace: true }));
 
   async function accept(task: ProjectTask) {
     try {
@@ -104,15 +111,30 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { 
   const phoneChips = data ? chips(arranged, data.counts) : [];
 
   const card = (task: ProjectTask) => <TaskCard key={task.id} task={task} titles={titles} onOpen={() => openTask(task)} onAccept={() => accept(task)} />;
-  const needCard = (need: NeedsYou) => <NeedCard key={need.id} need={need} />;
+  const needCard = (need: NeedsYou) => <NeedCard key={need.id} need={need} projectId={projectId} />;
   const items = (column: Column) => (column === "needs" ? arranged.needs.map(needCard) : arranged[column].map(card));
 
+  const listChips = !wide && phoneChips.length > 0 && (
+    <div className="chips pboard-chips" role="group" aria-label={t("pboard.filter")}>
+      {phoneChips.map(({ column, count }) => (
+        <button key={column} className={`chip select ${column === "needs" ? "need" : ""}`} aria-pressed={filter === column} onClick={() => pickChip(column)}>
+          {t(`pboard.col.${column}`)} · {count}
+        </button>
+      ))}
+    </div>
+  );
   return (
     <>
+      {embedded ? (
+        <div className="pboard-bar">
+          <span className="sub grow truncate">{subtitle}</span>
+          <button className="iconbtn small" onClick={() => setCreating(true)} title={t("pboard.new")} aria-label={t("pboard.new")}><Icon name="plus" size={16} /></button>
+        </div>
+      ) : (
       <PageHeader
         title={data ? t("pboard.title.of", { name: data.project.name }) : t("pboard.title")}
         subtitle={subtitle}
-        back={pathFor("agents")}
+        back={back === undefined ? pathFor("agents") : back ?? undefined}
         actions={
           <>
             <button className="iconbtn" onClick={() => navigate(projectPagePath(projectId, "team"))} title={t("pboard.team")} aria-label={t("pboard.team")}><Icon name="bots" /></button>
@@ -120,17 +142,11 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { 
           </>
         }
       >
-        {!wide && phoneChips.length > 0 && (
-          <div className="chips pboard-chips" role="group" aria-label={t("pboard.filter")}>
-            {phoneChips.map(({ column, count }) => (
-              <button key={column} className={`chip select ${column === "needs" ? "need" : ""}`} aria-pressed={filter === column} onClick={() => pickChip(column)}>
-                {t(`pboard.col.${column}`)} · {count}
-              </button>
-            ))}
-          </div>
-        )}
+        {listChips}
       </PageHeader>
-      <div className={`screen wide pboard ${wide ? "is-wide" : "is-list"}`}>
+      )}
+      {embedded && listChips}
+      <div className={`screen wide pboard ${wide ? "is-wide" : "is-list"} ${embedded ? "embedded" : ""}`}>
         {loading && !data && !error && <Skeleton rows={4} />}
         {error && !data && (
           <div className="empty">
@@ -195,7 +211,7 @@ function Who({ name, color, harness }: { name: string; color: string; harness?: 
   );
 }
 
-function NeedCard({ need }: { need: NeedsYou }) {
+function NeedCard({ need, projectId }: { need: NeedsYou; projectId: string }) {
   const who = need.staff ? t("pboard.need.from", { kind: t(`pboard.need.kind.${need.kind}`), name: need.staff.name }) : t("pboard.need.orchestrator", { kind: t(`pboard.need.kind.${need.kind}`) });
   return (
     <div className="pcard need">
@@ -211,11 +227,18 @@ function NeedCard({ need }: { need: NeedsYou }) {
         <code className="pcard-short" title={t("pboard.need.short")}>{need.short_id}</code>
         <span className="grow" />
         {need.session_id && (
-          <button className="btn small warn" onClick={() => navigate(sessionPath(need.session_id!))}>{t("pboard.need.answer")}</button>
+          <button className="btn small warn" onClick={() => navigate(answerPath(projectId, need))}>{t("pboard.need.answer")}</button>
         )}
       </div>
     </div>
   );
+}
+
+/** Where a request is answered: inside the project's focus mode, in the orchestrator's chat for its own
+ *  questions (they are cards there) and in the staff member's session for theirs. */
+function answerPath(projectId: string, need: NeedsYou): string {
+  if (need.origin === "orchestrator") return projectHome(projectId);
+  return projectSessionPath(projectId, need.session_id!);
 }
 
 function StatusText({ task, titles }: { task: ProjectTask; titles: Record<string, { title: string; status: TaskStatus }> }) {
@@ -363,7 +386,7 @@ function TaskSheet({ projectId, data, task, onClose, onDone, onAccept, toast }: 
             small
             label={t("board.actions")}
             items={[
-              ...(task.assignee?.session_id ? [{ label: t("pboard.open.staff", { name: task.assignee.name }), icon: "bots" as const, onSelect: () => navigate(sessionPath(task.assignee!.session_id!)) }] : []),
+              ...(task.assignee?.session_id ? [{ label: t("pboard.open.staff", { name: task.assignee.name }), icon: "bots" as const, onSelect: () => navigate(projectSessionPath(projectId, task.assignee!.session_id!)) }] : []),
               { label: t("board.copyid"), icon: "copy", onSelect: async () => toast((await copyText(task.id)) ? t("board.copied") : task.id) },
               "-",
               { label: t("board.delete.menu"), icon: "trash", danger: true, onSelect: remove },

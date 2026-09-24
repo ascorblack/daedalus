@@ -354,7 +354,16 @@ func TestResizeSignalAndStats(t *testing.T) {
 			CPUs          int   `json:"cpus"`
 		} `json:"machine"`
 	}
-	f.call(t, "terminal.stats", map[string]any{"ids": []string{"s"}}, &stats)
+	// Busy may be stty still, or the moment between it and sleep, when the shell is the only process:
+	// the count is read again until sleep runs.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		f.call(t, "terminal.stats", map[string]any{"ids": []string{"s"}}, &stats)
+		if !stats.Supported || (len(stats.Terminals) == 1 && stats.Terminals[0].Processes >= 2) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if stats.Supported {
 		if len(stats.Terminals) != 1 || stats.Terminals[0].Processes < 2 || stats.Terminals[0].RSSBytes <= 0 {
 			t.Fatalf("stats %+v", stats)
