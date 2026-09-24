@@ -710,6 +710,14 @@ General still goes to that session — or, without a forum, it speaks in the pri
 a reply to one of its posts reaches it and `/main` makes it the chat's session. Its questions are
 posted there once, with buttons, and never in the project's topic.
 
+`CreateProject` makes a project only after you confirm it on a card in the main chat — a misheard
+name never becomes a folder. A container folder must lie under `dispatcher.container_roots` (by default
+the folders your container projects already live in); a host folder is looked at on your machine
+through the host terminal, and a card for one is answered in the app alone. On "Create" the folders
+are made if asked, the project's orchestrator is switched on and handed dispatch #1: survey the folders
+and write the brief. Until that dispatch is done — or you press "Finish setup" (`POST
+/api/projects/{id}/setup/finish`) — every question the project asks is shown in the main chat too.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
