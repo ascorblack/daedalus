@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from daedalus import supervisor_client
 from daedalus.host import reachability
+from daedalus.host.gitrun import GitError, run_command, run_git
 from daedalus.security import redact
 
 # A command that runs Python tests. Such a run prints how many it executed, so a receipt for one that
@@ -56,11 +56,6 @@ class RepoSpec:
     worktrees: Path
 
 
-class GitError(RuntimeError):
-    pass
-
-
-_TOKEN_RE = re.compile(r"(https?://)[^/@\s]+@")
 _PRIVATE_LINES = re.compile(r"(?im)^\s*(session|run|operator|owner|claude-session|co-authored-by|generated[- ]with|signed-off-by)\s*:.*(?:\n|$)")
 _PRIVATE_ADDRESSES = re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}(?:\.\d{1,3}){1,2}\b|/home/[A-Za-z0-9_-]+|/srv/state/[^\s`'\"]*")
 _PRIVATE_PROSE = re.compile(
@@ -86,28 +81,6 @@ def public_text(text: str) -> str:
     text = _PRIVATE_LINES.sub("", redact.shared().redact(text))
     text = _PRIVATE_ADDRESSES.sub("<redacted>", text)
     return text.strip()
-
-
-
-async def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: float = 600) -> str:
-    """Run a git/gh command; returns stdout only, stderr goes into the error message."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(cwd) if cwd else None,
-        env={**os.environ, **(env or {})},
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError as exc:
-        proc.kill()
-        raise GitError(f"timed out: {' '.join(cmd)}") from exc
-    text = out.decode("utf-8", "replace")
-    if proc.returncode != 0:
-        detail = _TOKEN_RE.sub(r"\1***@", (err.decode("utf-8", "replace") + text)[-1500:])
-        raise GitError(f"{' '.join(cmd[:3])} failed ({proc.returncode}):\n{detail}")
-    return text
 
 
 ADDED_LINES_CAP = 200
@@ -506,10 +479,10 @@ class SelfDevelopment:
         return env
 
     async def git(self, repo: RepoSpec, *args: str, cwd: Path | None = None) -> str:
-        return await _run(["git", "-C", str(cwd or repo.checkout), *args], env=self._git_env())
+        return await run_git(["-C", str(cwd or repo.checkout), *args], env=self._git_env())
 
     async def gh(self, *args: str, cwd: Path) -> str:
-        return await _run(["gh", *args], cwd=cwd, env=self._git_env())
+        return await run_command(["gh", *args], cwd=cwd, env=self._git_env())
 
     def repo(self, name: str) -> RepoSpec:
         if name not in self.repos:
