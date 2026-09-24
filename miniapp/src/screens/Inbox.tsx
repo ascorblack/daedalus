@@ -7,6 +7,7 @@ import { Icon, IconName } from "../icons";
 import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
+import { useStreamUp } from "../events";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
@@ -32,7 +33,9 @@ const toneClass = (e: Notification) => (e.level === "quiet" && e.tone === "info"
 export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [filter, setFilter] = useState<Filter>("all");
   const key = `/api/notifications?view=${filter}&limit=200`;
-  const { data, error, loading, refresh } = useQuery<NotificationPage>(key, { pollMs: 15000, staleMs: 5000 });
+  // A new or seen notification arrives as an event while the stream is up; only without it does the list poll.
+  const live = useStreamUp();
+  const { data, error, loading, refresh } = useQuery<NotificationPage>(key, { pollMs: live ? 0 : 15000, staleMs: 5000 });
   const proposals = useQuery<Proposal[]>("/api/proposals", { pollMs: 60000, staleMs: 30000 });
   const [open, setOpen] = useState<number | null>(null);
   const unseen = data?.summary.unseen ?? 0;

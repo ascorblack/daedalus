@@ -10,6 +10,7 @@ import { MoveSessionSheet, ProjectChip, ProjectSettingsSheet, useProjects } from
 import { navigate, parse, pathFor } from "../router";
 import { PageHeader, go, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
+import { useStreamUp } from "../events";
 import { WindowedRows } from "../virtual";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
@@ -19,7 +20,10 @@ type SearchList = SessionList & { semantic: boolean; reason: string; partial: bo
 export function SessionsScreen({ onOpen, toast, current, compact, bare, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; bare?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const [view, setView] = useState<"all" | "attention" | "working" | "archive">("all");
   const listUrl = `/api/sessions?view=${view}`;
-  const { data, error, loading } = useQuery<SessionList>(listUrl, { pollMs: 5000, staleMs: 3000 });
+  // A run starting, finishing or asking arrives as an event while the stream is up, and the list is
+  // read again then; the poll every minute is only the net under it.
+  const live = useStreamUp();
+  const { data, error, loading } = useQuery<SessionList>(listUrl, { pollMs: live ? 60000 : 5000, staleMs: 3000 });
   const [extra, setExtra] = useState<SessionSummary[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [paging, setPaging] = useState(false);
@@ -293,14 +297,15 @@ function loopLine(s: SessionSummary): string {
   return `${t("agents.loop.stopped", { status: statusWord(loop.status).toLowerCase() })}${why ? `: ${why.slice(0, 80)}` : ""} · ${runs}`;
 }
 
-/** What a row actually draws, so the poll every five seconds does not reconcile a folder that did not change.
+/** What a row actually draws, so a fresh read of the list does not reconcile a folder that did not change.
  *
  *  The list is re-fetched whole and every object in it is new each time, so identity says nothing;
  *  this says what the row would look different for. The children are in it because a subagent's
- *  status is drawn under its leader. */
+ *  status is drawn under its leader. The unread result is in it for the same reason: without it the
+ *  memo keeps the old row and the dot never appears. */
 function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
-  if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
+  if (l.id !== r.id || l.title !== r.title || l.status !== r.status || !!l.unread_result !== !!r.unread_result || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
   if ((l.terminals ?? 0) !== (r.terminals ?? 0)) return false;
   if (a.projectName !== b.projectName || l.match?.snippet !== r.match?.snippet) return false;
   if (a.onProject !== b.onProject) return false;
@@ -332,6 +337,9 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
   const loop = loopLine(s);
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);
+  // A result nobody has seen yet, on any window or in Telegram: the host sets it and clears it.
+  const unread = !!s.unread_result;
+  const unreadDot = unread ? <span className="unread-dot" role="img" aria-label={t("agents.unread")} title={t("agents.unread")} /> : null;
   if (compact) {
     // The sidebar's row: a dot for the state, the name, the time, and a second line only when it
     // carries something the reader needs now — a loop's next run, what a fork was taken from, a
@@ -339,13 +347,14 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
     const needs = status === "waiting" || status === "failed";
     const second = projectName ? `${shortModel(s.model ?? "", 28)} · ${statusWord(status)}` : fork ? t("agents.fork.at", { n: fork.seq }) : loop || (orphan ? t("agents.orphan") : "");
     return (
-      <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.model ? `${s.model} · ${s.id}` : s.id} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+      <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""} ${unread ? "unread" : ""}`} title={s.model ? `${s.model} · ${s.id}` : s.id} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
         <Dot status={status} className="erow-dot" />
         <div className="erow-main">
           <div className="erow-head">
             <span className="erow-title truncate">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
             {needs && <span className={`erow-state ${status}`}>{statusWord(status)}</span>}
             <TerminalCount n={s.terminals} />
+            {unreadDot}
             <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
           </div>
           {s.match && <div className="search-passage truncate">{s.match.snippet}</div>}
@@ -356,13 +365,14 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
     );
   }
   return (
-    <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.workspace_path} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+    <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""} ${unread ? "unread" : ""}`} title={s.workspace_path} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
       <Avatar status={status} seed={s.id} />
       <div className="erow-main">
         <div className="erow-head">
           <span className="erow-title clamp-2">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
           {s.workspace_own && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
           <TerminalCount n={s.terminals} />
+          {unreadDot}
           <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
         </div>
         <div className={`erow-meta ${spoken ? status : ""}`}>

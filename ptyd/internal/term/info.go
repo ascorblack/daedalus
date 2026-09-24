@@ -39,6 +39,7 @@ type ClientInfo struct {
 	ID         string    `json:"id"`
 	Kind       string    `json:"kind"`
 	Label      string    `json:"label"`
+	Via        string    `json:"via,omitempty"`
 	ReadOnly   bool      `json:"read_only"`
 	AttachedAt time.Time `json:"attached_at"`
 }
@@ -79,6 +80,8 @@ func (t *Terminal) Info() Info {
 	if lastHuman.IsZero() {
 		info.LastHumanInputAt = nil
 	}
+	info.Clients = t.Clients()
+	info.LastDetachAt = timePtr(t.LastDetach())
 	if t.sizeOwner != "" {
 		owner := t.sizeOwner
 		info.SizeOwner = &owner

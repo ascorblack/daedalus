@@ -39,6 +39,13 @@ type fixture struct {
 // script the modes that keys and pastes depend on.
 func start(t *testing.T) *fixture {
 	t.Helper()
+	return startWith(t, nil)
+}
+
+// startWith runs the daemon with the given emulator instead, when it is not nil: a long run through
+// the fake would keep every byte it was fed.
+func startWith(t *testing.T, emu emulator.Factory) *fixture {
+	t.Helper()
 	base, err := os.MkdirTemp("", "ptyd")
 	if err != nil {
 		t.Fatal(err)
@@ -56,13 +63,15 @@ func start(t *testing.T) *fixture {
 	}
 	evlog := events.NewLog(1000)
 	var last *fake.Emulator
-	registry := term.NewRegistry(term.Deps{
-		Emulator: fake.Factory(func(e *fake.Emulator) {
+	if emu == nil {
+		emu = fake.Factory(func(e *fake.Emulator) {
 			f.mu.Lock()
 			last = e
 			f.mu.Unlock()
-		}),
-		Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
+		})
+	}
+	registry := term.NewRegistry(term.Deps{
+		Emulator: emu, Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
 		Clock: term.RealClock{}, Log: log, KillGrace: 200 * time.Millisecond,
 	}, 4)
 	ep, err := server.Prepare(cfg.RunDir, "unix")
