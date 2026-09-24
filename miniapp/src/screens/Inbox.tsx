@@ -8,6 +8,7 @@ import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
 import { useStreamUp } from "../events";
+import { PushNudge } from "../pushui";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
@@ -117,6 +118,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         </div>
       </PageHeader>
       <div className="screen narrow">
+        <PushNudge />
         {pending.length > 0 && filter !== "problems" && (
           <section>
             <div className="section-title">{t("inbox.waiting")} <span className="n">{pending.length}</span></div>

@@ -541,6 +541,17 @@ revision, `PUT` saves it (`{"preferences", "base_revision"}`, 409 when stale), a
 `POST /api/notifications/test` sends one notification through every channel there is and reports
 each outcome.
 
+Push reaches a phone or a browser with the app closed once the app is served from a public https
+address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
+bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.
+The host signs and encrypts every message itself (VAPID keys made once and kept in the database).
+`GET /api/push/config` gives the key a browser subscribes with, `POST /api/push/subscriptions` takes
+what `PushSubscription.toJSON()` returns plus a `device` name, `GET` lists the devices and
+`DELETE /api/push/subscriptions/{id}` removes one; a device that fails for a week is dropped. A
+permission request or a short question carries Allow/Deny (or its options) on the notification where
+the platform shows buttons; a host-level permission never does and is answered in the app. When a
+pushed request is answered anywhere else, the other devices are told to close it.
+
 ## Layout
 
 ```

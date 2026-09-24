@@ -175,3 +175,23 @@ async def test_the_terminal_tables_are_created_and_a_second_open_leaves_them_alo
     assert (row["status"], row["profile"], row["argv_json"], row["cols"], row["rows"], row["created_by"]) == ("running", "shell", "[]", 80, 24, "operator")
     assert (await db.fetchone("SELECT count(*) AS n FROM terminal_audit"))["n"] == 1
     await db.close()
+
+
+async def test_the_push_subscription_table_is_created_and_a_second_open_leaves_it_alone(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite"
+    db = Database(path)
+    await db.open()
+    columns = [r["name"] for r in await db.fetchall("PRAGMA table_info(push_subscriptions)")]
+    assert columns == ["id", "endpoint", "p256dh", "auth", "user_agent", "device", "created_at", "last_ok_at", "failures", "last_error"]
+    await db.execute("INSERT INTO push_subscriptions(endpoint, p256dh, auth, created_at) VALUES ('https://push.example.com/a', 'k', 'a', '2026-01-01T00:00:00Z')")
+    with pytest.raises(Exception, match="UNIQUE"):
+        await db.execute("INSERT INTO push_subscriptions(endpoint, p256dh, auth, created_at) VALUES ('https://push.example.com/a', 'k2', 'a2', '2026-01-01T00:00:00Z')")
+    version = (await db.fetchone("SELECT version FROM schema_version"))["version"]
+    await db.close()
+
+    db = Database(path)
+    await db.open()
+    assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
+    row = await db.fetchone("SELECT * FROM push_subscriptions")
+    assert (row["device"], row["user_agent"], row["failures"], row["last_ok_at"]) == ("", "", 0, None)
+    await db.close()

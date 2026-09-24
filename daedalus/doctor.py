@@ -643,6 +643,15 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
         summary = await notifications.summary()
         open_requests = f", {summary['needs_you']} waiting for an answer" if summary["needs_you"] else ""
         out.append(Check("notifications", True, f"{summary['unseen']} unseen{open_requests}", "ok" if summary["unseen"] == 0 else "info"))
+    push = ctx.extensions.get("push")
+    if push is not None:
+        state = await push.status()
+        if state["reason"]:
+            out.append(Check("push", True, "off: the public address is not https, and browsers subscribe only from a secure one", "info", "set the public https address to reach phones with the app closed"))
+        else:
+            failing = f", {state['failing']} failing" if state["failing"] else ""
+            keys = "keys made" if state["keys"] else "keys made on first use"
+            out.append(Check("push", not state["failing"], f"{state['devices']} device(s){failing}; {keys}", "warn" if state["failing"] else "ok", "a device that fails for a week is dropped; turn push on again from its Settings → Notifications"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT count(*) c FROM schedules WHERE enabled = 0 AND failure_count > 0")
         if row and row["c"]:
