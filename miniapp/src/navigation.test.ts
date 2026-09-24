@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import { GROUPS, menuSections, moveIndex, shortcutFor } from "./navigation";
 
 describe("the sections", () => {
-  it("list every destination once, in the rail's old order", () => {
+  it("list every destination once, in the rail's old order, with the terminals after the board", () => {
     const all = menuSections("server").flatMap((g) => g.items);
-    expect(all).toEqual(["agents", "voice", "inbox", "board", "changes", "schedules", "services", "memory", "usage", "health"]);
+    expect(all).toEqual(["agents", "voice", "inbox", "board", "terminals", "changes", "schedules", "services", "memory", "usage", "health"]);
     expect(new Set(all).size).toBe(all.length);
     expect(menuSections("server").map((g) => g.key)).toEqual(GROUPS.map((g) => g.key));
   });
