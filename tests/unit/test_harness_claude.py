@@ -646,10 +646,10 @@ async def test_the_staff_views_routes(settings: Settings, db: Database, config: 
             told = await client.post(f"/api/staff/{ada.id}/messages", headers=headers, json={"text": "echo:and a footer", "mode": "queue"})
             assert told.status_code == 200 and told.json()["state"] == "queued"
             await message(s, told.json()["message_id"], "acknowledged")
-            page = (await client.get(f"/api/staff/{ada.id}/messages?limit=1", headers=headers)).json()
-            assert page["more"] is True and page["messages"][0]["state"] == "acknowledged" and page["messages"][0]["delivery"]["via"] == "paste"
-            older = (await client.get(f"/api/staff/{ada.id}/messages?before={page['messages'][0]['id']}", headers=headers)).json()
-            assert [m["state"] for m in older["messages"]] == ["acknowledged"]
+            [newest] = (await client.get(f"/api/staff/{ada.id}/messages?limit=1", headers=headers)).json()
+            assert newest["state"] == "acknowledged" and newest["delivery"]["via"] == "paste" and newest["delivery"]["enters"] == 1
+            older = (await client.get(f"/api/staff/{ada.id}/messages?before={newest['id']}", headers=headers)).json()
+            assert [m["state"] for m in older] == ["acknowledged"]
 
             async def second_turn_ended() -> bool:
                 return (await s.statuses(ada)).count("turn_done_unseen") == 2

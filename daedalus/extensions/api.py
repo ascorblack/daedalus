@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import fnmatch
 import hashlib
 import hmac
@@ -89,6 +90,7 @@ from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
+from daedalus.stores.harness import HarnessStore
 from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import Project
 from daedalus.stores.sqlite import ReceiptConflict
@@ -1562,10 +1564,25 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
 
     @api.get("/api/staff/{staff_id}/messages")
-    async def staff_messages(staff_id: str, limit: int = Query(default=20, ge=1, le=200), _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        """What was sent to a member, newest first, with each message's delivery state."""
+    async def staff_messages(staff_id: str, limit: int = Query(default=20, ge=1, le=200), before: str | None = None, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """What was sent to a member, newest first, with each message's delivery state and, for a
+        command-line member, how it was delivered (``delivery``: paste or pointer, Enters sent, when
+        each state was reached). ``before`` is a message id: the page continues below it."""
         await staff_member(staff_id)
-        return [m.view() for m in await manager.staff.messages(staff_id, limit=limit)]
+        messages = list(await manager.staff.messages(staff_id, limit=500 if before else limit))
+        if before:
+            ids = [m.id for m in messages]
+            messages = messages[ids.index(before) + 1 :] if before in ids else []
+        page = messages[:limit]
+        deliveries = await HarnessStore(manager.db).deliveries([m.id for m in page])
+        rows = []
+        for message in page:
+            row = message.view()
+            delivery = deliveries.get(message.id)
+            if delivery is not None:
+                row["delivery"] = dataclasses.asdict(delivery)
+            rows.append(row)
+        return rows
 
     @api.post("/api/staff/{staff_id}/assign")
     async def assign_staff(staff_id: str, body: AssignBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

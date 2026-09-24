@@ -1,5 +1,6 @@
-"""The staff view's routes: one member's live session as its runtime sees it, its messages with their
-receipts, its transcript, its events and its changes.
+"""The staff view's routes: one member's live session as its runtime sees it, the operator's message
+from its composer, its transcript, its events and its changes. (The messages with their receipts are
+``GET /api/staff/{id}/messages`` in ``api.py``.)
 
 The team's own routes (assign, tell, interrupt, pause, release, the requests) are in ``api.py``;
 these are what the staff view reads, and they ask the member's runtime rather than the rows alone,
@@ -109,25 +110,6 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         out["requests"] = [a.view() for a in await manager.asks.open_for(member.project_id) if a.staff_session_id == session.id]
         out["usage"] = session.usage or None
         return out
-
-    @api.get("/api/staff/{staff_id}/messages")
-    async def staff_messages(staff_id: str, before: str | None = None, limit: int = Query(50, ge=1, le=500), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Messages to the member, newest first, each with its receipt and how it was delivered.
-        ``before`` is a message id: the page continues below it."""
-        await member_of(staff_id)
-        messages = list(await manager.staff.messages(staff_id, limit=500))
-        if before:
-            ids = [m.id for m in messages]
-            messages = messages[ids.index(before) + 1 :] if before in ids else []
-        page = messages[:limit]
-        deliveries = await HarnessStore(manager.db).deliveries([m.id for m in page])
-        rows = []
-        for message in page:
-            row = message.view()
-            delivery = deliveries.get(message.id)
-            row["delivery"] = asdict(delivery) if delivery is not None else None
-            rows.append(row)
-        return {"messages": rows, "more": len(messages) > limit}
 
     @api.post("/api/staff/{staff_id}/messages")
     async def post_staff_message(staff_id: str, body: MessageBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
