@@ -81,8 +81,10 @@ function activity(s: SessionSummary): number {
   return Date.parse(s.last_message_at || s.created_at) || 0;
 }
 
+/** What the folder's memo compares: a change that is not in here never reaches the rows. The unread
+ *  mark is in it because a run that finishes unseen changes nothing else a row shows. */
 function rowSig(rows: Row[]): string {
-  return rows.map((r) => `${r.s.id}:${r.s.status}:${r.s.last_message_at}:${r.s.title}:${r.s.model ?? ""}:${r.s.match?.snippet ?? ""}:${r.kids.map((k) => k.id + k.status).join(",")}|${rowSig(r.forks)}`).join(";");
+  return rows.map((r) => `${r.s.id}:${r.s.status}:${r.s.unread_result ? "u" : ""}:${r.s.last_message_at}:${r.s.title}:${r.s.model ?? ""}:${r.s.match?.snippet ?? ""}:${r.kids.map((k) => k.id + k.status).join(",")}|${rowSig(r.forks)}`).join(";");
 }
 
 /**

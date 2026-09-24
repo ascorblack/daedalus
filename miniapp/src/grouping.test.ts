@@ -26,6 +26,14 @@ function folder(id: string, name: string, over: Partial<ProjectFolder> = {}): Pr
 }
 
 describe("arrange", () => {
+  it("changes a folder's signature when an agent's result becomes unread, so the memo redraws the row", () => {
+    const projects = [folder("p1", "Bakery", { total: 1 })];
+    const seen = agent("a", { project_id: "p1" });
+    const before = arrange([seen], projects).folders[0].sig;
+    const after = arrange([{ ...seen, unread_result: true }], projects).folders[0].sig;
+    expect(after).not.toBe(before);
+  });
+
   it("puts every agent in its project", () => {
     const projects = [folder("p1", "Bakery", { total: 2 }), folder("p2", "Expenses", { total: 1 })];
     const sessions = [

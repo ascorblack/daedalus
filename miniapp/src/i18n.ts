@@ -862,6 +862,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "agents.search": { en: "Search agents…", ru: "Поиск по агентам…" },
   "agents.search.label": { en: "Search agents", ru: "Поиск по агентам" },
   "agents.new": { en: "New agent", ru: "Новый агент" },
+  "agents.unread": { en: "A result you have not seen", ru: "Непросмотренный результат" },
   "agents.filter.all": { en: "All", ru: "Все" },
   "agents.filter.label": { en: "Agent status", ru: "Статус агентов" },
   "agents.filter.attention": { en: "Needs attention", ru: "Требуют внимания" },
