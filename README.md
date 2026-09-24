@@ -555,6 +555,24 @@ and orchestrator see its whole board, move only their own tasks and never to don
 keeps its own board, without the team's tasks. Each change is a `task.created`, `task.moved`,
 `task.assigned` or `task.accepted` event naming its `actor`.
 
+**A project's team at work.** `POST /api/staff/{id}/assign` with `{"task_id"}` gives a staff member a
+task from its project's board; the task needs all four parts of its brief (objective, deliverable,
+boundaries, done-when). It starts at once or waits in the project's launch queue, and the answer
+says which: `{"state": "started" | "queued", "position", "reason", "detail"}`. A launch waits while
+the project's concurrency is taken, while the member is busy with another task, while the task's
+dependencies are open, for a few seconds between two launches of one project, and — for a
+command-line member, which is a terminal session — while the machine already runs as many terminal
+sessions as its cap allows or the terminals service is not there. Each member in
+`GET /api/projects/{id}/staff` carries what it waits for under `queued`, and the listing the whole
+queue under `queue`. `POST /api/staff/{id}/tell` (`{"text", "mode": "queue" | "steer" |
+"interrupt"}`) answers with the message's receipt; `…/interrupt`, `…/pause` (finish the turn, commit
+what is uncommitted, start nothing new) and `…/release` (`{"keep_worktree"}`) control the live
+session. What staff ask — a question, or a call the policy refused — is a request:
+`GET /api/asks?project=<id>&routed_to=operator` lists the ones waiting for you, and
+`POST /api/asks/{id}/answer` (`{"allow"}`, `{"selected": [...]}` or `{"text"}`, the id or its
+six-character short form) answers one; the first answer wins, and a second gets 409 naming who was
+first. A request the orchestrator leaves unanswered for ten minutes comes to you.
+
 ## Layout
 
 ```

@@ -1,0 +1,332 @@
+"""The seam between a project's team and whatever runs each member.
+
+A staff member is run by Daedalus itself or by one of the command-line agents. Everything above
+this seam — assignment, the launch queue, requests, statuses, the orchestrator's tools and the app —
+is one code path; below it, one :class:`StaffRuntime` per executor starts a session, delivers what
+is said to it and reports back. A runtime never writes the staff tables itself: every change of state
+goes through :class:`TeamIngress`, which writes the row and publishes the event together, so a
+status on the screen and a status in the database cannot disagree.
+
+The value types are frozen and carry everything a runtime needs, composed by the host: a runtime
+does not look anything up. :class:`FakeStaffRuntime` stands in for a real one in tests.
+"""
+
+from __future__ import annotations
+
+import itertools
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from daedalus.host.worktrees import Worktree
+from daedalus.stores.projects import Project, ProjectFolder
+from daedalus.stores.staff import Staff, StaffSession
+
+MessageMode = Literal["queue", "steer", "interrupt"]
+Origin = Literal["orchestrator", "operator"]
+ReceiptState = Literal["queued", "written", "submitted", "acknowledged", "failed"]
+PermissionLevel = Literal["ask", "edits", "all"]
+
+
+@dataclass(frozen=True, slots=True)
+class Availability:
+    """Whether a runtime can start a member in an environment now, and why not when it cannot."""
+
+    ok: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BoardTask:
+    """The task a session is started for, as the board holds it: its four-part brief included."""
+
+    id: str
+    title: str
+    status: str
+    priority: int = 3
+    objective: str = ""
+    deliverable: str = ""
+    boundaries: str = ""
+    done_when: str = ""
+    project_id: str | None = None
+    folder_id: str | None = None
+    assignee_staff_id: str | None = None
+    branch: str | None = None
+    depends_on: tuple[str, ...] = ()
+
+    def missing(self) -> list[str]:
+        """The brief's fields still empty; a task is not handed to anyone until all four are written."""
+        return [name for name in ("objective", "deliverable", "boundaries", "done_when") if not getattr(self, name).strip()]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveSession:
+    """A member and its one live session: what every call into a runtime is about."""
+
+    staff: Staff
+    session: StaffSession
+
+    @property
+    def id(self) -> str:
+        return self.session.id
+
+    @property
+    def session_id(self) -> str | None:
+        """The Daedalus session a Daedalus member works in; ``None`` for a command-line member."""
+        return self.session.session_id
+
+    @property
+    def terminal_id(self) -> str | None:
+        return self.session.terminal_id
+
+    @property
+    def cli_session_id(self) -> str | None:
+        return self.session.cli_session_id
+
+
+@dataclass(frozen=True, slots=True)
+class StartRequest:
+    """Everything a runtime needs to start one session, composed by the host.
+
+    ``brief_text`` is the standing brief (persona or agent, instructions, notes, the rules of the
+    team); ``first_message`` is the task itself. ``cwd`` is where the session works: the worktree's
+    working directory when there is one (``Worktree.cwd``, which is a sub-folder of the worktree when
+    the project folder is a sub-folder of its repository), the folder otherwise.
+    """
+
+    staff: Staff
+    project: Project
+    folder: ProjectFolder
+    cwd: Path
+    worktree: Worktree | None
+    task: BoardTask | None
+    first_message: str
+    brief_text: str
+    staff_session_id: str
+    env: str
+    model: str
+    effort: str
+    agent: str
+    permission_level: PermissionLevel
+    """From the project's autonomy: ``ask`` asks for everything, ``edits`` lets edits through, ``all`` lets everything through."""
+    permission_mode: str
+    """The staff member's own override of the command-line agent's mode, empty for its default."""
+    team_url: str
+    team_token: str
+    """For the team server a command-line member reports through; minted per launch, kept only hashed."""
+    predecessor: LiveSession | None = None
+    origin: Origin = "operator"
+    first_message_id: str = ""
+    """The staff message the first message is recorded as, so its receipt can be reported."""
+
+
+@dataclass(frozen=True, slots=True)
+class Started:
+    terminal_id: str | None
+    cli_session_id: str | None
+    transcript_ref: str | None
+    session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutgoingMessage:
+    id: str
+    text: str
+    mode: MessageMode
+    origin: Origin
+
+
+@dataclass(frozen=True, slots=True)
+class Receipt:
+    """How far a message got. A later state arrives through :meth:`TeamIngress.message_state`.
+
+    ``degraded_to`` names the mode a runtime used instead of the one asked for, when its executor
+    cannot do that one (a steer that became a queued message, a steer that became interrupt-and-send).
+    """
+
+    state: ReceiptState
+    error: str = ""
+    degraded_to: MessageMode | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AskRef:
+    id: str
+    kind: Literal["question", "permission"]
+    request_ref: str
+    """What the runtime needs to deliver the answer: the Daedalus tool-call id or approval key, or the command-line agent's own request id."""
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    allow: bool | None
+    text: str | None
+    selected: list[str]
+    by: Origin
+
+
+@dataclass(frozen=True, slots=True)
+class ReadRequest:
+    what: Literal["last", "turns", "screen", "diff"] = "last"
+    turns: int = 1
+    cursor: str | None = None
+    max_chars: int = 4000
+
+
+@dataclass(frozen=True, slots=True)
+class ReadPage:
+    text: str
+    next_cursor: str | None
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSnapshot:
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float | None
+    window_used_pct: float | None
+    source: Literal["metered", "subscription"]
+
+    def view(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": self.cost_usd,
+            "window_used_pct": self.window_used_pct,
+            "source": self.source,
+        }
+
+
+@runtime_checkable
+class StaffRuntime(Protocol):
+    """One executor of staff: Daedalus, or one command-line agent.
+
+    ``start`` is called only once the launch queue has admitted the launch; ``stop`` ends the process
+    or session and leaves the worktree alone (the host keeps or removes it).
+    """
+
+    kind: str
+
+    async def available(self, env: str) -> Availability: ...
+
+    async def start(self, req: StartRequest) -> Started: ...
+
+    async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt: ...
+
+    async def interrupt(self, live: LiveSession) -> None: ...
+
+    async def answer(self, live: LiveSession, ask: AskRef, decision: Decision) -> None: ...
+
+    async def read(self, live: LiveSession, req: ReadRequest) -> ReadPage: ...
+
+    async def stop(self, live: LiveSession) -> None: ...
+
+    async def resume(self, req: StartRequest, prior: LiveSession) -> Started: ...
+
+    async def usage(self, live: LiveSession) -> UsageSnapshot | None: ...
+
+
+@runtime_checkable
+class TeamIngress(Protocol):
+    """Where a runtime reports what happens in a session. Each call writes the staff tables and
+    publishes the matching event with the project, the member and the session named."""
+
+    async def status(self, live: LiveSession, status: str, waiting_for: str = "", *, detail: str = "") -> None:
+        """``starting · working · turn_done_unseen · idle · error · no_signal``; ``question`` and
+        ``permission`` are set by the two calls below, ``exited`` by ending the session."""
+
+    async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str) -> str:
+        """A permission the executor asks for; routed by the project's autonomy. Returns the request's id."""
+
+    async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str]) -> str:
+        """A question the executor's own dialog asks; routed like a permission. Returns the request's id."""
+
+    async def message_state(self, message_id: str, state: str, error: str = "") -> None:
+        """A later receipt for a message: a terminal write is ``written``, never ``acknowledged``."""
+
+    async def report(self, live: LiveSession, kind: str, note: str, artifacts: list[str] | None = None, remember: str | None = None) -> str:
+        """``checkpoint · needs_input · stuck · done``; returns what the reporter is told."""
+
+    async def ask(self, live: LiveSession, question: str, options: list[str] | None = None, context: str = "") -> str:
+        """A question for the orchestrator from the team server; returns the request's id at once."""
+
+    async def usage(self, live: LiveSession, snapshot: UsageSnapshot) -> None:
+        """What the session has spent so far, after each turn."""
+
+
+@dataclass
+class FakeStaffRuntime:
+    """A runtime that does nothing but remember what it was asked, for the tests of everything above it.
+
+    ``fail_start`` makes the next starts raise; ``receipt`` is what every ``send`` answers;
+    ``availability`` what ``available`` answers.
+    """
+
+    kind: str = "fake"
+    availability: Availability = field(default_factory=lambda: Availability(True))
+    receipt: Receipt = field(default_factory=lambda: Receipt("submitted"))
+    fail_start: str = ""
+    started: list[StartRequest] = field(default_factory=list)
+    sent: list[tuple[str, OutgoingMessage]] = field(default_factory=list)
+    answered: list[tuple[str, AskRef, Decision]] = field(default_factory=list)
+    interrupted: list[str] = field(default_factory=list)
+    stopped: list[str] = field(default_factory=list)
+    resumed: list[tuple[StartRequest, str]] = field(default_factory=list)
+    reads: list[tuple[str, ReadRequest]] = field(default_factory=list)
+    page: ReadPage = field(default_factory=lambda: ReadPage("", None, False))
+    snapshot: UsageSnapshot | None = None
+    _ids: Any = field(default_factory=lambda: itertools.count(1))
+
+    async def available(self, env: str) -> Availability:
+        return self.availability
+
+    async def start(self, req: StartRequest) -> Started:
+        if self.fail_start:
+            raise RuntimeError(self.fail_start)
+        self.started.append(req)
+        n = next(self._ids)
+        return Started(terminal_id=f"term-{n}", cli_session_id=f"cli-{n}", transcript_ref=None)
+
+    async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt:
+        self.sent.append((live.id, msg))
+        return self.receipt
+
+    async def interrupt(self, live: LiveSession) -> None:
+        self.interrupted.append(live.id)
+
+    async def answer(self, live: LiveSession, ask: AskRef, decision: Decision) -> None:
+        self.answered.append((live.id, ask, decision))
+
+    async def read(self, live: LiveSession, req: ReadRequest) -> ReadPage:
+        self.reads.append((live.id, req))
+        return self.page
+
+    async def stop(self, live: LiveSession) -> None:
+        self.stopped.append(live.id)
+
+    async def resume(self, req: StartRequest, prior: LiveSession) -> Started:
+        self.resumed.append((req, prior.id))
+        return Started(terminal_id=prior.terminal_id, cli_session_id=prior.cli_session_id, transcript_ref=prior.session.transcript_ref)
+
+    async def usage(self, live: LiveSession) -> UsageSnapshot | None:
+        return self.snapshot
+
+
+__all__ = [
+    "AskRef",
+    "Availability",
+    "BoardTask",
+    "Decision",
+    "FakeStaffRuntime",
+    "LiveSession",
+    "OutgoingMessage",
+    "ReadPage",
+    "ReadRequest",
+    "Receipt",
+    "StaffRuntime",
+    "StartRequest",
+    "Started",
+    "TeamIngress",
+    "UsageSnapshot",
+]

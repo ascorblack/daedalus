@@ -18,7 +18,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import replace
@@ -324,6 +324,46 @@ class StaffPatch(BaseModel):
     instructions: str | None = None
     notes: str | None = None
     color: str | None = None
+
+
+class AssignBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+
+
+class TellBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    mode: Literal["queue", "steer", "interrupt"] = "queue"
+
+
+class ReleaseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keep_worktree: bool = True
+
+
+class AskAnswerBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allow: bool | None = None
+    text: str | None = None
+    selected: list[str] | None = None
+
+
+class TeamReportBody(BaseModel):
+    kind: str
+    note: str
+    artifacts: list[str] | None = None
+    remember: str | None = None
+
+
+class TeamAskBody(BaseModel):
+    question: str
+    options: list[str] | None = None
+    context: str = ""
 
 
 class NewSessionBody(BaseModel):
@@ -1327,7 +1367,28 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # -- staff: the named members of a project's team ------------------------------------------
 
     def staff_row(member: Staff, live: Any, sessions: int) -> dict[str, Any]:
-        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions}
+        queue = getattr(app.extensions.get("staff"), "queue", None)
+        # What the member waits to start, each with why: "queued" alone is the question the
+        # operator would then have to ask.
+        queued = queue.waiting_for(member.id) if queue is not None else []
+        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions, "queued": queued}
+
+    def team_or_503() -> Any:
+        team = app.extensions.get("staff")
+        if team is None:
+            raise HTTPException(503, "the staff runtime is not running")
+        return team
+
+    async def team_call(call: Awaitable[Any]) -> Any:
+        """A team operation with its refusals as the HTTP answers the app shows as they are."""
+        try:
+            return await call
+        except KeyError as exc:
+            raise HTTPException(404, f"no such {exc.args[0] if exc.args else 'thing'}") from exc
+        except StaffBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StaffError as exc:
+            raise HTTPException(409 if type(exc).__name__ == "AlreadyAnswered" else 400, str(exc)) from exc
 
     async def staff_project(project_id: str) -> Project:
         project = await manager.projects.get(project_id)
@@ -1374,6 +1435,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 "folders": [{"id": f.id, "path": str(f.path), "label": f.label, "env": f.env, "is_git": f.is_git, "readonly": f.readonly} for f in project.folders],
             },
             "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0)) for m in members],
+            "queue": queue.queue(project_id) if (queue := getattr(app.extensions.get("staff"), "queue", None)) is not None else [],
             "counts": {"staff": sum(1 for m in members if m.active), "working": sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)},
             "choices": {
                 "harnesses": list(HARNESSES),
@@ -1446,6 +1508,84 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def staff_sessions(staff_id: str, limit: int = 50, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
         await staff_member(staff_id)
         return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
+
+    @api.post("/api/staff/{staff_id}/assign")
+    async def assign_staff(staff_id: str, body: AssignBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Give a member a task: it starts now, or waits in the project's queue with the reason."""
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.assign(member, body.task_id, by="operator"))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/tell")
+    async def tell_staff(staff_id: str, body: TellBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.tell(member, body.text, mode=body.mode, by="operator"))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/interrupt")
+    async def interrupt_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        await team_call(team.interrupt(member))
+        return {"ok": True}
+
+    @api.post("/api/staff/{staff_id}/pause")
+    async def pause_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.pause(member))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/release")
+    async def release_staff(staff_id: str, body: ReleaseBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        released = await team_call(team.release(member, keep_worktree=body.keep_worktree if body is not None else True))
+        return {"released": bool(released)}
+
+    @api.get("/api/asks")
+    async def list_asks(project: str, open: bool = True, routed_to: Literal["orchestrator", "operator"] | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The project's requests; ``routed_to=operator`` is "Needs you"."""
+        await staff_project(project)
+        if open:
+            asks = await manager.asks.open_for(project, routed_to)
+        else:
+            rows = await manager.db.fetchall("SELECT id FROM asks WHERE project_id = ? ORDER BY created_at DESC LIMIT 200", (project,))
+            asks = [a for a in [await manager.asks.get(r["id"]) for r in rows] if a is not None]
+        return {"asks": [a.view() for a in asks]}
+
+    @api.post("/api/asks/{ask_id}/answer")
+    async def answer_ask(ask_id: str, body: AskAnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator's answer. The first answer to reach a request wins; a later one is a 409 naming who was first."""
+        team = team_or_503()
+        return await team_call(team.answer(ask_id, allow=body.allow, text=body.text, selected=body.selected, by="operator", via="app"))  # type: ignore[no-any-return]
+
+    async def team_live(staff_session_id: str, request: Request) -> Any:
+        """A command-line member's team server, authenticated by the token minted for its launch —
+        not by the operator's credentials, which the member never holds."""
+        team = team_or_503()
+        try:
+            return team, await team.authenticate(staff_session_id, request.headers.get("x-daedalus-team-token", ""))
+        except PermissionError as exc:
+            raise HTTPException(401, str(exc)) from exc
+
+    @api.post("/api/team/{staff_session_id}/report")
+    async def team_report(staff_session_id: str, body: TeamReportBody, request: Request) -> dict[str, Any]:
+        team, live = await team_live(staff_session_id, request)
+        try:
+            told = await team.ingress.report(live, body.kind, body.note, body.artifacts, body.remember)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "text": told}
+
+    @api.post("/api/team/{staff_session_id}/ask")
+    async def team_ask(staff_session_id: str, body: TeamAskBody, request: Request) -> dict[str, Any]:
+        team, live = await team_live(staff_session_id, request)
+        try:
+            ask_id = await team.ingress.ask(live, body.question, body.options, body.context)
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        ask = await manager.asks.get(ask_id)
+        return {"ask_id": ask_id, "short_id": ask.short_id if ask else "", "text": "Asked. End your turn: the answer arrives as a message."}
 
     # -- sessions -------------------------------------------------------------------
 

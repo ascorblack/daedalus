@@ -55,8 +55,11 @@ class EngineDeps:
 class PolicyAdapter:
     """The host policy as the core's safety policy: every tool, every class; deny with the reason."""
 
-    def __init__(self, decide: Callable[[str, dict[str, Any]], Any]) -> None:
+    def __init__(self, decide: Callable[[str, dict[str, Any]], Any], *, ask_hint: Callable[[], str | None] | None = None) -> None:
         self.decide = decide
+        self.ask_hint = ask_hint
+        """What to say instead of "ask the operator" when the session asks someone else (a staff
+        member's orchestrator); ``None`` from it keeps the ordinary text."""
 
     def applies_to(self, side_effect_class: str) -> bool:
         return True
@@ -65,7 +68,10 @@ class PolicyAdapter:
         decision = self.decide(tool.name, dict(arguments or {}))
         if decision.action == "allow":
             return ToolPermissionDecision(outcome=ToolPermissionOutcome.allow)
-        if decision.action == "ask":
+        hint = self.ask_hint() if self.ask_hint is not None and decision.action == "ask" else None
+        if hint:
+            reason = f"needs approval: {decision.reason} (rule {decision.rule}). Approval key: {decision.key}. {hint}"
+        elif decision.action == "ask":
             reason = (
                 f"needs the operator's approval: {decision.reason} (rule {decision.rule}). Approval key: {decision.key}. "
                 "Ask the operator with AskUser, quoting the key; once they grant it (/allow <key>, or the Mini App), the same call passes."
