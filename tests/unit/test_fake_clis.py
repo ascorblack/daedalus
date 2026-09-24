@@ -243,7 +243,11 @@ async def test_a_dialog_during_a_paste_catches_an_enter() -> None:
         await term.write(paste="echo:lost")
         await rig.screen_until(term, "a notice opened while you were pasting")
         await term.write(keys=["Enter"])
-        assert log_events(rig, "enter_into_dialog")
+        # The write returns once the bytes are in the terminal; the fake reads them and logs a moment
+        # later. Checking at once failed about one run in two on a loaded machine.
+        async with asyncio.timeout(10):
+            while not log_events(rig, "enter_into_dialog"):
+                await asyncio.sleep(0.02)
         assert not log_events(rig, "submitted")
 
 
