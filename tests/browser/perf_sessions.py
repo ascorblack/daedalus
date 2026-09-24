@@ -27,7 +27,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import GATES, Unhandled, serve_shared_post  # noqa: E402
+from api_stub import EVENTS, GATES, Unhandled, event_stream_hello, serve_shared_post  # noqa: E402
 from api_stub import folders as folder_rows  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,6 +143,8 @@ class Stub(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(600)
             return
+        if raw == EVENTS:
+            return self._send(event_stream_hello().encode(), "text/event-stream")
         if raw.startswith("/api/"):
             body = json.dumps(self._payload(raw)).encode()
             with Stub.lock:

@@ -514,6 +514,18 @@ export type Notification = {
 
 export type NotificationPage = { entries: Notification[]; next_before: number | null; summary: NotificationSummary };
 
+/** One event of the host's stream (`/api/events`). `seq` is 0 for an event the host does not keep. */
+export type AppEvent = {
+  seq: number;
+  at: string;
+  type: string;
+  project_id: string | null;
+  session_id: string | null;
+  staff_id: string | null;
+  terminal_id: string | null;
+  payload: Record<string, any>;
+};
+
 export type Proposal = {
   id: string;
   repo: string;

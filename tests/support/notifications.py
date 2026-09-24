@@ -34,7 +34,7 @@ class RecordingNotifications:
             id=number, at=now, updated_at=now, category=draft.category, kind=draft.kind or draft.category,
             level=draft.level or DEFAULT_LEVEL.get(draft.category, "normal"), tone=draft.tone, title=draft.title, body=draft.body,
             link=draft.link, session_id=draft.session_id, run_id=draft.run_id, project_id=draft.project_id, staff_id=draft.staff_id,
-            terminal_id=draft.terminal_id, source=draft.source, dedupe_key=draft.dedupe_key, count=1,
+            terminal_id=draft.terminal_id, source=draft.source, dedupe_key=draft.dedupe_key, request_ref=draft.request_ref, count=1,
             actions=[a.as_dict() for a in draft.actions], seen=number in self.seen, resolved=None,
             needs_you=draft.request_ref is not None, delivered={c: "handled" for c in draft.handled},
         )

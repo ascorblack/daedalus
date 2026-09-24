@@ -27,13 +27,26 @@ HEAD = {"X-Daedalus-Token": "tok"}
 REPO = Path(__file__).resolve().parents[2]
 
 
+class FakeOutbox:
+    def __init__(self, sent: list[tuple[str, str]], session_id: str) -> None:
+        self.sent, self.session_id = sent, session_id
+
+    async def send_text(self, text: str, *, markdown: bool = True) -> int:
+        self.sent.append((self.session_id, text))
+        return 1
+
+
 class FakeFront:
     def __init__(self) -> None:
         self.notified: list[tuple[str, bool]] = []
+        self.topics: list[tuple[str, str]] = []
         self.command_hooks: dict[str, Any] = {}
 
     async def notify(self, text: str, *, markdown: bool = True) -> None:
         self.notified.append((text, markdown))
+
+    async def outbox_for_session(self, session_id: str) -> FakeOutbox:
+        return FakeOutbox(self.topics, session_id)
 
 
 @pytest.fixture
@@ -50,8 +63,9 @@ def front() -> FakeFront:
 
 
 @pytest.fixture
-def service(db: Database, manager: SessionManager, front: FakeFront) -> NotificationService:
-    return NotificationService(db, manager.bus, front=lambda: front)
+def service(db: Database, manager: SessionManager) -> NotificationService:
+    """The store on its own: no bot, nobody present, the default preferences."""
+    return NotificationService(db, manager.bus)
 
 
 async def announced(manager: SessionManager, kind: str = "notify") -> list[Any]:
@@ -168,17 +182,17 @@ async def test_a_long_body_is_cut_in_the_event_and_kept_whole_in_the_row(service
     assert len(event.payload["notification"]["body"]) == EVENT_BODY_MAX and event.payload["notification"]["body_truncated"] is True
 
 
-async def test_telegram_general_sends_the_line_and_only_when_asked(service: NotificationService, front: FakeFront, manager: SessionManager) -> None:
-    await service.post(Draft("system", "💸 openrouter balance is $1.00", kind="balance", tone="warning", telegram_general=True))
-    await service.post(Draft("system", "Rebuild failed", "the log", kind="rebuild", telegram_general=True))
-    await service.post(Draft("run_failed", "Run failed", "boom"))
+async def test_spend_goes_to_general_while_other_installation_notices_stay_off_telegram(db: Database, manager: SessionManager, front: FakeFront) -> None:
+    service = NotificationService(db, manager.bus, front=lambda: front)
+    await service.post(Draft("spend", "💸 openrouter balance is $1.00", kind="balance", tone="warning"))
+    await service.post(Draft("system", "Service 'web' did not come back", "exit 1", kind="service", tone="warning"))
+    await service.post(Draft("system", "Change proposal: tidy", kind="change_proposal"))
     await service.post(Draft("reminder", "pills", handled=frozenset({"telegram"})))
-    assert front.notified == [("💸 openrouter balance is $1.00", False), ("Rebuild failed\n\nthe log", False)]
+    assert front.notified == [("🔔 💸 openrouter balance is $1.00", False)]
     events = await announced(manager)
-    assert [e.payload["deliver"]["telegram"] for e in events] == [True, True, False, True]
-    assert [e["delivered"] for e in reversed((await service.list("all"))["entries"])] == [
-        {"telegram": "general"}, {"telegram": "general"}, {}, {"telegram": "handled"},
-    ]
+    assert [e.payload["deliver"]["telegram"] for e in events] == [True, False, False, True]
+    delivered = [e["delivered"]["telegram"] for e in reversed((await service.list("all"))["entries"])]
+    assert delivered == ["general", "skipped: off", "skipped: off", "handled"]
 
 
 async def test_a_chat_that_refuses_the_line_leaves_the_record_and_says_so(db: Database, manager: SessionManager) -> None:
@@ -186,28 +200,26 @@ async def test_a_chat_that_refuses_the_line_leaves_the_record_and_says_so(db: Da
         async def notify(self, text: str, *, markdown: bool = True) -> None:
             raise RuntimeError("telegram is down")
 
-    service = NotificationService(db, manager.bus, front=Broken)
-    view = await service.post(Draft("system", "budget", telegram_general=True))
-    assert (await service.get(view["id"]))["delivered"] == {"telegram": "failed: RuntimeError"}  # type: ignore[index]
+    broken = Broken()
+    service = NotificationService(db, manager.bus, front=lambda: broken)
+    view = await service.post(Draft("spend", "budget"))
+    assert view is not None and view["delivered"]["telegram"] == "failed: RuntimeError"
+    assert (await announced(manager))[0].payload["deliver"]["telegram"] is False
 
 
-async def test_install_posts_failed_runs_and_the_run_cap(settings: Settings, db: Database, manager: SessionManager) -> None:
+async def test_install_wires_the_router_the_resolvers_and_the_run_cap(settings: Settings, db: Database, manager: SessionManager) -> None:
     app = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={}, notifications=None)
-    await notifications_module.install(app)  # type: ignore[arg-type]
-    service = app.notifications
-    assert isinstance(service, NotificationService) and app.extensions["notifications"] is service
-    state = await manager.create_session("Bakery")
-    state.last_error_message = "the provider refused: quota"
-    for callback in manager._finished:
-        await callback(state.session.id, "r1", "failed")
-        await callback(state.session.id, "r2", "completed")
-    await service.on_event(state.session.id, TurnEvent(type=EventType.ERROR, run_id="r3", payload={"kind": "run_cap", "message": "spent $2"}))
-    entries = (await service.list("all"))["entries"]
-    assert [(e["kind"], e["category"], e["tone"], e["run_id"]) for e in entries] == [
-        ("run_cap", "run_failed", "warning", "r3"),
-        ("run_failed", "run_failed", "error", "r1"),
-    ]
-    assert entries[1]["title"] == "Run failed in 'Bakery'" and entries[1]["body"] == "the provider refused: quota"
+    tasks = await notifications_module.install(app)  # type: ignore[arg-type]
+    try:
+        service = app.notifications
+        assert isinstance(service, NotificationService) and app.extensions["notifications"] is service
+        assert set(service._resolvers) == {"ask", "policy"} and len(manager.delete_hooks) == 1
+        await service.on_event("s1", TurnEvent(type=EventType.ERROR, run_id="r3", payload={"kind": "run_cap", "message": "spent $2"}))
+        [entry] = (await service.list("all"))["entries"]
+        assert (entry["kind"], entry["category"], entry["tone"], entry["run_id"]) == ("run_cap", "run_failed", "warning", "r3")
+    finally:
+        for task in tasks:
+            task.cancel()
 
 
 async def test_the_inbox_command_lists_unseen_and_marks_them(settings: Settings, db: Database, manager: SessionManager, service: NotificationService) -> None:
@@ -253,8 +265,9 @@ async def test_the_routes(settings: Settings, db: Database, manager: SessionMana
 
 
 def test_nothing_reaches_for_the_old_inbox() -> None:
-    """The inbox extension is gone; a producer still asking for it would post into nothing, silently."""
-    pattern = re.compile(r"""extensions(\.get\(|\[)\s*["']inbox["']|extensions\.inbox|\bapp\.notify\(""")
+    """The inbox extension is gone; a producer still asking for it would post into nothing, silently.
+    So is the flag that sent a line to General beside the router: the preferences decide that now."""
+    pattern = re.compile(r"""extensions(\.get\(|\[)\s*["']inbox["']|extensions\.inbox|\bapp\.notify\(|telegram_general""")
     offenders = [
         f"{path.relative_to(REPO)}:{number}"
         for path in sorted((REPO / "daedalus").rglob("*.py"))
