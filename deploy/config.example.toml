@@ -189,6 +189,14 @@ thresholds_usd = [
 wip_limit = 3              # tasks one agent (with its subagents) may hold in 'doing' at once
 stale_hours = 6            # a 'doing' task whose session went quiet this long is handed back to 'todo'
 
+[terminals]
+# running_cap = 20             # terminals running at once across the machine, both environments; an agent's
+#                              # launch waits for a place, the operator may go past it after confirming
+# agent_launch_wait_seconds = 600
+# exited_retention_hours = 72  # how long an ended terminal stays listed with its last screen
+# audit_retention_days = 90
+# shell = ""                   # empty = the environment's login shell
+
 [ops]
 # provider_retry_max_attempts = 6      # runs driven again after the model provider failed one in a row; 0 = none
 # provider_retry_base_seconds = 30.0   # the first wait; it doubles each time up to provider_retry_max_seconds

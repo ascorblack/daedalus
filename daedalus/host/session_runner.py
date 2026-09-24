@@ -77,6 +77,8 @@ from daedalus.stores.sqlite import (
     SqliteUsageSink,
     message_text,
 )
+from daedalus.stores.staff import AsksStore, StaffStore
+from daedalus.terminals import endpoint as terminal_endpoint
 from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
@@ -418,6 +420,17 @@ class SessionManager:
             home=Path.home(),
             local_env="host" if settings.native else "container",
         )
+        personas = settings.bot_repo_dir / "personas"
+        # Read through the live configuration, not a copy: a preset added in Settings is a model a
+        # staff member may be given at once, without a restart.
+        self.staff = StaffStore(
+            db,
+            local_env=self.projects.local_env,
+            config=lambda: self.config.staff,
+            presets=lambda: self.config.presets.keys(),
+            personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
+        )
+        self.asks = AsksStore(db)
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -455,6 +468,9 @@ class SessionManager:
         self.service_hooks: dict[str, Any] = {}
         self.delete_hooks: list[Callable[[str], Awaitable[None]]] = []
         """Called with the session id before a session is removed (extensions release what they hold for it)."""
+        self.project_delete_hooks: list[Callable[[str], Awaitable[None]]] = []
+        """Called with the project id before a project is forgotten, for what an extension holds for the
+        project itself rather than for one of its sessions (its terminals)."""
         """Callbacks the transport layer installs: send_file, spawn_agent, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
@@ -3768,6 +3784,7 @@ class SessionManager:
             project_roots=self.projects.roots,
             worktrees_root=self.settings.worktrees_dir,
             sealed_paths=self.settings.sealed_paths,
+            sealed_everywhere=self.settings.sealed_everywhere,
             sealed_ports=self._sealed_ports(),
             # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`
             # is read as the file it names rather than as a word with no slash at the front.
@@ -3788,6 +3805,10 @@ class SessionManager:
         launcher = launcher_bridge.read(self.settings.state_dir)
         if launcher is not None:
             ports.append(launcher.port)
+        # The terminal daemons' doors, where one listens on this loopback interface: a daemon on a
+        # TCP endpoint (Windows) and its hook listener (natively). Whatever reaches either holds a
+        # shell or speaks for a running CLI, so it is asked through the app as the rest is.
+        ports.extend(terminal_endpoint.sealed_ports(self.settings))
         return tuple(ports)
 
     def protected_paths(self) -> tuple[Path, ...]:

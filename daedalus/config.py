@@ -254,6 +254,18 @@ class Settings(BaseSettings):
     the operator's own machine, and that is the address to open."""
     miniapp_public_url: str = ""
 
+    terminals_container_dir: Path | None = None
+    """The run directory of the terminal daemon of the ``container`` environment (a volume this
+    container shares with the terminals service): its endpoint, its token and its socket. Unset = no
+    container terminals on this installation."""
+    terminals_host_dir: Path | None = None
+    """The same for the ``host`` environment: the operator's own machine, reached through a directory
+    bind-mounted from it, or natively a directory the launcher gives the daemon. An empty directory
+    reads as "not installed"."""
+    terminals_port_range: str = "8120-8139"
+    """Ports a server started in a container terminal is published on; the compose file publishes the
+    same range from the terminals service. The agent's own services use ``services_port_range``."""
+
     usd_per_day: float = 20.0
     """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
 
@@ -340,7 +352,19 @@ class Settings(BaseSettings):
         # reads it to ask the launcher for a component; the agent asks the app.
         if self.native:
             paths.append(self.state_dir.parent / "launcher.json")
+        paths.extend(self.sealed_everywhere)
         return tuple(paths)
+
+    @property
+    def sealed_everywhere(self) -> tuple[Path, ...]:
+        """The part of the sealed set a command may not name even inside a container.
+
+        The terminal daemons' run directories. Their token opens a shell — on the host environment,
+        a shell on the operator's own machine, outside every wall the agent's container is — so
+        unlike the rest of the sealed set, a container is no boundary for it: the directory is
+        mounted into this container precisely so the app can reach the daemon.
+        """
+        return tuple(p for p in (self.terminals_container_dir, self.terminals_host_dir) if p is not None)
 
     @property
     def skills_dir(self) -> Path:
@@ -1026,6 +1050,28 @@ class SubagentsConfig(BaseModel):
     wait_timeout_minutes: int = Field(default=30, ge=1)
 
 
+class StaffConfig(BaseModel):
+    """The named members of a project's team: how much of them is kept, and how their signals are paced."""
+
+    notes_max_chars: int = Field(default=8000, ge=500)
+    """What a staff member carries from one session to the next. Past it the oldest lines go: notes
+    are read at the start of every session, so an unbounded file would slowly become the whole prompt."""
+    launch_stagger_seconds: int = Field(default=5, ge=0)
+    """The gap between two launches of one project, so a queue that frees six slots at once does not
+    start six processes in the same second."""
+    silence_minutes: int = Field(default=10, ge=1)
+    """A working staff member with no signal for this long is shown as silent rather than working."""
+    ask_escalate_minutes: int = Field(default=10, ge=1)
+    """A request left with the orchestrator this long goes to the operator: a blocked worker must not
+    wait on a model that is itself failing."""
+    read_default_chars: int = Field(default=4000, ge=200)
+    read_max_chars: int = Field(default=16000, ge=1000)
+    report_summary_chars: int = Field(default=300, ge=40)
+    signal_write_seconds: int = Field(default=5, ge=0)
+    """The least time between two writes of a staff session's last signal. Every event of a busy
+    session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
+
+
 class LoopsConfig(BaseModel):
     """Loop agents: a session woken up for one standing task, on an interval or when it asks."""
 
@@ -1101,6 +1147,33 @@ class OpsConfig(BaseModel):
     presence_grace_seconds: float = Field(default=5.0, ge=0)
     """How long a window still counts after its event stream dropped: long enough for a reconnect,
     far shorter than the report's own lifetime."""
+
+
+class TerminalsConfig(BaseModel):
+    """Terminals: real shells and CLI programs run by a terminal daemon per environment."""
+
+    running_cap: int = Field(default=20, ge=1)
+    """Terminals that may run at once across the whole machine, both environments together. It has
+    no upper bound on purpose: the load estimate warns when a value is more than the machine can
+    carry, and the operator decides. An agent's launch waits for a free place; the operator may go
+    past it after confirming."""
+    ring_bytes: int = Field(default=8 << 20, ge=1 << 20, le=64 << 20)
+    """Output each terminal keeps for a late reader or a reattaching browser."""
+    snapshot_scrollback_lines: int = Field(default=2000, ge=0, le=10_000)
+    input_idle_ms: int = Field(default=10_000, ge=0, le=600_000)
+    """How long an agent's write waits after the last human keystroke, so it never lands mid-word."""
+    kill_grace_ms: int = Field(default=2000, ge=0, le=30_000)
+    """Between the hang-up and the kill when a terminal is ended."""
+    exited_retention_hours: int = Field(default=72, ge=1)
+    """How long an ended terminal's row, with its last screen, stays listed."""
+    audit_retention_days: int = Field(default=90, ge=1)
+    ticket_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    shell: str = ""
+    """The program a shell terminal runs; empty = the environment's login shell."""
+    preview_poll_ms: int = Field(default=3000, ge=500)
+    """How often the Terminals screen refreshes its previews while it is visible."""
+    agent_launch_wait_seconds: float = Field(default=600.0, ge=0)
+    """How long an agent's launch waits in line for a free place under the cap before it gives up."""
 
 
 class HeartbeatConfig(BaseModel):
@@ -1225,7 +1298,9 @@ class RuntimeConfig(BaseModel):
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
+    staff: StaffConfig = Field(default_factory=StaffConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
+    terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -1533,6 +1608,7 @@ __all__ = [
     "SttConfig",
     "BoardConfig",
     "PeersConfig",
+    "StaffConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
     "ModeConfig",

@@ -31,6 +31,9 @@
   --ansi-4: #7db4ff; --ansi-5: #c792ea; --ansi-6: #2dd4bf; --ansi-7: #c8c9ce;
   --ansi-8: #5c5d66; --ansi-9: #ff8a85; --ansi-10: #8be9a8; --ansi-11: #f5cf7a;
   --ansi-12: #a6ccff; --ansi-13: #ddb3f5; --ansi-14: #7ee8d9; --ansi-15: #ededef;
+  /* A staff member's colour, one of eight the host hands out by name (daedalus/stores/staff.py). */
+  --staff-blue: #7db4ff; --staff-green: #5fd68a; --staff-amber: #e8b44c; --staff-violet: #c792ea;
+  --staff-rose: #f28bab; --staff-teal: #2dd4bf; --staff-orange: #f59e5b; --staff-slate: #9aa4b5;
 
   /* ── the scale everything is drawn on ────────────────────────────────────────────────────
      Type: the UI is 13/14, prose is 15 on a desktop and 16 on a phone; code is 12.5. A rule that
@@ -122,6 +125,8 @@
   --ansi-4: #2f6fe0; --ansi-5: #9b4dca; --ansi-6: #0e9f8e; --ansi-7: #8e9098;
   --ansi-8: #5b5d66; --ansi-9: #e0524d; --ansi-10: #25b865; --ansi-11: #c98a26;
   --ansi-12: #4a84f0; --ansi-13: #b066dd; --ansi-14: #13b3a0; --ansi-15: #b4b5bb;
+  --staff-blue: #2f6fe0; --staff-green: #1e9e56; --staff-amber: #b7791f; --staff-violet: #9b4dca;
+  --staff-rose: #d0456f; --staff-teal: #0e9f8e; --staff-orange: #d46a1c; --staff-slate: #5b667a;
 }
 /* The terminal's typeface, bundled so box drawing and powerline glyphs line up on every machine.
    The file is fetched only when a terminal asks for it (terminal/load.ts), never by the page. */
@@ -2284,4 +2289,51 @@ h1.start-greeting { margin:0; max-width:18em; font-size:var(--fs-18); font-weigh
 @media (min-width: 1024px) {
   .start { flex:1; min-height:0; }
   .start-hero { flex:1; min-height:0; padding:var(--space-4) var(--space-4) 0; }
+}
+
+/* ── a project's team ─────────────────────────────────────────────────────────────────────
+   One row per member: who (avatar, name, persona), what they answer for, what runs them and where,
+   and, on the right, what they are doing and the executor's badge. On a phone the right-hand column
+   stays and the two meta lines wrap under the name rather than squeezing it. */
+.staff-avatar { --c: var(--staff-blue); width: calc(var(--avatar) + var(--space-2)); height: calc(var(--avatar) + var(--space-2)); border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-12); font-weight: 700; letter-spacing: 0.02em; color: var(--c); background: color-mix(in srgb, var(--c) 18%, transparent); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); }
+.staff-avatar.small { width: var(--avatar); height: var(--avatar); font-size: var(--fs-11); }
+.harness-badge { display: inline-flex; align-items: center; justify-content: center; min-width: var(--avatar); padding: 1px 6px; border-radius: var(--radius-xs); border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg-2); font-family: var(--mono); font-size: var(--fs-11); font-weight: 600; flex: none; }
+.harness-badge.daedalus { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.staff-list { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.staff-list.archived { opacity: 0.7; }
+.staff-row { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-height: var(--row-h); padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); color: var(--fg); font: inherit; text-align: left; }
+button.staff-row { cursor: pointer; }
+button.staff-row:hover { background: var(--surface-2); }
+.staff-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.staff-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.staff-name { font-weight: 600; font-size: var(--fs-14); min-width: 0; }
+.staff-agent { font-weight: 400; color: var(--fg-2); }
+.staff-role { color: var(--fg); font-size: var(--fs-13); }
+.staff-meta { display: flex; flex-wrap: wrap; column-gap: var(--space-4); row-gap: 2px; color: var(--fg-2); font-size: var(--fs-12); min-width: 0; }
+.staff-meta > span { min-width: 0; max-width: 100%; }
+.staff-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.staff-status-inline { display: none; }
+.staff-sheet-who { display: flex; align-items: center; gap: var(--space-2); margin-bottom: 4px; }
+.executor-choice { border: 0; padding: 0; margin: 0; min-width: 0; }
+.executor-choice legend { padding: 0; margin: 10px 0 4px; color: var(--muted); font-size: var(--fs-12); }
+.executor-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.executor { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-height: var(--row-h); padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--fg); font: inherit; font-size: var(--fs-13); text-align: left; cursor: pointer; min-width: 0; }
+.executor.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
+.executor:disabled { cursor: not-allowed; opacity: 0.55; }
+.executor-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.executor-why { color: var(--fg-2); font-size: var(--fs-11); }
+.staff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-3); }
+.branch-preview { font-family: var(--mono); font-size: var(--fs-12); word-break: break-all; }
+.colour-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: 4px; }
+.colour-swatch { --c: var(--staff-blue); width: var(--ctl-h-sm); height: var(--ctl-h-sm); border-radius: 50%; border: 2px solid transparent; background: var(--c); cursor: pointer; padding: 0; }
+.colour-swatch.on { border-color: var(--fg); box-shadow: inset 0 0 0 2px var(--surface-1); }
+.staff-sheet textarea.field { resize: vertical; font: inherit; }
+@media (min-width: 720px) {
+  .executor-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+@media (max-width: 479px) {
+  .staff-grid { grid-template-columns: minmax(0, 1fr); }
+  .staff-row { padding: 10px; gap: var(--space-2); }
+  .staff-side .status { display: none; }
+  .staff-status-inline { display: block; margin-top: 2px; }
 }
