@@ -50,7 +50,8 @@ Faults, a comma list in ``FAKE_CLI_FAULTS``:
 ``late_permission_notification``
     the permission dialog is on screen well before any hook or event says so.
 ``dialog_during_paste``
-    a notice opens as a paste arrives, swallows the paste, and stays for five seconds.
+    a notice opens as a paste arrives, swallows the paste, and stays until Enter or Esc dismisses it
+    (a timed close would make "an Enter landed in it" depend on how loaded the machine is).
 ``exit_after:<turns>``
     the process dies with exit code 3 after that many turns, without saying goodbye — a crash.
 ``no_2004``
@@ -59,8 +60,10 @@ Faults, a comma list in ``FAKE_CLI_FAULTS``:
     the composer (and the ready signal) comes that much later.
 
 Every fake appends what it did to the JSON-lines file ``FAKE_CLI_LOG`` when that is set: each
-submission, swallowed Enter, dialog, answer, interrupt and exit. That is how a test proves there
-was exactly one submission per message, or that no Enter ever landed in a dialog.
+submission, swallowed Enter, dialog, answer, interrupt, the end of each turn (``turn_ended``, after
+all of its hooks) and exit. That is how a test proves there was exactly one submission per message,
+or that no Enter ever landed in a dialog — and how it knows a thing has happened, or will not, without
+guessing a delay.
 """
 
 from __future__ import annotations
@@ -557,6 +560,10 @@ class Tui:
                 mark = "❯" if index == d.selected else " "
                 bottom.append(f"{mark} {index + 1}. {option}")
             bottom.append(d.footer)
+        elif not self.ready:
+            # No composer before the CLI is ready, as in the real TUIs: a harness (or a test) that
+            # waits for the composer must never find one drawn before the CLI's channels are up.
+            bottom.append(self.status or "Starting…")
         else:
             if self.status:
                 bottom.append(self.status)
@@ -678,7 +685,6 @@ class Tui:
         if self.faults.dialog_during_paste:
             self.faults.dialog_during_paste = False
             self.open_dialog(Dialog("notice", "Heads up: a notice opened while you were pasting.", ["The pasted text was not kept."], ["Dismiss"], on_choose=lambda i: None, on_escape=lambda: None))
-            self.spawn(self._close_notice_later())
             return
         lines = text.count("\n") + 1
         collapse = len(text) > self.look.collapse_chars or (self.look.collapse_lines and lines > self.look.collapse_lines)
@@ -688,13 +694,6 @@ class Tui:
         else:
             self.parts.append(text)
             self._merge()
-
-    async def _close_notice_later(self) -> None:
-        # Wall-clock, not scaled: the point of the notice is that it stays long enough for a careless
-        # Enter to land in it.
-        await asyncio.sleep(5)
-        if self.dialog is not None and self.dialog.kind == "notice":
-            self.close_dialog()
 
     def _enter(self) -> None:
         if self.enter_broken:
