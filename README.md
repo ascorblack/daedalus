@@ -541,6 +541,20 @@ revision, `PUT` saves it (`{"preferences", "base_revision"}`, 409 when stale), a
 `POST /api/notifications/test` sends one notification through every channel there is and reports
 each outcome.
 
+**A project's board.** Every task whose project is set is on that project's board, and a task an
+agent adds is drawn on the board of the project it works in. `GET /api/projects/{id}/board` answers
+`{"project", "tasks", "needs_you", "counts", "staff"}`: each task carries its four-part `brief`
+(`objective`, `deliverable`, `boundaries`, `done_when`) and its `assignee` with that staff member's
+live status; `needs_you` is the project's open requests routed to the operator, read from the
+requests themselves each time, so an answer from anywhere ends one. `POST` to the same address adds a
+task with `{"title", "brief", "assignee_staff_id", "depends_on", "priority"}`; `PUT /api/board/{id}`
+also takes `assignee_staff_id` (`""` unassigns), `brief` (the parts sent) and `depends_on`; `POST
+/api/board/{id}/accept` moves a task from review to done (**409** when it is not in review, or its
+staff branch is not merged); `GET /api/board?project=<id>` is one project's tasks. A project's staff
+and orchestrator see its whole board, move only their own tasks and never to done; an ordinary agent
+keeps its own board, without the team's tasks. Each change is a `task.created`, `task.moved`,
+`task.assigned` or `task.accepted` event naming its `actor`.
+
 ## Layout
 
 ```

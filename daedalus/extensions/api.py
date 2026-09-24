@@ -489,6 +489,19 @@ class BoardTaskBody(BaseModel):
     """The agent whose board the task goes on; ``None`` posts it to every agent's board."""
 
 
+class TaskBrief(BaseModel):
+    """The four parts of a task's brief. On an edit only the parts sent change."""
+
+    model_config = ConfigDict(extra="forbid")
+    objective: str | None = Field(default=None, max_length=4000)
+    deliverable: str | None = Field(default=None, max_length=4000)
+    boundaries: str | None = Field(default=None, max_length=4000)
+    done_when: str | None = Field(default=None, max_length=4000)
+
+    def fields(self) -> dict[str, str]:
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
+
 class BoardUpdateBody(BaseModel):
     status: str | None = None
     note: str = ""
@@ -497,6 +510,21 @@ class BoardUpdateBody(BaseModel):
     priority: int | None = Field(default=None, ge=1, le=5)
     title: str | None = None
     acceptance: str | None = None
+    assignee_staff_id: str | None = None
+    """A staff member of the task's project; ``""`` takes the task off whoever had it."""
+    brief: TaskBrief | None = None
+    depends_on: list[str] | None = Field(default=None, max_length=50)
+
+
+class ProjectTaskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=200)
+    brief: TaskBrief = Field(default_factory=TaskBrief)
+    assignee_staff_id: str | None = None
+    depends_on: list[str] = Field(default_factory=list, max_length=50)
+    priority: int = Field(default=3, ge=1, le=5)
+    checklist: list[str] = Field(default_factory=list, max_length=100)
+    notes: str = Field(default="", max_length=4000)
 
 
 class PeerBody(BaseModel):
@@ -3564,8 +3592,52 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return board
 
     @api.get("/api/board")
-    async def board_list(include_done: int = 0, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        return await _board().list(None, include_done=bool(include_done))
+    async def board_list(include_done: int = 0, project: str | None = None, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """Every task, or with ``project`` one project's board: the shell's project lens over the Board screen."""
+        return await _board().list(None, include_done=bool(include_done), project_id=project or None)
+
+    async def launch(task: dict[str, Any]) -> dict[str, Any] | None:
+        """Hand a newly assigned task to the staff runtime, when one is installed, and say what it did.
+
+        The assignment itself is the board's and stands whatever the runtime answers: a runtime that
+        refuses (a brief incomplete, the member busy) leaves the task assigned and waiting, and the
+        answer travels back so the sheet can show it.
+        """
+        runtime = app.extensions.get("staff")
+        if runtime is None or not hasattr(runtime, "assign") or not task.get("assignee_staff_id"):
+            return None
+        member = await manager.staff.get(task["assignee_staff_id"])
+        if member is None:
+            return None
+        try:
+            result = await runtime.assign(member, task, by="operator")
+        except (ValueError, KeyError) as exc:
+            return {"state": "refused", "detail": str(exc)}
+        return result if isinstance(result, dict) else {"state": str(result)}
+
+    @api.get("/api/projects/{project_id}/board")
+    async def project_board(project_id: str, include_done: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A project's board: its tasks with their assignees, what waits on the operator, and the counts."""
+        project = await manager.projects.get(project_id)
+        if project is None:
+            raise HTTPException(404, "no such project")
+        board = await _board().project_board(project_id, include_done=bool(include_done))
+        return {"project": {"id": project.id, "name": project.name, "ephemeral": project.settings.ephemeral, "system": project.settings.system}, **board}
+
+    @api.post("/api/projects/{project_id}/board", status_code=201)
+    async def project_board_add(project_id: str, body: ProjectTaskBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if await manager.projects.get(project_id) is None:
+            raise HTTPException(404, "no such project")
+        try:
+            task = await _board().add(
+                title=body.title, checklist=body.checklist, depends_on=body.depends_on, priority=body.priority, notes=body.notes,
+                project_id=project_id, assignee_staff_id=body.assignee_staff_id or None, brief=body.brief.fields(), operator=True,
+            )
+        except KeyError:
+            raise HTTPException(404, "no such project") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {**task, "launch": await launch(task)}
 
     @api.post("/api/board")
     async def board_add(body: BoardTaskBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -3579,11 +3651,28 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.put("/api/board/{task_id}")
     async def board_update(task_id: str, body: BoardUpdateBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            return await _board().update(task_id, status=body.status, note=body.note, check=body.check, uncheck=body.uncheck, priority=body.priority, title=body.title, acceptance=body.acceptance)
+            before = await _board().get(task_id)
+            task = await _board().update(
+                task_id, status=body.status, note=body.note, check=body.check, uncheck=body.uncheck, priority=body.priority, title=body.title, acceptance=body.acceptance,
+                assignee_staff_id=body.assignee_staff_id, brief=body.brief.fields() if body.brief is not None else None, depends_on=body.depends_on,
+            )
         except KeyError:
             raise HTTPException(404, "no such task") from None
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        assigned = task.get("assignee_staff_id") and task.get("assignee_staff_id") != before.get("assignee_staff_id")
+        return {**task, "launch": await launch(task) if assigned else None}
+
+    @api.post("/api/board/{task_id}/accept")
+    async def board_accept(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator accepts a task in review; it is done. A conflict when it is not in review, or when
+        its staff branch is not merged yet."""
+        try:
+            return await _board().accept(task_id, by="operator")
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @api.delete("/api/board/{task_id}")
     async def board_delete(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

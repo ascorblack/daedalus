@@ -69,7 +69,8 @@ async def board_update(
     description=(
         "Show your board: open tasks by status and priority (include_done=true adds finished ones). It holds the "
         "tasks this session and its subagents created and the ones the operator posted to nobody in particular; "
-        "other agents' tasks are not on it. A task's acceptance, notes and checklist come with BoardGet."
+        "other agents' tasks are not on it. A project's staff and orchestrator see the project's whole board instead. "
+        "A task's acceptance, brief, notes and checklist come with BoardGet."
     ),
 )
 async def board_list(context: ToolContext, status: str | None = None, include_done: bool = False) -> ToolResult:
@@ -89,9 +90,10 @@ async def board_get(context: ToolContext, task_id: str) -> ToolResult:
     except KeyError:
         return error(context, f"no task {task_id}")
     checklist = "\n".join(f"  [{'x' if c['done'] else ' '}] {i}. {c['text']}" for i, c in enumerate(t["checklist"])) or "  (none)"
+    brief = "".join(f"{key.replace('_', ' ')}: {value}\n" for key, value in (t.get("brief") or {}).items() if value)
     return ok(
         context,
-        f"{t['id']} · {t['status']} · p{t['priority']} · {t['title']}\nacceptance: {t['acceptance'] or '(none)'}\nchecklist:\n{checklist}\n"
+        f"{t['id']} · {t['status']} · p{t['priority']} · {t['title']}\n{brief}acceptance: {t['acceptance'] or '(none)'}\nchecklist:\n{checklist}\n"
         f"depends on: {', '.join(t['depends_on']) or 'nothing'}\nsession: {t['session_id'] or '-'}\nnotes:\n{t['notes'] or '(none)'}",
     )
 

@@ -88,6 +88,11 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
               <Icon name="bots" size={15} />
             </button>
           )}
+          {!p.system && !p.settings.ephemeral && (
+            <button className="iconbtn small" onClick={() => { onClose(); navigate(projectPagePath(p.id, "board")); }} title={t("project.board.for", { name: p.name })} aria-label={t("project.board.for", { name: p.name })}>
+              <Icon name="board" size={15} />
+            </button>
+          )}
           <button className="iconbtn small" onClick={() => setEditing(p)} title={t("project.settings.for", { name: p.name })} aria-label={t("project.settings.for", { name: p.name })}>
             <Icon name="settings" size={15} />
           </button>
