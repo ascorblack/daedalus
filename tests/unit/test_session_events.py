@@ -101,6 +101,8 @@ async def test_finished_says_who_was_watching_and_who_the_run_was_for(settings: 
         assert by_session[beat.session.id]["operator_facing"] is False
         assert by_session[scheduled.session.id]["operator_facing"] is False and by_session[scheduled.session.id]["origin"] == "schedule"
         assert by_session[watched.session.id]["telegram"] is True and by_session[site.session.id]["telegram"] is False
+        # A subagent never speaks in Telegram, whatever its leader does.
+        assert by_session[child.session.id]["telegram"] is False
     finally:
         await manager.close()
 

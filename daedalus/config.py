@@ -755,11 +755,116 @@ class SchedulerConfig(BaseModel):
     """A lazy reminder not yet seen by the operator after this long becomes an agent task."""
 
 
-class NotificationsConfig(BaseModel):
-    """What happens to the things that want the operator's attention."""
+NotifyCell = Literal["on", "off", "urgent"]
+"""One cell of the notification matrix: always, never, or only for urgent notifications."""
 
+NOTIFICATION_CATEGORIES = (
+    "run_finished",
+    "question",
+    "permission",
+    "run_failed",
+    "staff_turn",
+    "staff_review",
+    "orchestrator_report",
+    "agent_notify",
+    "reminder",
+    "spend",
+    "system",
+)
+"""Every kind of thing that may want the operator. ``spend`` (a balance under its threshold, the day's
+budget gone) is its own row because it is the one installation notice the operator wants in the
+General topic, while a service that is down or a change waiting for review stays off Telegram."""
+
+
+class NotifyCells(BaseModel):
+    in_app: NotifyCell = "on"
+    push: NotifyCell = "on"
+    desktop: NotifyCell = "on"
+    telegram: NotifyCell = "off"
+
+
+def _default_matrix() -> dict[str, NotifyCells]:
+    quiet_outside_app = NotifyCells(push="off", desktop="off")
+    return {
+        "run_finished": NotifyCells(),
+        "question": NotifyCells(telegram="on"),
+        "permission": NotifyCells(telegram="on"),
+        "run_failed": NotifyCells(telegram="on"),
+        "staff_turn": quiet_outside_app,
+        "staff_review": NotifyCells(),
+        # The orchestrator posts its reports to its project's topic itself; the router never does.
+        "orchestrator_report": NotifyCells(telegram="on"),
+        "agent_notify": NotifyCells(telegram="urgent"),
+        "reminder": NotifyCells(telegram="on"),
+        "spend": NotifyCells(telegram="on"),
+        "system": NotifyCells(),
+    }
+
+
+class NotificationsConfig(BaseModel):
+    """What happens to the things that want the operator's attention, and where each one goes."""
+
+    matrix: dict[str, NotifyCells] = Field(default_factory=_default_matrix)
+    """Per category, which channels carry it. A category the file does not name keeps its default."""
+    finished_min_seconds: int = Field(default=30, ge=0)
+    """A finished run is announced only when it took at least this long: a quick answer the
+    operator waited for in front of the screen needs no notification."""
+    quiet_hours: str = ""
+    """``HH:MM-HH:MM`` in the operator's time zone, which may wrap midnight; empty means none.
+    Inside it nothing below urgent pushes, raises a desktop notification or goes to Telegram."""
+    muted_projects: dict[str, str] = Field(default_factory=dict)
+    """Project id → the ISO moment the mute ends, or "" for until it is lifted."""
+    quick_actions: bool = True
+    """Allow, deny and answer from a notification without opening the app, where the request allows it."""
+    telegram_covers_push: bool = True
+    """Nothing is pushed or raised on the desktop that Telegram already delivered: one phone, one buzz."""
     keep_days: int = Field(default=30, ge=1)
     """Seen (or quiet) notifications older than this are pruned; one still waiting for an answer never is."""
+    push_per_session: int = Field(default=6, ge=1)
+    push_window_minutes: int = Field(default=10, ge=1)
+    push_per_hour: int = Field(default=60, ge=1)
+    """The ceiling across every session, against a loop that has gone wrong."""
+    notify_tool_per_session: int = Field(default=5, ge=1)
+    notify_tool_window_minutes: int = Field(default=10, ge=1)
+    notify_tool_urgent_per_hour: int = Field(default=2, ge=0)
+    orchestrator_hold_seconds: int = Field(default=60, ge=0)
+    """How long a staff member's question waits for its orchestrator before it reaches the operator."""
+
+    @field_validator("matrix")
+    @classmethod
+    def _complete_matrix(cls, value: dict[str, NotifyCells]) -> dict[str, NotifyCells]:
+        unknown = sorted(set(value) - set(NOTIFICATION_CATEGORIES))
+        if unknown:
+            raise ValueError(f"unknown notification categories: {', '.join(unknown)}")
+        return {**_default_matrix(), **value}
+
+    @field_validator("quiet_hours")
+    @classmethod
+    def _quiet_hours_shape(cls, value: str) -> str:
+        value = value.strip()
+        if value and parse_quiet_hours(value) is None:
+            raise ValueError("quiet hours are HH:MM-HH:MM, for example 23:00-07:30")
+        return value
+
+    def cells(self, category: str) -> NotifyCells:
+        return self.matrix.get(category) or _default_matrix().get(category) or NotifyCells()
+
+
+def parse_quiet_hours(spec: str) -> tuple[int, int] | None:
+    """``"23:00-07:30"`` → minutes after midnight of the start and the end; ``None`` when malformed."""
+    start, sep, end = spec.strip().partition("-")
+    if not sep:
+        return None
+    minutes = []
+    for part in (start, end):
+        hours, colon, mins = part.strip().partition(":")
+        if not colon or not hours.isdigit() or not mins.isdigit() or len(mins) != 2:
+            return None
+        h, m = int(hours), int(mins)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return None
+        minutes.append(h * 60 + m)
+    return minutes[0], minutes[1]
 
 
 class AsrConfig(BaseModel):
@@ -965,6 +1070,61 @@ class StaffConfig(BaseModel):
     signal_write_seconds: int = Field(default=5, ge=0)
     """The least time between two writes of a staff session's last signal. Every event of a busy
     session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
+
+
+class HarnessConfig(BaseModel):
+    """Command-line agents as staff: how long to wait on them, and how carefully to type into them."""
+
+    no_signal_after_s: int = Field(default=300, ge=30, le=3600)
+    """A working session with neither a structured signal nor terminal output for this long has its
+    screen checked; what the screen cannot settle is shown as silent, never as failed."""
+    reconcile_gap_ms: int = Field(default=1500, ge=200, le=10_000)
+    """Between the two screen readings that must agree before a turn end is inferred from the screen."""
+    ack_timeout_s: float = Field(default=8.0, ge=1, le=120)
+    """How long a submitted message may go unacknowledged before it is looked for on screen and in
+    the transcript."""
+    enter_retries: int = Field(default=2, ge=0, le=5)
+    """Enters sent again when the composer still holds the message. Never more: a message that is
+    neither in the composer nor in the transcript is reported failed, not resent."""
+    enter_delay_base_ms: int = Field(default=400, ge=0, le=5000)
+    enter_delay_per_kib_ms: int = Field(default=60, ge=0, le=1000)
+    enter_delay_max_ms: int = Field(default=2000, ge=0, le=10_000)
+    """The pause between a paste and its Enter grows with the paste, up to this: a TUI still reading
+    a large paste takes an early Enter as part of it."""
+    paste_chunk_bytes: int = Field(default=4096, ge=256, le=65_536)
+    pointer_threshold_bytes: int = Field(default=16_384, ge=1024, le=1 << 20)
+    """A message longer than this goes as a file in the launch directory with a one-line pointer:
+    TUIs collapse, truncate or choke on large pastes."""
+    interrupt_timeout_s: float = Field(default=15.0, ge=1, le=300)
+    answer_confirm_s: float = Field(default=5.0, ge=0.5, le=60)
+    """How long an answer typed into a dialog may take to show its effect before it counts as not
+    delivered and the operator is asked to answer in the terminal."""
+    ask_hold_s: int = Field(default=300, ge=10, le=3600)
+    """How long a staff member's question to the orchestrator is held open before the tool returns
+    "no answer yet" and the worker goes on with what its brief allows."""
+    stop_grace_s: float = Field(default=10.0, ge=0, le=120)
+    """Between asking a CLI to exit and killing its terminal."""
+    catalog_ttl_s: int = Field(default=21_600, ge=300)
+    latest_ttl_s: int = Field(default=21_600, ge=300)
+    allow_untested: bool = True
+    """Launch a CLI whose version is outside the adapter's tested range, when its self-check passed."""
+    self_check_model_turn: bool = True
+    """The self-check after an update sends one tiny prompt on the cheapest model, which costs a few
+    tokens of the subscription and is the only proof that a prompt still gets through."""
+    opencode_port_range: str = Field(default="18300-18399", pattern=r"^\d{4,5}-\d{4,5}$")
+    """Loopback ports OpenCode's embedded server may take, one per launch."""
+
+    @field_validator("opencode_port_range")
+    @classmethod
+    def _outside_reserved_ports(cls, value: str) -> str:
+        # The agent hands 8100–8119 to its own preview servers and 8120–8139 to container terminals'
+        # servers; an OpenCode server on one of those would take a port someone else was promised.
+        low, high = (int(part) for part in value.split("-"))
+        if not 1024 <= low <= high <= 65535:
+            raise ValueError("a port range is low-high within 1024-65535")
+        if low <= 8139 and high >= 8100:
+            raise ValueError("the range must stay clear of 8100-8139")
+        return value
 
 
 class LoopsConfig(BaseModel):
@@ -1194,6 +1354,7 @@ class RuntimeConfig(BaseModel):
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
+    harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
@@ -1504,6 +1665,7 @@ __all__ = [
     "BoardConfig",
     "PeersConfig",
     "StaffConfig",
+    "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
     "ModeConfig",
