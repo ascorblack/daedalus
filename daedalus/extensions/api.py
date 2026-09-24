@@ -59,6 +59,7 @@ from daedalus.host import capabilities, component_install, launcher_bridge
 from daedalus.host import components as component_list
 from daedalus.host.config_validation import ConfigConflict, config_revision, validate_candidate
 from daedalus.host.dependencies import DependencyPlanner
+from daedalus.host.events import EventFilter, event_stream, streamed_types
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
@@ -772,6 +773,10 @@ WEBHOOK_MAX_BYTES = 2 * 1024 * 1024
 
 GZIP_MIN_BYTES = 1024
 """Responses smaller than this go out as they are: compressing them costs more than it saves."""
+
+EVENT_TYPES_MAX = 32
+"""Types or prefixes one ``/api/events`` request may name; a real client names a handful."""
+EVENT_TYPE_RE = re.compile(r"^[a-z_]+(\.[a-z_]+)*\.?$")
 
 MAX_TRANSCRIPT_PAGE = 2000
 """Turns one request may ask for. Beyond this a client is asking for a session, not a page."""
@@ -1616,6 +1621,35 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 manager._sinks.remove(sink)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @api.get("/api/events")
+    async def events_stream(
+        request: Request,
+        types: str = "",
+        client: str = Query("", max_length=64, pattern=r"^[A-Za-z0-9_-]*$"),
+        kind: Literal["browser", "pwa", "telegram", "window", "launcher"] = "browser",
+        after: int | None = Query(None, ge=0),
+        _: dict[str, Any] = Depends(auth),
+    ) -> StreamingResponse:
+        """Everything that happens to sessions, terminals, staff and notifications, as one stream.
+
+        ``after`` (or ``Last-Event-ID`` on a browser's own reconnect) resumes past a cursor; without
+        either the stream is live from now. ``kind`` and ``client`` say who is listening, which the
+        presence of the operator will be read from.
+        """
+        wanted = tuple(t for t in (part.strip() for part in types.split(",")) if t)
+        if len(wanted) > EVENT_TYPES_MAX or not all(EVENT_TYPE_RE.fullmatch(t) for t in wanted):
+            raise HTTPException(400, f"types: at most {EVENT_TYPES_MAX} dotted lower-case names or prefixes ending in '.'")
+        cursor = after
+        if cursor is None:
+            # A browser's own EventSource reconnect sends this; a malformed one is treated as no cursor
+            # (live from now), because the client cannot correct a header it did not write.
+            last = request.headers.get("last-event-id", "").strip()
+            cursor = int(last) if last.isdigit() else None
+        flt = EventFilter(types=wanted or streamed_types())
+        frames = event_stream(manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind)
+        headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+        return StreamingResponse(frames, media_type="text/event-stream", headers=headers)
 
     @api.get("/api/sessions/{session_id}/tool-results/{call_id}")
     async def tool_result(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

@@ -327,6 +327,7 @@ class Scheduler:
         self._maintained_at = now
         try:
             dropped = await self.app.manager.events.prune(keep_days=ops.events_keep_days, max_rows=ops.events_max_rows)
+            dropped += await self.app.manager.bus.prune(keep_days=ops.app_events_keep_days, max_rows=ops.app_events_max_rows)
             abandoned_media = await self.app.manager.media.prune_staged()
             pages = await self.app.db.reclaim()
             if dropped or abandoned_media or pages:

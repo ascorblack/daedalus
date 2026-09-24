@@ -71,3 +71,23 @@ async def test_a_database_from_a_newer_build_is_refused_loudly(tmp_path: Path, m
     with pytest.raises(RuntimeError, match="written by a newer version"):
         await db.open()
     await db.close()
+
+
+async def test_the_event_ring_is_created_and_a_second_open_leaves_it_alone(tmp_path: Path) -> None:
+    """The bus's cursors live in this table; a reopen that recreated it would hand numbers out again."""
+    path = tmp_path / "state.sqlite"
+    db = Database(path)
+    await db.open()
+    columns = [r["name"] for r in await db.fetchall("PRAGMA table_info(app_events)")]
+    assert columns == ["seq", "at", "type", "project_id", "session_id", "staff_id", "terminal_id", "payload_json"]
+    indexes = {r["name"] for r in await db.fetchall("PRAGMA index_list(app_events)")}
+    assert {"app_events_by_at", "app_events_by_project"} <= indexes
+    await db.execute("INSERT INTO app_events(at, type, payload_json) VALUES ('2026-01-01T00:00:00.000Z', 'terminal.bell', '{}')")
+    version = (await db.fetchone("SELECT version FROM schema_version"))["version"]
+    await db.close()
+
+    db = Database(path)
+    await db.open()
+    assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
+    assert (await db.fetchone("SELECT count(*) AS n FROM app_events"))["n"] == 1
+    await db.close()

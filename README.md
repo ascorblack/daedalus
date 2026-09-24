@@ -465,8 +465,8 @@ Every session command also works from the app's composer with the same `/` palet
 ## The HTTP API, where the app is not enough
 
 Everything the app does it does over the same API, with the same token (`X-Daedalus-Token`, or the
-browser session cookie), so anything the app can show you a script can fetch. Two of those endpoints
-exist for the app's panels and are worth naming here.
+browser session cookie), so anything the app can show you a script can fetch. Three of those
+endpoints are worth naming here.
 
 **Finding a file.** `GET /api/sessions/{id}/files/search?q=&limit=` searches the session's tree by
 name: a case-insensitive substring, or a glob when `q` carries one of `*?[` — `*.py` matches the
@@ -491,6 +491,18 @@ client. Whenever the queue changes — a steer taken in, one withdrawn, or a rou
 waiting — the session's event stream (`GET /api/sessions/{id}/stream`) carries a `steer_changed`
 event with the whole queue in its payload, so a composer draws its cards from the events and never
 polls.
+
+**Everything that happens, as one stream.** `GET /api/events` is a server-sent event stream of what
+happens to sessions, terminals, staff and notifications. It opens with a `hello` frame carrying
+`head` (the newest event number) and `oldest` (the oldest one still kept), then sends each event
+with its number as the `id:` line and `{"seq", "at", "type", "project_id", "session_id",
+"staff_id", "terminal_id", "payload"}` as its data, and a `: keepalive` comment every 15 seconds.
+`types=` narrows it to a comma-separated list of names or prefixes ending in a dot
+(`types=run.,terminal.bell`). `after=<seq>` — or `Last-Event-ID` on a reconnect — replays what was
+missed and goes on live without a gap; a cursor older than what is kept (seven days by default),
+ahead of the stream, or more than 5,000 events behind gets one `resync` frame instead, and the
+client re-reads what it shows. The events are stored before they are sent, so a script that
+remembers the last number it handled never misses one across a restart of the agent.
 
 ## Layout
 
