@@ -8,6 +8,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
+	"github.com/ascorblack/daedalus/ptyd/internal/term"
 )
 
 // sample returns a measurement of the running terminals no older than maxAge, taking a new one when
@@ -20,20 +21,22 @@ func (d *Daemon) sample(ids map[string]bool, maxAge time.Duration) procstat.Samp
 		var terms []procstat.Term
 		for _, t := range d.Registry.List() {
 			if t.Running() {
-				terms = append(terms, procstat.Term{ID: t.ID, Pid: t.Pid})
+				terms = append(terms, procstat.Term{ID: t.ID, Pid: t.Pid, Tag: term.TagName + "=" + t.ID})
 			}
 		}
 		s := d.sampler.Sample(terms, now)
 		d.lastStat = &s
 	}
 	out := *d.lastStat
-	if ids != nil {
-		out.Terminals = nil
-		for _, ts := range d.lastStat.Terminals {
-			if ids[ts.ID] {
-				out.Terminals = append(out.Terminals, ts)
-			}
+	out.Terminals = nil
+	for _, ts := range d.lastStat.Terminals {
+		if ids != nil && !ids[ts.ID] {
+			continue
 		}
+		if t, err := d.Registry.Get(ts.ID); err == nil {
+			ts.DaemonBytes = t.DaemonBytes()
+		}
+		out.Terminals = append(out.Terminals, ts)
 	}
 	if out.Terminals == nil {
 		out.Terminals = []procstat.TermStats{}

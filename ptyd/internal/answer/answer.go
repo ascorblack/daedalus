@@ -310,3 +310,63 @@ func xtwinops(op int, e emulator.Emulator, o Owner) []byte {
 	}
 	return nil
 }
+
+// Theme turns the colours a browser reports (CSS: #rgb, #rrggbb, rgb() or rgba()) into the
+// emulator's theme. A colour that cannot be read keeps the app's default for it.
+func Theme(fg, bg, cursor string) emulator.Theme {
+	th := emulator.DefaultTheme
+	if c, ok := ParseColor(fg); ok {
+		th.Foreground = c
+	}
+	if c, ok := ParseColor(bg); ok {
+		th.Background = c
+	}
+	if c, ok := ParseColor(cursor); ok {
+		th.Cursor = c
+	}
+	return th
+}
+
+// ParseColor reads a CSS colour in the forms the app's theme uses. Alpha is ignored: a terminal
+// colour is opaque.
+func ParseColor(s string) (emulator.RGB, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if hex, ok := strings.CutPrefix(s, "#"); ok {
+		switch len(hex) {
+		case 3, 4:
+			hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
+		case 6, 8:
+			hex = hex[:6]
+		default:
+			return emulator.RGB{}, false
+		}
+		v, err := strconv.ParseUint(hex, 16, 32)
+		if err != nil {
+			return emulator.RGB{}, false
+		}
+		return emulator.RGB{R: uint8(v >> 16), G: uint8(v >> 8), B: uint8(v)}, true
+	}
+	inner, ok := strings.CutPrefix(s, "rgba(")
+	if !ok {
+		inner, ok = strings.CutPrefix(s, "rgb(")
+	}
+	if !ok || !strings.HasSuffix(inner, ")") {
+		return emulator.RGB{}, false
+	}
+	parts := strings.FieldsFunc(strings.TrimSuffix(inner, ")"), func(r rune) bool { return r == ',' || r == ' ' || r == '/' })
+	if len(parts) < 3 {
+		return emulator.RGB{}, false
+	}
+	var rgb [3]uint8
+	for i := 0; i < 3; i++ {
+		v, err := strconv.ParseFloat(strings.TrimSuffix(parts[i], "%"), 64)
+		if err != nil || v < 0 {
+			return emulator.RGB{}, false
+		}
+		if strings.HasSuffix(parts[i], "%") {
+			v = v * 255 / 100
+		}
+		rgb[i] = uint8(math.Round(min(v, 255)))
+	}
+	return emulator.RGB{R: rgb[0], G: rgb[1], B: rgb[2]}, true
+}

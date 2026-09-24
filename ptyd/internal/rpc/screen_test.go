@@ -7,13 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 func TestScreenMethods(t *testing.T) {
-	f := startWith(t, production.Factory, answer.Reply)
+	f := startWith(t, production.Factory)
 	f.call(t, "terminal.create", map[string]any{"id": "s1", "cols": 40, "rows": 6,
 		"argv": []string{"sh", "-c", `i=0; while [ $i -lt 20 ]; do echo "row $i"; i=$((i+1)); done; printf '\033]2;the title\007\033[1;32mgreen\033[0m'; sleep 30`}}, nil)
 	f.waitOutput(t, "s1", "green")

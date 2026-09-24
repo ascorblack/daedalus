@@ -178,7 +178,7 @@ async def test_ask_user_pause_and_answer(settings: Settings, db: Database, answe
     finished = await waiter
     assert finished[0][2] == "awaiting" and state.pending is not None
     waiter2 = asyncio.create_task(_wait_finished(manager))
-    await manager.answer(state.session.id, answer)
+    await manager.answer(state.session.id, answer, via="app")
     finished2 = await waiter2
     assert finished2[-1][2] == "completed"
     tool_msg = [m for m in provider.requests[-1].messages if m.role is MessageRole.tool][-1]
@@ -209,7 +209,7 @@ async def test_waiting_session_survives_restart(settings: Settings, db: Database
     state2 = await manager2.get_state(state.session.id)
     assert state2 is not None and state2.pending is not None
     waiter2 = asyncio.create_task(_wait_finished(manager2))
-    await manager2.answer(state.session.id, [{"selected": ["Yes"]}])
+    await manager2.answer(state.session.id, [{"selected": ["Yes"]}], via="app")
     assert (await waiter2)[-1][2] == "completed"
     await manager2.close()
 

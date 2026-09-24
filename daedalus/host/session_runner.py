@@ -51,13 +51,15 @@ from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.containment import Walls, walls_for, worktree_writable_paths
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
-from daedalus.host.events import EventBus
+from daedalus.host.events import AppEvent, EventBus, EventFilter
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
+from daedalus.host.presence import Presence
 from daedalus.host.request_manifests import RequestManifestStore
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
+from daedalus.host.worktrees import append_exclude, exclude_lines
 from daedalus.mcp.manager import McpManager, blocked_for
 from daedalus.providers.chain import build_chain
 from daedalus.providers.registry import ProviderRegistry
@@ -75,6 +77,8 @@ from daedalus.stores.sqlite import (
     SqliteUsageSink,
     message_text,
 )
+from daedalus.stores.staff import AsksStore, StaffStore
+from daedalus.terminals import endpoint as terminal_endpoint
 from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
@@ -288,6 +292,30 @@ class SessionState:
         return self.task is not None and not self.task.done()
 
 
+def _status_word(state: SessionState) -> str:
+    """What the session is doing, in the one word the lists and the ``session.status`` event share."""
+    if state.running:
+        return "running"
+    if state.pending is not None:
+        return "waiting"
+    if state.compacting is not None:
+        return "compacting"
+    if state.last_error_kind or (state.engine is not None and state.engine.state is LoopState.FAILED):
+        return "failed"
+    return "idle"
+
+
+OPERATOR_ORIGINS = ("operator", "core")
+"""Run origins that answer the operator: their own message, or the host continuing their work after
+an outage. A schedule, a heartbeat, a loop or a subagent's task answers nobody who is waiting."""
+
+NOT_OPERATOR_FACING = ("subagent_of", "unattended", "heartbeat", "staff_id")
+"""Session metadata that marks a session nobody reads as a conversation, whatever started the run."""
+
+SUMMARY_CHARS = 200
+"""How much of the answer a finished-run event carries: enough for a notification's line, not the answer."""
+
+
 def _ensure_inbox(workspace: Path, folder: ProjectFolder | None) -> None:
     """Make the session's inbox — but never make a project folder that is not there.
 
@@ -305,11 +333,6 @@ def _ensure_inbox(workspace: Path, folder: ProjectFolder | None) -> None:
         _exclude_artefacts(workspace)
 
 
-# The directories a session writes into the folder it works in: the inbox files arrive in, and the
-# per-tool scratch of Exec, its background jobs, the services it hosts and the snapshots. In a
-# workspace of the session's own they are the whole of the directory. In a project they land in the
-# operator's repository, where they have no business showing up in `git status` or being swept into a
-# commit by `git add -A`.
 def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """The waiting steers as the composer draws them: a recognisable amount of each, and not all of them."""
     cards: list[dict[str, Any]] = []
@@ -326,10 +349,6 @@ def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
-SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/", ".agents/")
-_EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
-
-
 def _exclude_artefacts(root: Path) -> None:
     """Keep the agent's own directories out of the operator's git status.
 
@@ -338,19 +357,13 @@ def _exclude_artefacts(root: Path) -> None:
     a change to their project. A root that is not a git repository has nothing to write and nothing
     to worry about.
     """
-    info = root / ".git" / "info"
     if not (root / ".git").is_dir():
         return
+    path = root / ".git" / "info" / "exclude"
     try:
-        info.mkdir(parents=True, exist_ok=True)
-        path = info / "exclude"
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-        if _EXCLUDE_MARKER in current:
-            return
-        prefix = "" if not current or current.endswith("\n") else "\n"
-        path.write_text(current + prefix + _EXCLUDE_MARKER + "\n" + "".join(f"/{name}\n" for name in SESSION_ARTEFACTS), encoding="utf-8")
+        append_exclude(path, exclude_lines())
     except OSError as exc:
-        logger.warning("could not write %s: %s", info / "exclude", exc)
+        logger.warning("could not write %s: %s", path, exc)
 
 
 TITLE_PROMPT = (
@@ -407,6 +420,17 @@ class SessionManager:
             home=Path.home(),
             local_env="host" if settings.native else "container",
         )
+        personas = settings.bot_repo_dir / "personas"
+        # Read through the live configuration, not a copy: a preset added in Settings is a model a
+        # staff member may be given at once, without a restart.
+        self.staff = StaffStore(
+            db,
+            local_env=self.projects.local_env,
+            config=lambda: self.config.staff,
+            presets=lambda: self.config.presets.keys(),
+            personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
+        )
+        self.asks = AsksStore(db)
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -423,6 +447,9 @@ class SessionManager:
         """What happens to sessions, terminals and staff, for whoever subscribes: the app's stream,
         the notifications, an orchestrator. Persisted before it is delivered, so a subscriber resumes
         from its cursor after a restart."""
+        self.presence = Presence(self.bus, db, ttl_seconds=config.ops.presence_ttl_seconds, grace_seconds=config.ops.presence_grace_seconds)
+        """What the operator's windows show: whether a finished run was watched, and when an unread
+        result has been seen."""
         self._background: set[asyncio.Task[Any]] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self.tools = InMemoryToolRegistry()
@@ -441,6 +468,9 @@ class SessionManager:
         self.service_hooks: dict[str, Any] = {}
         self.delete_hooks: list[Callable[[str], Awaitable[None]]] = []
         """Called with the session id before a session is removed (extensions release what they hold for it)."""
+        self.project_delete_hooks: list[Callable[[str], Awaitable[None]]] = []
+        """Called with the project id before a project is forgotten, for what an extension holds for the
+        project itself rather than for one of its sessions (its terminals)."""
         """Callbacks the transport layer installs: send_file, spawn_agent, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
@@ -474,6 +504,8 @@ class SessionManager:
         await self.memory.load()
         await self.workspace_units.load()
         await self.bus.start()
+        await self.presence.load()
+        self.bus.on(EventFilter(types=("presence",)), self._on_presence, name="unread-result")
         # The policy is built inside a tool call and cannot wait on a query; this is where the project
         # roots it compares against are read — and where a folder of our own that is not on disk is
         # put back, so the first run after a start is not the thing that discovers it missing.
@@ -550,9 +582,135 @@ class SessionManager:
                         await asyncio.gather(task, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
+        await self.presence.close()
         # Last, once the runs are drained, so their final events are written; and it ends every open
         # event stream, which a shutdown would otherwise wait on.
         await self.bus.close()
+
+    # -- what the bus is told --------------------------------------------------------
+
+    def _operator_facing(self, state: SessionState) -> bool:
+        return state.run_origin in OPERATOR_ORIGINS and not any(state.metadata.get(key) for key in NOT_OPERATOR_FACING)
+
+    def _telegram_delivers(self, state: SessionState) -> bool:
+        """Whether the Telegram front shows this session's answers, questions and approvals itself."""
+        return bool(self.settings.telegram_bot_token) and not state.metadata.get("telegram_detached")
+
+    @staticmethod
+    def _event_ids(state: SessionState) -> dict[str, str | None]:
+        return {"session_id": state.session.id, "project_id": state.project.id if state.project is not None else None}
+
+    async def _publish(self, state: SessionState, event_type: str, payload: dict[str, Any]) -> AppEvent | None:
+        """Tell the bus about this session. A bus that cannot write must not end a run, so a failure is logged."""
+        try:
+            return await self.bus.publish(event_type, payload, **self._event_ids(state))
+        except Exception:  # noqa: BLE001 — the run is the operator's work; the event is a courtesy to subscribers
+            logger.warning("could not publish %s for session %s", event_type, state.session.id, exc_info=True)
+            return None
+
+    def _publish_soon(self, state: SessionState, event_type: str, payload: dict[str, Any]) -> None:
+        """The same from synchronous code (the policy gate), which cannot wait for the write."""
+        try:
+            self.bus.publish_soon(event_type, payload, **self._event_ids(state))
+        except Exception:  # noqa: BLE001 — as above; a tool call is never refused because an event was not
+            logger.warning("could not queue %s for session %s", event_type, state.session.id, exc_info=True)
+
+    async def _publish_status(self, state: SessionState, status: str | None = None) -> None:
+        payload: dict[str, Any] = {"status": status or _status_word(state)}
+        if state.run_id:
+            payload["run_id"] = state.run_id
+        await self._publish(state, "session.status", payload)
+
+    def _finished_payload(self, state: SessionState, run_id: str, status: str, duration_s: float) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "run_id": run_id,
+            "status": status,
+            "duration_s": round(duration_s, 1),
+            "watched": self.presence.attending(session_id=state.session.id),
+            "origin": state.run_origin,
+            "operator_facing": self._operator_facing(state),
+            "telegram": self._telegram_delivers(state),
+            "title": state.session.title,
+        }
+        summary = _last_answer(state.engine.history) if state.engine is not None else ""
+        if summary:
+            payload["summary"] = summary[:SUMMARY_CHARS]
+        if state.last_error_message:
+            payload["error"] = state.last_error_message[:300]
+        return payload
+
+    def _ask_payload(self, state: SessionState, pending: PendingQuestion) -> dict[str, Any]:
+        questions = []
+        for question in pending.payload.get("questions") or []:
+            if not isinstance(question, dict):
+                continue
+            questions.append(
+                {
+                    "question": str(question.get("question") or ""),
+                    "options": [
+                        {"label": str(option.get("label") or ""), "description": str(option.get("description") or "")}
+                        for option in question.get("options") or []
+                        if isinstance(option, dict)
+                    ],
+                    "multi": bool(question.get("multiSelect")),
+                    "custom": bool(question.get("allow_custom")),
+                }
+            )
+        return {
+            "request_id": pending.tool_call_id,
+            "request_ref": f"ask:{state.session.id}:{pending.tool_call_id}",
+            "run_id": pending.run_id,
+            "title": state.session.title,
+            "questions": questions,
+            "operator_facing": self._operator_facing(state),
+            "telegram": self._telegram_delivers(state),
+        }
+
+    async def _mark_unread(self, state: SessionState, run_id: str) -> None:
+        """A result nobody saw anywhere: the session's row carries a dot until the operator looks."""
+        mark = {"run_id": run_id, "at": datetime.now(UTC).isoformat()}
+        state.metadata["unread_result"] = mark
+        state.session.metadata["unread_result"] = dict(mark)
+        try:
+            await self.sessions.update_metadata(state.session.id, state.session.metadata)
+        except Exception:  # noqa: BLE001 — the mark is a courtesy; the answer itself is already written
+            logger.warning("could not mark session %s unread", state.session.id, exc_info=True)
+            return
+        await self._publish(state, "session.unread_result", {"unread": True, "run_id": run_id})
+
+    async def clear_unread(self, session_id: str) -> bool:
+        """The operator has seen the session's last result; ``True`` when there was a mark to clear."""
+        state = self._states.get(session_id)
+        if state is None:
+            # Not loaded: the mark is read from the stored row, and loading the whole session to
+            # clear a flag would open its workspace for nothing.
+            try:
+                session = await self.sessions.get(session_id, TENANT)
+            except Exception:  # noqa: BLE001 — no such session, nothing to clear
+                return False
+            if not session.metadata.get("unread_result"):
+                return False
+            session.metadata.pop("unread_result", None)
+            await self.sessions.update_metadata(session_id, session.metadata)
+            project = await self.projects.for_session(session_id)
+            try:
+                await self.bus.publish("session.unread_result", {"unread": False}, session_id=session_id, project_id=project.id if project is not None else None)
+            except Exception:  # noqa: BLE001 — the mark is gone either way; a list re-read shows it
+                logger.warning("could not publish the cleared mark of session %s", session_id, exc_info=True)
+            return True
+        if not (state.metadata.get("unread_result") or state.session.metadata.get("unread_result")):
+            return False
+        state.metadata.pop("unread_result", None)
+        state.session.metadata.pop("unread_result", None)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        await self._publish(state, "session.unread_result", {"unread": False})
+        return True
+
+    async def _on_presence(self, event: AppEvent) -> None:
+        """Opening a session is seeing its result."""
+        newly = event.payload.get("newly_attended") or {}
+        for session_id in newly.get("sessions") or ():
+            await self.clear_unread(str(session_id))
 
     def budget_exceeded(self) -> str | None:
         if self.budget_flag.exists():
@@ -599,6 +757,8 @@ class SessionManager:
         self._configure_redactor(self.settings, config)
         self.bus.queue_size = config.ops.event_subscriber_queue
         self.bus.replay_max = config.ops.event_replay_max
+        self.presence.ttl_seconds = config.ops.presence_ttl_seconds
+        self.presence.grace_seconds = config.ops.presence_grace_seconds
         self.providers.reload(config)
         self.mcp.reload(config.mcp.servers)
         for state in self._states.values():
@@ -913,16 +1073,7 @@ class SessionManager:
         out: list[dict[str, Any]] = []
         for session in rows:
             state = self._states.get(session.id)
-            status = "idle"
-            if state is not None:
-                if state.running:
-                    status = "running"
-                elif state.pending is not None:
-                    status = "waiting"
-                elif state.compacting is not None:
-                    status = "compacting"
-                elif state.last_error_kind or (state.engine is not None and state.engine.state is LoopState.FAILED):
-                    status = "failed"
+            status = _status_word(state) if state is not None else "idle"
             out.append(
                 {
                     "id": session.id,
@@ -1274,11 +1425,13 @@ class SessionManager:
         async with self.idle_work:
             state.compacting = {"reason": reason, "stage": "summarising", "messages": len(history), "parts_done": 0, "parts_total": 0, "started_at": datetime.now(UTC).isoformat()}
         await self._compaction_progress(state)
+        await self._publish_status(state, "compacting")
         try:
             return await self._compact_progressing(state, history, tail, instructions, reason, own_task_ok=own_task_ok)
         finally:
             state.compacting = None
             await self._compaction_progress(state)
+            await self._publish_status(state)
 
     async def _compaction_progress(self, state: SessionState, **fields: Any) -> None:
         """Advance the compaction's public state and tell the session's listeners (the Mini App stream)."""
@@ -2032,15 +2185,23 @@ class SessionManager:
         as_answer: bool = True,
         origin: str = "operator",
         client_message_id: str | None = None,
+        via: str = "app",
     ) -> str:
         """Deliver input. Starts a run, or queues a follow-up when one is active.
 
         ``origin`` names who wrote the text (``operator``, or a system source such as
-        ``reminder``); the transcript and the Mini App show it accordingly.
+        ``reminder``); the transcript and the Mini App show it accordingly. ``via`` is the front it
+        came through, which a free-text answer to a pending question reports as where it was answered.
         """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
+        if origin == "operator":
+            # Writing to a session is having read it: the unread mark of its last result goes.
+            try:
+                await self.clear_unread(session_id)
+            except Exception:  # noqa: BLE001 — a mark that stays is a dot too many, not a lost message
+                logger.warning("could not clear the unread mark of session %s", session_id, exc_info=True)
         async with state.submit_lock:
             if not self.config.has_model:
                 # The one place every way in converges: chat, the API, a schedule, a subagent, the
@@ -2105,7 +2266,7 @@ class SessionManager:
                         receipt, created = await self.live.accept(session_id, client_message_id, "input", receipt_payload)
                         if not created and receipt["status"] != "accepted":
                             return str(receipt["run_id"] or state.run_id or "")
-                    run_id = await self.answer(session_id, [{"custom": body}])
+                    run_id = await self.answer(session_id, [{"custom": body}], via=via)
                     if client_message_id:
                         await self.live.consume(session_id, client_message_id, run_id=run_id, step_id="answer", message_seq=None)
                     return run_id
@@ -2295,8 +2456,12 @@ class SessionManager:
         body = (text.strip() + "\n\n" if text.strip() else "") + "Attached files:\n" + "\n".join(lines)
         return body, image_refs
 
-    async def answer(self, session_id: str, answers: list[dict[str, Any]]) -> str:
-        """Resume a run paused on AskUser with the operator's answers."""
+    async def answer(self, session_id: str, answers: list[dict[str, Any]], *, via: str) -> str:
+        """Resume a run paused on AskUser with the operator's answers.
+
+        ``via`` says where it was answered (app, telegram, timeout, cli, …): the other fronts retire
+        their copy of the question when they hear it was answered somewhere else.
+        """
         state = await self.get_state(session_id)
         if state is None or state.pending is None or state.engine is None:
             raise RuntimeError("no pending question for this session")
@@ -2324,6 +2489,7 @@ class SessionManager:
         state.engine.transition_to(LoopState.RUNNING)
         state.pending = None
         await self.db.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
+        await self._publish(state, "ask.answered", {"request_id": pending.tool_call_id, "request_ref": f"ask:{session_id}:{pending.tool_call_id}", "via": via})
         return await self._start_run(state, None, continue_turn=True)
 
     async def set_mode(self, session_id: str, mode: str | None) -> str:
@@ -2776,10 +2942,12 @@ class SessionManager:
             await self.sessions.replace_transcript_message(state.session.id, self.sessions.transcript_key(message), message)
         if not continue_turn:
             await self.runs.create(Run(id=run_id, tenant_id=TENANT, session_id=state.session.id, status=RunStatus.running))
+            await self._publish(state, "run.started", {"run_id": run_id, "origin": state.run_origin, "title": state.session.title})
         else:
             await self.runs.update_status(run_id, TENANT, RunStatus.running)
         state.task = asyncio.create_task(self._drive(state, engine, message, continue_turn), name=f"run:{run_id}")
         state.task.add_done_callback(_log_task_failure)
+        await self._publish_status(state, "running")
         return run_id
 
     async def _with_turn_context(self, state: SessionState, message: Message) -> Message:
@@ -2870,6 +3038,10 @@ class SessionManager:
             # finished; the resumed run announces itself when it really is.
             if status != "interrupted":
                 await self._announce_settled(state, run_id, status, housekeeping=True)
+                if status == "awaiting":
+                    # Said here, before the housekeeping task exists, so an answer that arrives at once
+                    # cannot publish its "running" ahead of this "waiting".
+                    await self._publish_status(state, "waiting")
                 state.settled.clear()
                 state.housekeeping = asyncio.create_task(self._settle_run(state, run_id, status), name=f"settle:{run_id}")
                 state.housekeeping.add_done_callback(_log_task_failure)
@@ -2939,6 +3111,8 @@ class SessionManager:
         compaction check — nobody waits for, and each is guarded so one failure does not eat the rest.
         """
         session_id = state.session.id
+        # Measured before the snapshot: the operator waited for the answer, not for the commit.
+        duration_s = time.monotonic() - state.run_active_since if state.run_active_since else 0.0
         try:
             if status in ("completed", "failed", "cancelled"):
                 await self.checkpoint(state, kind="after", run_id=run_id)
@@ -2946,6 +3120,13 @@ class SessionManager:
             logger.exception("run %s snapshot failed", run_id)
         finally:
             state.settled.set()  # the next run may start: the history is written and the files are snapshotted
+        if status in ("completed", "failed", "cancelled"):
+            # A run parked on a question is not finished; an interrupted one never reaches here.
+            finished = self._finished_payload(state, run_id, status, duration_s)
+            await self._publish(state, "run.finished", finished)
+            await self._publish_status(state, "failed" if status == "failed" else "idle")
+            if status != "cancelled" and finished["operator_facing"] and not finished["watched"] and not finished["telegram"]:
+                await self._mark_unread(state, run_id)
         if status in ("completed", "failed", "cancelled"):
             try:
                 await self.events.delete_snapshot(run_id)
@@ -3237,6 +3418,7 @@ class SessionManager:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (pending.session_id, pending.run_id, pending.tool_call_id, pending.kind, json.dumps(pending.payload), datetime.now(UTC).isoformat()),
             )
+            await self._publish(state, "ask.pending", self._ask_payload(state, pending))
         self._time_tool(state, event)
         self._redact_event(state, event)
         durable = event.to_event()
@@ -3602,6 +3784,7 @@ class SessionManager:
             project_roots=self.projects.roots,
             worktrees_root=self.settings.worktrees_dir,
             sealed_paths=self.settings.sealed_paths,
+            sealed_everywhere=self.settings.sealed_everywhere,
             sealed_ports=self._sealed_ports(),
             # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`
             # is read as the file it names rather than as a word with no slash at the front.
@@ -3622,6 +3805,10 @@ class SessionManager:
         launcher = launcher_bridge.read(self.settings.state_dir)
         if launcher is not None:
             ports.append(launcher.port)
+        # The terminal daemons' doors, where one listens on this loopback interface: a daemon on a
+        # TCP endpoint (Windows) and its hook listener (natively). Whatever reaches either holds a
+        # shell or speaks for a running CLI, so it is asked through the app as the rest is.
+        ports.extend(terminal_endpoint.sealed_ports(self.settings))
         return tuple(ports)
 
     def protected_paths(self) -> tuple[Path, ...]:
@@ -3655,9 +3842,13 @@ class SessionManager:
             elif decision.key and state is not None:
                 # The refusal's preimage, so an operator granting the key from chat sees what they approve.
                 pending = dict(state.metadata.get("policy_pending") or {})
+                fresh = decision.key not in pending
                 pending[decision.key] = {"tool": tool, "text": self.redactor.redact(canonical(tool, arguments))[:300], "at": datetime.now(UTC).isoformat()}
                 for meta in (state.metadata, state.session.metadata):
                     meta["policy_pending"] = dict(list(pending.items())[-20:])
+                if fresh:
+                    # Once per request: the agent retrying the same refused call is the same request.
+                    self._publish_soon(state, "permission.pending", self._permission_payload(state, decision, pending[decision.key]))
             if decision.hosts:
                 self._record_egress(session_id, run_id, tool, decision.hosts, decision.action)
             if decision.action != "allow":
@@ -3708,25 +3899,69 @@ class SessionManager:
 
         self._spawn_background(_write(), f"egress:{run_id}")
 
-    async def grant(self, session_id: str, key: str) -> dict[str, Any]:
+    def _permission_payload(self, state: SessionState, decision: Decision, refused: dict[str, Any]) -> dict[str, Any]:
+        # A rule about the machine itself (the operator's home, the installation) is answered in the
+        # app, never from a lock screen: whoever holds the phone should not be the whole check.
+        elevated = decision.rule.startswith("host.")
+        return {
+            "request_id": decision.key,
+            "request_ref": f"policy:{state.session.id}:{decision.key}",
+            "kind": "policy",
+            "title": state.session.title,
+            "tool": str(refused.get("tool") or ""),
+            "text": str(refused.get("text") or ""),
+            "risk": "elevated" if elevated else "routine",
+            "quick": not elevated,
+            "telegram": self._telegram_delivers(state),
+        }
+
+    @staticmethod
+    def _approval_key(key: str) -> str:
+        key = key.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{12}", key):
+            raise ValueError("an approval key is 12 hex characters, as shown in the refusal")
+        return key
+
+    def _drop_pending(self, state: SessionState, key: str) -> dict[str, Any] | None:
+        """Take the key off the open refusals, returning what it was; the request is answered."""
+        refused = (state.metadata.get("policy_pending") or {}).get(key)
+        for meta in (state.metadata, state.session.metadata):
+            meta["policy_pending"] = {k: v for k, v in (meta.get("policy_pending") or {}).items() if k != key}
+        return refused
+
+    async def grant(self, session_id: str, key: str, *, via: str) -> dict[str, Any]:
         """The operator lets one refused call through: the key from the refusal, valid once, for a limited time.
 
         Returns what was approved (the refusal's tool and text when the host saw it) and the open grants.
+        ``via`` is where it was approved, for the ``permission.resolved`` event.
         """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
-        key = key.strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{12}", key):
-            raise ValueError("an approval key is 12 hex characters, as shown in the refusal")
-        pending = dict(state.metadata.get("policy_pending") or {})
+        key = self._approval_key(key)
+        # Answered, so off the open list: the same call refused again after the grant is spent is a
+        # new request, and is announced as one.
+        approves = self._drop_pending(state, key)
         until = time.time() + GRANT_TTL_SECONDS
         for meta in (state.metadata, state.session.metadata):
             grants = {k: v for k, v in (meta.get("policy_grants") or {}).items() if float(v) > time.time()}
             grants[key] = until
             meta["policy_grants"] = dict(list(grants.items())[-20:])
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        return {"key": key, "approves": pending.get(key), "grants": list(state.metadata["policy_grants"]), "expires_in_minutes": GRANT_TTL_SECONDS // 60}
+        await self._publish(state, "permission.resolved", {"request_id": key, "request_ref": f"policy:{session_id}:{key}", "decision": "allow", "via": via})
+        return {"key": key, "approves": approves, "grants": list(state.metadata["policy_grants"]), "expires_in_minutes": GRANT_TTL_SECONDS // 60}
+
+    async def refuse(self, session_id: str, key: str, *, via: str) -> dict[str, Any]:
+        """The operator leaves a refused call refused. Nothing changes for the agent, which was already
+        told no; the request stops being open, and everyone showing it hears that it was answered."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        key = self._approval_key(key)
+        refused = self._drop_pending(state, key)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        await self._publish(state, "permission.resolved", {"request_id": key, "request_ref": f"policy:{session_id}:{key}", "decision": "deny", "via": via})
+        return {"key": key, "refuses": refused}
 
     async def egress(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         rows = await self.db.fetchall("SELECT at, run_id, tool, host, action FROM egress_log WHERE session_id = ? ORDER BY seq DESC LIMIT ?", (session_id, limit))
@@ -3899,6 +4134,9 @@ class SessionManager:
                 kind=row["kind"],
                 payload=json.loads(row["payload"]),
             )
+            # Again after a restart: a subscriber that keeps its own list of open requests dedupes by
+            # the reference, and one that started with this process has never heard of it.
+            await self._publish(state, "ask.pending", self._ask_payload(state, state.pending))
             for callback in self._pending_restored:
                 try:
                     await callback(session_id, state.pending)
@@ -4206,6 +4444,17 @@ def _forget_if_dropped(state: SessionState) -> Callable[[asyncio.Task[None]], No
             _forget_persisted(state)
 
     return done
+
+
+def _last_answer(history: Sequence[Message]) -> str:
+    """The text of the last assistant turn that said anything, on one line."""
+    for message in reversed(history):
+        if message.role is not MessageRole.assistant:
+            continue
+        text = " ".join(block.text for block in message.content_blocks if isinstance(block, TextBlock)).strip()
+        if text:
+            return " ".join(text.split())
+    return ""
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:

@@ -6,9 +6,11 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "voice" | "inbox" | "board" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project";
 
 export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
+/** Screens reached from inside something else rather than from the navigation: a project's own pages. */
+const INNER: Screen[] = ["project"];
 
 export type Route = {
   screen: Screen;
@@ -18,6 +20,10 @@ export type Route = {
   with: string | null;
   /** The settings section, a board task, an inbox entry… */
   detail: string | null;
+  /** The project a project screen is about: /app/project/<id>/<page>. */
+  project: string | null;
+  /** Which of the project's pages: team, board, journal… */
+  page: string | null;
   query: URLSearchParams;
 };
 
@@ -28,9 +34,10 @@ export function parse(pathname = window.location.pathname, search = window.locat
   path = path.replace(/^\/+|\/+$/g, "");
   const [head, ...rest] = path.split("/").map(decodeURIComponent);
   const query = new URLSearchParams(search);
-  const screen = (SCREENS as string[]).includes(head) ? (head as Screen) : ALIASES[head] ?? "agents";
+  const screen = ([...SCREENS, ...INNER] as string[]).includes(head) ? (head as Screen) : ALIASES[head] ?? "agents";
   const detail = rest[0] || null;
-  return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, query };
+  if (screen === "project") return { screen, session: null, with: null, detail: null, project: detail, page: rest[1] || null, query };
+  return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, project: null, page: null, query };
 }
 
 export function pathFor(screen: Screen, detail?: string | null, query?: Record<string, string | null | undefined>): string {
@@ -40,6 +47,11 @@ export function pathFor(screen: Screen, detail?: string | null, query?: Record<s
   for (const [k, v] of Object.entries(query ?? {})) if (v) qs.set(k, v);
   const s = qs.toString();
   return s ? `${p}?${s}` : p;
+}
+
+/** One of a project's pages. */
+export function projectPagePath(projectId: string, page: string): string {
+  return `${BASE}/project/${encodeURIComponent(projectId)}/${encodeURIComponent(page)}`;
 }
 
 export function sessionPath(id: string, beside?: string | null): string {

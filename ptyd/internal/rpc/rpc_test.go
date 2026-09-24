@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
@@ -37,10 +38,14 @@ type fixture struct {
 
 // start runs a daemon in-process on a fresh run directory, with the fake emulator so a test can
 // script the modes that keys and pastes depend on.
-func start(t *testing.T) *fixture { return startWith(t, nil, nil) }
+func start(t *testing.T) *fixture {
+	t.Helper()
+	return startWith(t, nil)
+}
 
-// startWith runs the daemon with the given emulator and answerer instead of the fake.
-func startWith(t *testing.T, factory emulator.Factory, answerer term.Answerer) *fixture {
+// startWith runs the daemon with the given emulator instead, when it is not nil: a long run through
+// the fake would keep every byte it was fed.
+func startWith(t *testing.T, emu emulator.Factory) *fixture {
 	t.Helper()
 	base, err := os.MkdirTemp("", "ptyd")
 	if err != nil {
@@ -59,15 +64,20 @@ func startWith(t *testing.T, factory emulator.Factory, answerer term.Answerer) *
 	}
 	evlog := events.NewLog(1000)
 	var last *fake.Emulator
-	if factory == nil {
-		factory = fake.Factory(func(e *fake.Emulator) {
+	// A real emulator comes with the real answerer; the fake answers nothing.
+	var answerer term.Answerer
+	if emu != nil {
+		answerer = answer.Reply
+	}
+	if emu == nil {
+		emu = fake.Factory(func(e *fake.Emulator) {
 			f.mu.Lock()
 			last = e
 			f.mu.Unlock()
 		})
 	}
 	registry := term.NewRegistry(term.Deps{
-		Emulator: factory, Answer: answerer,
+		Emulator: emu, Answer: answerer,
 		Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
 		Clock: term.RealClock{}, Log: log, KillGrace: 200 * time.Millisecond,
 	}, 4)

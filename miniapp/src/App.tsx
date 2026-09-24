@@ -1,11 +1,11 @@
 import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, SessionList, SessionSummary, telegram } from "./api";
+import { api, NotificationSummary, SessionList, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
 import type { OnboardingState } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
-import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
+import { back, migrateLegacyLocation, navigate, pathFor, projectPagePath, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { Sidebar, useSidebar } from "./sidebar";
 import { NavMenu } from "./navmenu";
@@ -19,6 +19,8 @@ import { MaintenanceNotice } from "./maintenance";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
+import { startPresence } from "./presence";
+import { startEvents, useStreamUp } from "./events";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -59,6 +61,7 @@ const HealthScreen = lazy(screen(() => import("./screens/Settings").then((m) => 
 const MemoryScreen = lazy(screen(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
 const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
+const TeamPage = lazy(screen(() => import("./team/TeamPage").then((m) => ({ default: m.TeamPage }))));
 const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
@@ -122,6 +125,11 @@ export function App() {
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   // Nothing in the app works without a model, so the app asks for one before it shows anything else.
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  // What this window shows goes to the host from the moment it may ask anything at all.
+  useEffect(() => (authed ? startPresence() : undefined), [authed]);
+  // The host's events drive the badge and the lists from here on; the polls below are the net under it.
+  useEffect(() => (authed ? startEvents() : undefined), [authed]);
+  const live = useStreamUp();
   useEffect(() => {
     if (!authed) return;
     api
@@ -129,7 +137,7 @@ export function App() {
       .then(setOnboarding)
       .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
   }, [authed]);
-  const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
+  const notifications = useQuery<NotificationSummary>(authed ? "/api/notifications/summary" : null, { pollMs: live ? 0 : 20000, staleMs: 5000 });
   const projects = useProjects();
   const projectList = projects.data ?? [];
   // A project removed elsewhere must not leave the shell filtering by something that is gone.
@@ -145,7 +153,7 @@ export function App() {
   // this app does not recognise, must not take the whole shell down over a nav label.
   const selfdev: SelfDevMode = caps.data?.selfdev?.mode ?? "server";
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
-  const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
+  const counts: Counts = { inbox: notifications.data?.unseen ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
   useShortcuts(openPalette, selfdev);
   // Two more on a desktop: the menu and the sidebar, both with a modifier so a text field never eats them.
   useEffect(() => {
@@ -307,6 +315,7 @@ export function App() {
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
       { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
       ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => pickProject(p.id) })),
+      ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `team-${p.id}`, label: t("shell.search.team", { name: p.name }), icon: "bots" as const, run: () => navigate(projectPagePath(p.id, "team")) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
     ];
@@ -378,6 +387,8 @@ export function App() {
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
         {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
+        {/* A project's pages. The team is the only one so far, so every page of a project shows it. */}
+        {route.screen === "project" && (route.project ? <TeamPage projectId={route.project} toast={showToast} /> : <div className="empty"><b>{t("team.noproject")}</b></div>)}
       </ErrorBoundary>
     );
   }

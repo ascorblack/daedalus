@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/ring"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan"
+	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 // readBytes is one read from the PTY.
@@ -115,10 +117,15 @@ type Terminal struct {
 	vt     chan vtRequest
 	vtQuit chan struct{}
 	vtOnce sync.Once
-	fed    int64 // the output offset the emulator has been fed up to; the emulator goroutine's own
 
 	readerDone chan struct{}
 	done       chan struct{} // closed once the exit is recorded and published
+
+	att    attachments
+	sizeMu sync.Mutex   // serialises size changes, which wait for the emulator
+	fed    atomic.Int64 // the output offset the emulator has consumed, which a snapshot is taken at
+	// theme is the viewer's theme last handed to the emulator; the emulator goroutine's own.
+	theme wire.Theme
 
 	mu            sync.Mutex
 	title         string
@@ -174,6 +181,8 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 	}
 	t.in = newInput(proc.Master, deps.Clock, spec.InputIdle, t.ring.Head)
 	t.in.onDelivered = t.delivered
+	t.in.onKeyboard = t.keyboardChanged
+	t.deps.Events = attachPublisher{inner: deps.Events, t: t}
 	emu := deps.Emulator(emulator.Options{Cols: spec.Cols, Rows: spec.Rows, ScrollbackLines: config.ScrollbackLines,
 		ScrollbackBytes: config.ScrollbackBytes, GraphemeClusters: true})
 	// Published before the reader starts, so no event of the terminal's output can precede it.
@@ -212,6 +221,7 @@ func (t *Terminal) read() {
 				t.mu.Lock()
 				t.lastOutput = t.deps.Clock.Now().UTC()
 				t.mu.Unlock()
+				t.att.notify()
 				req := vtRequest{data: append([]byte(nil), out...), base: base}
 				if len(marks) > 0 {
 					req.marks = append([]scan.Mark(nil), marks...)
@@ -292,7 +302,7 @@ func (t *Terminal) serve(e emulator.Emulator, req vtRequest, before emulator.Mod
 	if at < len(req.data) {
 		e.Feed(req.data[at:])
 	}
-	t.fed = req.base + int64(len(req.data))
+	t.fed.Store(req.base + int64(len(req.data)))
 	if modesMayChange {
 		now := e.Modes()
 		if modesInfo(now) != modesInfo(before) {
@@ -348,11 +358,11 @@ func (t *Terminal) onMark(e emulator.Emulator, m scan.Mark, seq int64) {
 		}
 	case scan.KindQuery:
 		if t.deps.Answer != nil {
-			t.mu.Lock()
-			owner := answer.Owner{PxW: t.pxW, PxH: t.pxH}
-			t.mu.Unlock()
-			if reply := t.deps.Answer(m, e, owner); len(reply) > 0 {
+			facts := t.OwnerFacts()
+			t.applyTheme(e, facts.Theme)
+			if reply := t.deps.Answer(m, e, answer.Owner{PxW: facts.PxW, PxH: facts.PxH}); len(reply) > 0 {
 				t.in.Reply(reply)
+				t.answered(seq, reply)
 			}
 		}
 	}
@@ -438,6 +448,7 @@ func (t *Terminal) Exit() (ptyproc.Exit, bool) {
 // forget stops the emulator goroutine and releases what is left. Only an exited terminal is
 // forgotten.
 func (t *Terminal) forget() {
+	t.closeAttachments()
 	t.vtOnce.Do(func() { close(t.vtQuit) })
 }
 
@@ -493,6 +504,7 @@ func (t *Terminal) delivered(a *agentWrite) {
 	if err != nil {
 		t.deps.Log.Warn("agent write journal", "terminal", t.ID, "error", err.Error())
 	}
+	t.agentTyped(meta.origin.Actor)
 }
 
 // Modes returns the emulator's current modes, asked on its goroutine so they reflect every byte
@@ -511,32 +523,9 @@ func (t *Terminal) SetKeyboard(owner string, ttl time.Duration) KeyboardState {
 	return t.in.SetKeyboard(owner, ttl)
 }
 
-// SetTheme gives the emulator the colours of the person looking at the terminal, which colour
-// queries are answered with unless the program set its own. It does nothing for an emulator without
-// a screen.
-func (t *Terminal) SetTheme(th emulator.Theme) {
-	_ = t.WithEmulator(func(e emulator.Emulator) {
-		if q, ok := e.(emulator.Querier); ok {
-			q.SetTheme(th)
-		}
-	})
-}
-
-// Resize applies a size as the host, which becomes the size owner.
+// Resize applies a size as the host, which becomes the size owner until a client claims it.
 func (t *Terminal) Resize(cols, rows, pxW, pxH int) error {
-	if !t.Running() {
-		return ErrExited
-	}
-	if err := t.proc.Resize(cols, rows, pxW, pxH); err != nil {
-		return err
-	}
-	_ = t.WithEmulator(func(e emulator.Emulator) { e.Resize(cols, rows) })
-	t.mu.Lock()
-	t.cols, t.rows, t.pxW, t.pxH = cols, rows, pxW, pxH
-	t.lastResizeSeq = t.ring.Head()
-	t.sizeOwner = "host"
-	t.mu.Unlock()
-	return nil
+	return t.setSize(Size{Cols: cols, Rows: rows, PxW: pxW, PxH: pxH}, nil)
 }
 
 // Signal sends sig to the foreground job (group) or to the program alone.

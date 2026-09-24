@@ -24,7 +24,7 @@ from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured, RuntimeConfig, 
 from daedalus.doctor import DoctorContext, run_checks
 from daedalus.extensions import commands as slash
 from daedalus.extensions.api import build_app
-from daedalus.extensions.inbox import Inbox
+from daedalus.extensions.notifications import NotificationService
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
@@ -50,7 +50,7 @@ class Install:
             save_config=self._save,
             create_session=manager.create_session,
         )
-        self.app.extensions["inbox"] = Inbox(self.app)
+        self.app.notifications = NotificationService(db, manager.bus)
 
     async def _save(self, config: RuntimeConfig) -> None:
         self.app.config = config
@@ -216,7 +216,7 @@ async def scheduled_tick_on_a_modelless_install(i: Install) -> str:
     row = dict((await i.db.fetchall("SELECT * FROM schedules"))[0])
     assert int(row["enabled"]) == 1, "the schedule was switched off for an installation that had no model"
     assert int(row["failure_count"]) == 0, "a missing model is not the schedule's failure"
-    posted = [dict(r) for r in await i.db.fetchall("SELECT * FROM inbox WHERE kind = 'schedule_no_model'")]
+    posted = [dict(r) for r in await i.db.fetchall("SELECT * FROM notifications WHERE kind = 'schedule_no_model'")]
     assert posted, "nothing told the operator the schedule was skipped"
     return str(posted[0]["body"])
 

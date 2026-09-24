@@ -34,7 +34,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import GATES, Unhandled, folders  # noqa: E402
+from api_stub import EVENTS, GATES, Unhandled, event_stream_hello, folders, serve_shared_post  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -240,9 +240,14 @@ class Stub(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ValueError):
             return
 
+    def do_POST(self) -> None:  # noqa: N802
+        serve_shared_post(self, Stub.unhandled)
+
     def do_GET(self) -> None:  # noqa: N802
         raw, _, qs = self.path.partition("?")
         query = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+        if raw == EVENTS:
+            return self._send(event_stream_hello().encode(), "text/event-stream")
         if raw.startswith("/api/"):
             return self._api(raw, query)
         rel = raw[len("/app/"):] if raw.startswith("/app/") else raw.lstrip("/")

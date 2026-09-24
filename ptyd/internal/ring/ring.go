@@ -119,3 +119,10 @@ func (r *Ring) Shrink(keep int) {
 	r.cap = keep
 	r.resize(min(keep, max(r.n, 1)), r.n)
 }
+
+// Allocated is the memory the ring holds now, which grows with output up to its capacity.
+func (r *Ring) Allocated() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.buf)
+}

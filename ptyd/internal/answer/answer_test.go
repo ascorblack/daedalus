@@ -111,3 +111,23 @@ func TestMouseReportsAreTheEffectiveMode(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestParseColor(t *testing.T) {
+	for in, want := range map[string]emulator.RGB{
+		"#09090b": {R: 9, G: 9, B: 11}, "#FFF": {R: 255, G: 255, B: 255}, "#10203040": {R: 16, G: 32, B: 48},
+		"rgb(1, 2, 3)": {R: 1, G: 2, B: 3}, "rgba(10,20,30,0.5)": {R: 10, G: 20, B: 30}, "rgb(100% 0% 50%)": {R: 255, B: 128},
+	} {
+		if got, ok := ParseColor(in); !ok || got != want {
+			t.Errorf("%q: %v %v, want %v", in, got, ok, want)
+		}
+	}
+	for _, bad := range []string{"", "red", "#12", "rgb(1,2)", "var(--fg)", "color-mix(in srgb, red, blue)"} {
+		if _, ok := ParseColor(bad); ok {
+			t.Errorf("%q parsed", bad)
+		}
+	}
+	if th := Theme("#fff", "junk", ""); th.Foreground != (emulator.RGB{R: 255, G: 255, B: 255}) ||
+		th.Background != emulator.DefaultTheme.Background {
+		t.Errorf("theme %+v", th)
+	}
+}

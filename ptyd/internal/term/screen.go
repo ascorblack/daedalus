@@ -1,7 +1,9 @@
 package term
 
 import (
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
+	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 // Screen is what `terminal.read_screen` reports, taken at one output offset.
@@ -31,7 +33,7 @@ const (
 func (t *Terminal) Snapshot(scrollback, maxBytes int) (data []byte, info emulator.SnapshotInfo, seq int64, err error) {
 	err = t.WithEmulator(func(e emulator.Emulator) {
 		data, info = fitSnapshot(e, scrollback, maxBytes)
-		seq = t.fed
+		seq = t.fed.Load()
 	})
 	return data, info, seq, err
 }
@@ -56,7 +58,7 @@ func (t *Terminal) ReadScreen(format ScreenFormat, scrollback, tailRows, maxByte
 		s.Cols, s.Rows = e.Size()
 		s.Cursor = e.Cursor()
 		s.AltScreen = e.Modes().AltScreen
-		s.Seq = t.fed
+		s.Seq = t.fed.Load()
 		end := s.Cursor.AbsRow - int64(s.Cursor.Y) + int64(s.Rows)
 		from := end - int64(s.Rows) - int64(scrollback)
 		if tailRows > 0 {
@@ -103,4 +105,20 @@ func (t *Terminal) TitleCwd() (title, cwd string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.title, t.cwd
+}
+
+// applyTheme hands the viewer's colours to the emulator when they changed, so that colour queries
+// are answered with what the person sees (unless the program set its own). Without a viewer the
+// last one's colours stay: they are the best guess of who will look next. Runs on the emulator
+// goroutine.
+func (t *Terminal) applyTheme(e emulator.Emulator, th *wire.Theme) {
+	if th == nil || *th == t.theme {
+		return
+	}
+	q, ok := e.(emulator.Querier)
+	if !ok {
+		return
+	}
+	t.theme = *th
+	q.SetTheme(answer.Theme(th.FG, th.BG, th.Cursor))
 }

@@ -70,9 +70,6 @@ const (
 	// MaxReadOutputBytes bounds one read_output reply, which travels as one frame.
 	MaxReadOutputBytes = 1 << 20
 
-	// DefaultSnapshotScrollback is the history a snapshot carries when the caller does not say: what
-	// a person scrolls back through after reattaching, at a few hundred kilobytes.
-	DefaultSnapshotScrollback = 2000
 	// MaxSnapshotBytes is the largest snapshot sent in one frame (a mebibyte, less room for the
 	// frame's own header and, in a reply, base64). A larger one is cut down by dropping history.
 	MaxSnapshotBytes = 700 << 10

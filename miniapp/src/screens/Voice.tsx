@@ -33,6 +33,7 @@ import { SpeechRuntimeNotice } from "./Components";
 import type { AgentNews, VoiceCenter, VoicePreset, VoiceUi } from "../voice";
 import { agentNote, micReady, modelRow, orbVisual, recognitionSupported, recorderSupported, smoothLevel } from "../voice";
 import { holdVoiceSession, voiceSession } from "../voicesession";
+import { usePresenceScope } from "../presence";
 
 // The session view is most of the app's weight — the timeline, the markdown, the windowing, the
 // composer — and the voice page is a page that has to be on the screen before the first sentence of
@@ -82,6 +83,8 @@ type VoiceState = {
 
 export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
+  // The concierge's own session is what this page shows, whether or not its transcript is open.
+  usePresenceScope({ session: state?.session_id || undefined });
   // The conversation. Not built here and not torn down here: this component is one of the things
   // that can be drawn over it, and it holds the session only for as long as it is on the screen.
   const session = useMemo(() => voiceSession(), []);

@@ -98,10 +98,12 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 | `terminal.kill` | `{id, grace_ms? ≤ 30000}` → `{exit_code, signal}` | |
 | `terminal.forget` | `{id}`, exited terminals only | |
 | `terminal.read_output` | `{id, since_seq, max_bytes? ≤ 1 MiB, strip?}` → `{from_seq, to_seq, head_seq, gap, data \| data_b64}` | |
-| `terminal.stats` | `{ids?}` → `{at, supported, terminals:[{id, pid, processes, rss_bytes, cpu_percent}], machine}` | |
+| `terminal.stats` | `{ids?}` → `{at, supported, terminals:[{id, pid, processes, rss_bytes, cpu_percent, daemon_bytes}], daemon{pid, rss_bytes, cpu_percent}, machine}` | |
 | `events.subscribe` | `{after_seq}` → `{instance, from_seq, resync}`, then `event` notifications | |
 | `events.unsubscribe` | | |
-| `terminal.attach`, `terminal.detach`, `terminal.keyboard` | attachments, size ownership, the keyboard | *not yet* |
+| `terminal.attach` | `{id, client{kind? = "human" \| "viewer", label?, via?, read_only?}}` → `{channel, client_id}` | see Attachments |
+| `terminal.detach` | `{channel}`; the daemon closes the channel | |
+| `terminal.keyboard` | `{id, owner: "auto" \| "human" \| "agent", ttl_ms? ≤ 86 400 000}` → `{owner, until?}` | |
 | `terminal.snapshot`, `terminal.read_screen`, `terminal.wait_for`, `terminal.commands` | the screen | *not yet* |
 | `exec.run`, `fs.*`, `net.dial`, `net.allow`, `hooks.*` | side channels for CLI adapters | *not yet* |
 
@@ -135,7 +137,8 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 ```
 
 `busy` means a job other than the terminal's own program holds the foreground: under a shell, a
-command is running. `cwd` and `title` follow OSC 7 and OSC 0/2. `output_seq` is one past the last
+command is running. `clients` are `{id, kind, label, via?, read_only, attached_at}`; `size_owner` is
+`"host"`, `"human:<client id>"`, or null once the owning client left and no other offered a size. `cwd` and `title` follow OSC 7 and OSC 0/2. `output_seq` is one past the last
 output byte.
 
 ### Writes
@@ -188,9 +191,13 @@ its last 64 KiB.
 ### Process statistics
 
 `terminal.stats` and a `terminal.stats` event every 10 s (only while a terminal runs) report, per
-terminal, the processes of its tree and session, their summed resident memory, and their CPU use
-since the previous sample as a percentage of one CPU. Shared pages are counted once per process, so
-the memory is an estimate of cost, not an accounting. `machine` is
+terminal, the processes of its tree, its session and every process whose environment carries its
+`DAEDALUS_TERMINAL_ID` (a daemon that forked twice and called `setsid` has left both of the others),
+their summed resident memory, and their CPU use since the previous sample as a percentage of one CPU.
+Shared pages are counted once per process, so the memory is an estimate of cost, not an accounting.
+`daemon_bytes` is what the terminal holds inside the daemon that none of its processes shows: its
+output ring as allocated now. `daemon` is the daemon's own process, whose memory holds every
+terminal's emulator; a load estimate adds it, shared out over the terminals. `machine` is
 `{mem_total_bytes, mem_available_bytes, cgroup_limit_bytes?, cgroup_used_bytes?, cpus, cgroup_cpus?,
 cpu_percent, load1, load5, load15}`, read from `/proc` and, inside a container, from its cgroup's
 memory and CPU limits. Outside Linux `supported` is false and the numbers are zero.
@@ -275,14 +282,68 @@ Offsets are at most 2^53 − 1, the largest integer a browser holds exactly. The
 `ptyd/internal/wire/testdata/frames.json` and `miniapp/src/terminal/testdata/frames.json`, which are
 byte-identical (a host test checks it); each codec is tested against its copy.
 
-**Attachments** (*not yet*). On ATTACH, a client whose `lastSeq` is still in the ring, and whose
-terminal was not resized since, receives OUTPUT from `lastSeq`; any other gets `resync` and a
-SNAPSHOT at the PTY's size, then OUTPUT from the snapshot's offset. The client resets its terminal
-before writing a snapshot. The daemon batches OUTPUT (64 KiB or 8 ms), stops sending past 256 KiB
-unacknowledged, and sends a snapshot instead of a backlog that left the ring or grew past 1 MiB; the
-PTY reader never waits for a client. The most recently active client owns the size; a size below
-20×4 is refused with an `error` event. The daemon is the only answerer of terminal queries; clients
-swallow them.
+## Attachments
+
+`terminal.attach` opens a channel that carries browser frames both ways; the host relays them to a
+WebSocket unchanged. The daemon sends nothing on it until the client's first ATTACH. `read_only` (or
+`kind: "viewer"`, or `readOnly` in ATTACH, whichever says so) makes the client a watcher: its INPUT
+and RESIZE are dropped. A terminal takes at most 32 clients (`1003` past that). An exited terminal can
+still be attached, to see its last screen. `terminal.detach`, the host closing the channel, the
+connection ending and the terminal being forgotten all end the client; the channel's closing frame is
+always its last.
+
+**On ATTACH** the client receives `hello`, then `clients`, then either the bytes it is missing or a
+fresh screen. `hello` is `{client_id, read_only, ack_bytes, window_bytes, terminal{id, title, cwd,
+status, cols, rows}, size{cols, rows, owner}, keyboard{owner, until}, modes{alt_screen, mouse,
+bracketed_paste, app_cursor}}`; `clients` is `{count, others[]}`, sent again whenever someone attaches
+or leaves.
+
+- OUTPUT from `lastSeq` when `haveState` is set, `lastSeq` is still in the ring, the PTY was not
+  resized after `lastSeq`, and at most 1 MiB is missing. Bytes drawn for another size would be
+  garbage on the client's screen, and replaying more than a megabyte costs more than one screen.
+- Otherwise `resync {reason, first_abs_row}` and a SNAPSHOT at the emulator's size, with
+  `min(scrollback, 10000)` lines of history (2000 by default), and OUTPUT from the snapshot's `seq`.
+  `reason` is `attach` (no state), `ring` (`lastSeq` left the ring, or is ahead of it), `resized` or
+  `backlog`. A screen that does not fit in one frame is taken again with half the history; if even the
+  bare screen does not fit, an empty one is sent at the right offset, followed by
+  `error {code: "snapshot_too_large"}`.
+- The client resets its terminal before writing a snapshot, so modes of the old screen cannot survive.
+- For an exited terminal, then `exit {code, signal}` once every byte is sent. The channel stays open.
+
+A second ATTACH on the same channel starts over the same way.
+
+**Flow control.** OUTPUT goes out when 64 KiB are waiting or 8 ms after the previous frame, so a
+keystroke's echo after a quiet spell is sent at once and a flood in large frames. The daemon stops
+sending once 256 KiB are unacknowledged (`window_bytes`); the client acknowledges every 64 KiB it has
+*parsed* (`ack_bytes`), and at least every 20 s. An acknowledgement past what was sent counts as
+everything sent. When an acknowledgement reopens a full window and what the client missed has left the
+ring or is more than 1 MiB, the client gets `resync` (`lagged`) and a snapshot instead of the backlog;
+the window starts again from the snapshot. The PTY reader never waits for a client: a client that
+stops acknowledging holds its window and nothing else. `ping {at}` (milliseconds) comes every 20 s.
+
+**Size.** Each client's RESIZE is the size it would like. The client that last resized or typed owns
+the PTY's size; the others render at it. A RESIZE, or INPUT from a client with a size of its own
+while another owns the size, applies that client's size before the keystroke is written. When the
+owner leaves, the most recently active client with a size takes over; with none, the PTY keeps its
+size and the owner is nobody. `terminal.resize` from the host makes the host the owner until a client
+claims. A size outside 20×4 … 500×300 is refused with `error {code: "invalid_size"}` and not
+remembered. A read-only client never owns the size. Every change of the grid or the owner is sent as
+`size {cols, rows, owner}`, with `owner` `you`, `other` or `host` as the receiving client sees it.
+
+**The keyboard.** `auto` is the default: an agent write waits for `input_idle_ms` of human quiet.
+`human` holds agents back until the grant's expiry (or until changed); `agent` lets their writes
+through at once, and human typing ends it. Clients receive `keyboard {owner, until}` (`until` in
+milliseconds, or null) at every change and when a grant expires, and `agent_typing {actor, active}`
+when an agent's writes start being delivered and after 1.5 s without one.
+
+**Terminal queries.** The daemon is their only answerer; clients swallow them. An INPUT frame that
+repeats byte for byte an answer the daemon gave to a query that client was shown, within 2 s, is
+taken for the client answering too and dropped once; the same bytes later are typing and pass.
+
+**Other events**, as the terminal produces them: `title`, `cwd`, `bell`, `notify {title, body}`,
+`progress {state, value}` and `mode {alt_screen, mouse, bracketed_paste, app_cursor}`. A client that
+is behind receives only the latest of each kind, except `notify`, of which at most 64 wait. A frame the
+daemon cannot use is answered with `error {code: "bad_frame"}`.
 
 ## The environment of a spawned program
 
@@ -296,6 +357,40 @@ UTF-8, the non-UTF-8 overrides are removed and `LANG=C.UTF-8` is set; a user's `
 kept.
 
 ## The host side
+
+The host (`daedalus/terminals/`) keeps a row per terminal in the `terminals` table and an append-only
+`terminal_audit`. It is told each environment's run directory (`TERMINALS_CONTAINER_DIR`,
+`TERMINALS_HOST_DIR`), connects in the background and retries until the daemon is there. Both
+directories are sealed from the agent — named in a command, even inside a container, it is refused —
+because the token in them is a shell.
+
+- **Ids and labels.** The host makes the id (12 hex characters) and writes the row before
+  `terminal.create`, so the row is the reservation under the cap. `labels` carry `owner_kind`,
+  `owner_id`, `project_id` and `profile`.
+- **Reconcile**, on every connection and every minute: a running row the daemon does not list is
+  `lost` when the daemon's `instance` changed and `exited` when it did not (ended and forgotten
+  while the host was away); a running terminal with no row is adopted from its labels; a terminal
+  whose owner no longer exists is ended. Events are resumed from the last `seq` seen when the
+  instance is the same.
+- **Owners** are `session`, `staff`, `project` or `free`. Deleting a session or a project ends its
+  terminals. Ended rows are kept for `terminals.exited_retention_hours` with their last screen.
+- **The cap.** At most `terminals.running_cap` terminals run at once across both environments. An
+  agent's launch waits in line for a place; the operator's is refused with `409 {"code":
+  "over_cap"}` and admitted past the cap when repeated with `confirm: true`.
+- **The audit** records create, kill, restart, signal, keyboard, update and remove for every
+  terminal, and every agent write with its first 4 KiB and the SHA-256 of the whole. What a person
+  types is never recorded.
+- **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
+  /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+
+| Route | |
+|---|---|
+| `GET /api/terminals?env&owner_kind&owner_id&project_id&status&preview=0..12` | `{envs, terminals, capacity}` |
+| `POST /api/terminals` | `{env, owner_kind, owner_id?, project_id?, cwd?, title?, sandbox?, cols?, rows?, confirm?}` → the view (201) |
+| `GET /api/terminals/load?cap=` | the cost now and the projection |
+| `GET`, `PATCH`, `DELETE /api/terminals/{id}` | the view; rename or hand to another owner; remove an ended row |
+| `POST /api/terminals/{id}/kill`, `/signal`, `/restart` | end; `{signal}`; the same program as a new terminal |
+| `GET /api/terminals/{id}/screen`, `/audit` | the screen (with the emulator); the audit, newest first |
 
 The browser reaches a terminal through the host: `POST /api/terminals/{id}/ticket` returns a
 single-use ticket valid for 30 s, and `WS /ws/terminals/{id}?ticket=…` checks the Origin, spends the

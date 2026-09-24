@@ -53,6 +53,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
+from daedalus.extensions.notifications import Draft, NotificationService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
@@ -61,6 +62,7 @@ from daedalus.host.config_validation import ConfigConflict, config_revision, val
 from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.events import EventFilter, event_stream, streamed_types
 from daedalus.host.policy import sealed_root
+from daedalus.host.presence import MAX_ID_LENGTH, MAX_PROJECTS, MAX_SESSIONS, MAX_TERMINALS, PresenceReport
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment, clip_title
@@ -82,8 +84,11 @@ from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.media import MEDIA_TENANT
-from daedalus.stores.projects import ProjectError, ProjectSettings
+from daedalus.stores.projects import Project, ProjectError, ProjectSettings
 from daedalus.stores.sqlite import ReceiptConflict
+from daedalus.stores.staff import ACTIVE_STATUSES, HARNESSES, Staff, StaffBusy, StaffError
+from daedalus.terminals.model import Owner as TerminalOwner
+from daedalus.terminals.model import TerminalError, TerminalSpec
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -97,6 +102,7 @@ from daedalus.transport.telegram.voice import (
 if TYPE_CHECKING:
     from daedalus.app import Application
     from daedalus.config import RuntimeConfig
+    from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +258,21 @@ class AnswerBody(BaseModel):
     answers: list[dict[str, Any]]
 
 
+class PresenceBody(BaseModel):
+    """One window's account of itself: whether it is seen, and what it shows."""
+
+    client: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    kind: Literal["browser", "pwa", "telegram", "window"] = "browser"
+    visible: bool
+    focused: bool
+    sessions: list[str] = []
+    terminals: list[str] = []
+    projects: list[str] = []
+    screen: str = Field("", max_length=64)
+    lang: str = Field("", max_length=16)
+    tz: str = Field("", max_length=64)
+
+
 class SpaFiles(StaticFiles):
     """The built app with its screens in the URL: a path that is not a file is the app itself."""
 
@@ -276,6 +297,42 @@ class ProjectPatch(BaseModel):
 
     name: str | None = None
     snapshots: bool | None = None
+
+
+class HireBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    role: str = ""
+    harness: str = "daedalus"
+    agent: str = ""
+    model: str = ""
+    effort: str = ""
+    permission_mode: str = ""
+    env: str = ""
+    folder_id: str | None = None
+    isolation: str | None = None
+    """Omitted: an own worktree where the folder is a git repository, the shared folder otherwise."""
+    instructions: str = ""
+    one_off: bool = False
+    color: str = ""
+
+
+class StaffPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str | None = None
+    agent: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    permission_mode: str | None = None
+    env: str | None = None
+    folder_id: str | None = None
+    """An empty string clears it: the member then works in the project's primary folder."""
+    isolation: str | None = None
+    instructions: str | None = None
+    notes: str | None = None
+    color: str | None = None
 
 
 class NewSessionBody(BaseModel):
@@ -366,9 +423,13 @@ class SchedulePatchBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-class InboxReadBody(BaseModel):
-    ids: list[int] | None = None
-    """Omitted = mark everything read."""
+class NotificationsSeenBody(BaseModel):
+    """Which notifications the operator has seen: the listed ids, every one, or every one of a session."""
+
+    ids: list[int] | None = Field(default=None, max_length=1000)
+    all: bool = False
+    session_id: str | None = Field(default=None, max_length=64)
+    model_config = {"extra": "forbid"}
 
 
 class HeartbeatBody(BaseModel):
@@ -895,6 +956,37 @@ def _tool_group(name: str) -> str:
     return "Other"
 
 
+class TerminalCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    env: Literal["container", "host"]
+    owner_kind: Literal["session", "staff", "project", "free"]
+    owner_id: str | None = Field(default=None, max_length=128)
+    project_id: str | None = Field(default=None, max_length=128)
+    cwd: str | None = Field(default=None, max_length=4096)
+    title: str = Field(default="", max_length=200)
+    sandbox: bool = False
+    cols: int = Field(default=80, ge=20, le=500)
+    rows: int = Field(default=24, ge=4, le=300)
+    confirm: bool = False
+    """The operator's yes to "the machine already runs as many terminals as the cap allows"."""
+
+
+class TerminalPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, max_length=200)
+    owner_kind: Literal["session", "staff", "project", "free"] | None = None
+    owner_id: str | None = Field(default=None, max_length=128)
+
+
+class TerminalSignalBody(BaseModel):
+    signal: Literal["INT", "TERM", "HUP", "KILL", "QUIT", "TSTP", "CONT", "WINCH", "USR1", "USR2"]
+
+
+class TerminalRestartBody(BaseModel):
+    sandbox: bool | None = None
+    confirm: bool = False
+
+
 def build_app(app: Application, api_token: str) -> FastAPI:
     dependency_planner = DependencyPlanner(app)
     prompt_change_planner = PromptChangePlanner(app)
@@ -912,6 +1004,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # difference the operator feels. The event stream is excluded by content type, so a token
     # still leaves the process the moment it arrives.
     api.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
+
+    @api.exception_handler(TerminalError)
+    async def terminal_refusal(_: Request, exc: TerminalError) -> JSONResponse:
+        # ``detail`` stays the sentence the app already shows for any refusal; ``code`` and the
+        # details beside it are what a screen that acts on the refusal reads (the cap's confirmation).
+        return JSONResponse({"detail": exc.message, "code": exc.code, **exc.details}, status_code=exc.status)
+
     manager = app.manager
     assert manager is not None
     settings = app.settings
@@ -1205,12 +1304,142 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if sessions:
             one = len(sessions) == 1
             raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; move or remove {'it' if one else 'them'} first")
+        # What the project itself holds (its terminals) ends before the row goes, so nothing is left
+        # running for an owner that no longer exists.
+        for hook in manager.project_delete_hooks:
+            try:
+                await hook(project_id)
+            except Exception:  # noqa: BLE001 — a hook that fails must not keep the project
+                logger.exception("project delete hook failed for %s", project_id)
         try:
             await manager.projects.delete(project_id)
         except ProjectError as exc:
             raise HTTPException(409, str(exc)) from exc
         await manager.reload_project(None, project_id)
         return {"ok": True}
+
+    # -- staff: the named members of a project's team ------------------------------------------
+
+    def staff_row(member: Staff, live: Any, sessions: int) -> dict[str, Any]:
+        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions}
+
+    async def staff_project(project_id: str) -> Project:
+        project = await manager.projects.get(project_id)
+        if project is None:
+            raise HTTPException(404, "no such project")
+        return project
+
+    async def staff_member(staff_id: str) -> Staff:
+        member = await manager.staff.get(staff_id)
+        if member is None:
+            raise HTTPException(404, "no such staff member")
+        return member
+
+    async def staff_changed(member: Staff, change: str) -> None:
+        # The team page of another window, and later the orchestrator, learn of it from the stream.
+        await manager.bus.publish("project.changed", {"change": change, "actor": "operator"}, project_id=member.project_id, staff_id=member.id)
+
+    @api.get("/api/projects/{project_id}/staff")
+    async def list_staff(project_id: str, archived: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The team, with each member's live session, and what the hiring form offers for Daedalus staff.
+
+        The personas and presets travel with the team because nothing else serves the personas, and a
+        form that has to wait on three requests before it can draw a choice is a form drawn twice.
+        What the command-line agents offer is the harness catalog's, asked for separately.
+        """
+        project = await staff_project(project_id)
+        members = await manager.staff.list(project_id, archived=archived)
+        live = await manager.staff.live_sessions(project_id)
+        counts = await manager.staff.session_counts(project_id)
+        presets = manager.config.presets
+        default = manager.config.default_preset()
+        orchestrator = project.settings.orchestrator
+        return {
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "ephemeral": project.settings.ephemeral,
+                "system": project.settings.system,
+                "default_env": project.settings.default_env or manager.projects.local_env,
+                "local_env": manager.projects.local_env,
+                "concurrency": orchestrator.concurrency,
+                "concurrency_cap": orchestrator.concurrency_cap,
+                "orchestrator": orchestrator.enabled,
+                "folders": [{"id": f.id, "path": str(f.path), "label": f.label, "env": f.env, "is_git": f.is_git, "readonly": f.readonly} for f in project.folders],
+            },
+            "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0)) for m in members],
+            "counts": {"staff": sum(1 for m in members if m.active), "working": sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)},
+            "choices": {
+                "harnesses": list(HARNESSES),
+                "personas": manager.staff.personas(),
+                "presets": [{"id": pid, "label": preset.display(pid)} for pid, preset in presets.items()],
+                "default_preset": default[0] if default else "",
+            },
+        }
+
+    @api.post("/api/projects/{project_id}/staff", status_code=201)
+    async def hire_staff(project_id: str, body: HireBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        project = await staff_project(project_id)
+        isolation = body.isolation
+        if isolation is None:
+            folder = project.folder(body.folder_id) if body.folder_id else (project.folders[0] if project.folders else None)
+            isolation = "worktree" if folder is not None and folder.is_git and not folder.readonly else "shared"
+        try:
+            member = await manager.staff.hire(
+                project_id,
+                name=body.name, role=body.role, harness=body.harness, agent=body.agent, model=body.model, effort=body.effort,
+                permission_mode=body.permission_mode, env=body.env, folder_id=body.folder_id or None, isolation=isolation,
+                instructions=body.instructions, one_off=body.one_off, color=body.color, created_by="operator",
+            )
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await staff_changed(member, "staff.hired")
+        return staff_row(member, None, 0)
+
+    @api.get("/api/staff/{staff_id}")
+    async def get_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        member = await staff_member(staff_id)
+        live = await manager.staff.live(staff_id)
+        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)))
+
+    @api.patch("/api/staff/{staff_id}")
+    async def patch_staff(staff_id: str, body: StaffPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await staff_member(staff_id)
+        changes = body.model_dump(exclude_unset=True)
+        if "folder_id" in changes:
+            changes["default_folder_id"] = changes.pop("folder_id")
+        try:
+            member = await manager.staff.update(staff_id, **changes)
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await staff_changed(member, "staff.updated")
+        live = await manager.staff.live(staff_id)
+        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)))
+
+    @api.delete("/api/staff/{staff_id}")
+    async def dismiss_staff(staff_id: str, release: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Dismiss a member. Refused while a session of theirs is live, unless ``release`` asks the
+        staff runtime to end it first — which only the runtime can, since only it knows what is running."""
+        member = await staff_member(staff_id)
+        live = await manager.staff.live(staff_id)
+        if live is not None:
+            runtime = app.extensions.get("staff")
+            if not release:
+                raise HTTPException(409, f"{member.name} is working; release the session first")
+            if runtime is None or not hasattr(runtime, "release"):
+                raise HTTPException(409, f"{member.name} has a live session and nothing here can end it yet")
+            await runtime.release(member, keep_worktree=True)
+        try:
+            member = await manager.staff.archive(staff_id, by="operator")
+        except StaffBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await staff_changed(member, "staff.dismissed")
+        return {"ok": True, "staff": member.view()}
+
+    @api.get("/api/staff/{staff_id}/sessions")
+    async def staff_sessions(staff_id: str, limit: int = 50, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        await staff_member(staff_id)
+        return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
 
     # -- sessions -------------------------------------------------------------------
 
@@ -1310,6 +1539,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default = app.config.default_preset()
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
+        terminals = app.extensions.get("terminals")
+        running_terminals = await terminals.running_by_session([row["id"] for row in rows]) if terminals is not None else {}  # type: ignore[attr-defined]
         for row in rows:
             # The directory the session works in, for the tooltip on its row and the chip that says
             # it has one of its own. The list groups by project now, not by workspace.
@@ -1321,6 +1552,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             nothing about which folder it is, and the list no longer groups by it."""
             row["workspace_own"] = bool(row["metadata"].get("directory"))
             row["project"] = names[row["project_id"]]
+            row["terminals"] = running_terminals.get(row["id"], 0)
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
@@ -1671,9 +1903,40 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             last = request.headers.get("last-event-id", "").strip()
             cursor = int(last) if last.isdigit() else None
         flt = EventFilter(types=wanted or streamed_types())
-        frames = event_stream(manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind)
+        presence = manager.presence
+
+        async def opened() -> None:
+            await presence.stream_opened(client, kind)
+
+        async def closed() -> None:
+            await presence.stream_closed(client, kind)
+
+        frames = event_stream(
+            manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind,
+            on_open=opened, on_close=closed,
+        )
         headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
         return StreamingResponse(frames, media_type="text/event-stream", headers=headers)
+
+    @api.post("/api/presence", status_code=204)
+    async def report_presence(body: PresenceBody, _: dict[str, Any] = Depends(auth)) -> Response:
+        """What one window shows, re-sent every 20 s while it is visible and whenever that changes.
+
+        Nothing is written to the database here except the language and time zone when they change:
+        every visible tab calls this three times a minute.
+        """
+        limits = (("sessions", body.sessions, MAX_SESSIONS), ("terminals", body.terminals, MAX_TERMINALS), ("projects", body.projects, MAX_PROJECTS))
+        for name, ids, most in limits:
+            if len(ids) > most or any(not item or len(item) > MAX_ID_LENGTH for item in ids):
+                raise HTTPException(400, f"{name}: at most {most} ids of at most {MAX_ID_LENGTH} characters")
+        await manager.presence.report(
+            PresenceReport(
+                client=body.client, kind=body.kind, visible=body.visible, focused=body.focused,
+                sessions=tuple(body.sessions), terminals=tuple(body.terminals), projects=tuple(body.projects),
+                screen=body.screen, lang=body.lang, tz=body.tz,
+            )
+        )
+        return Response(status_code=204)
 
     @api.get("/api/sessions/{session_id}/tool-results/{call_id}")
     async def tool_result(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2745,7 +3008,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            run_id = await manager.answer(session_id, body.answers)
+            run_id = await manager.answer(session_id, body.answers, via="app")
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id}
@@ -2756,7 +3019,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # Before the deletion: the topic to close and the private chat's pointer are both
             # read from rows that go with the session.
             await app.front.forget_session(session_id)
-        return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
+        # Ended here rather than only by the delete hook, so the answer can say how many — the
+        # dialog that asked has already told the operator the number.
+        terminals = app.extensions.get("terminals")
+        ended = await terminals.close_owned("session", session_id, actor="operator") if terminals is not None else 0  # type: ignore[attr-defined]
+        return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace), "terminals_ended": ended}
 
     @api.delete("/api/sessions/{session_id}/telegram")
     async def detach_session_telegram(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2896,6 +3163,94 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             desc = " ".join((t.definition.description or "").split())
             out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
         return out
+
+    # -- terminals: the terminal daemons' terminals, as the service mirrors them --------------
+
+    def terminal_service() -> Terminals:
+        service = app.extensions.get("terminals")
+        if service is None:
+            raise HTTPException(503, "the terminals subsystem is not running")
+        return service  # type: ignore[return-value]
+
+    @api.get("/api/terminals")
+    async def terminals_list(
+        env: Literal["container", "host"] | None = None,
+        owner_kind: Literal["session", "staff", "project", "free"] | None = None,
+        owner_id: str | None = Query(default=None, max_length=128),
+        project_id: str | None = Query(default=None, max_length=128),
+        status: Literal["running", "exited", "lost"] | None = None,
+        preview: int = Query(default=0, ge=0, le=12),
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        service = terminal_service()
+        owner = TerminalOwner(owner_kind, owner_id) if owner_kind and (owner_id or owner_kind == "free") else None
+        views = await service.list(env=env, owner=owner, owner_kind=owner_kind if owner is None else None, project_id=project_id, status=status, preview_rows=preview)
+        by_env = await service.running_by_env()
+        return {
+            "envs": [e.view() for e in service.environments(by_env)],
+            "terminals": views,
+            "capacity": {"running": sum(by_env.values()), "cap": app.config.terminals.running_cap, "queued": len(service.queue())},
+        }
+
+    @api.get("/api/terminals/load")
+    async def terminals_load(cap: int | None = Query(default=None, ge=1, le=100_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What the running terminals cost, and what the machine would carry at ``cap`` of them."""
+        return await terminal_service().load(cap=cap)
+
+    @api.post("/api/terminals", status_code=201)
+    async def terminals_create(body: TerminalCreateBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        spec = TerminalSpec(
+            env=body.env,
+            owner=TerminalOwner(body.owner_kind, body.owner_id or None),
+            project_id=body.project_id or None,
+            cwd=body.cwd or None,
+            title=body.title,
+            sandbox=body.sandbox,
+            cols=body.cols,
+            rows=body.rows,
+            created_by="operator",
+        )
+        return await terminal_service().create(spec, confirm_over_cap=body.confirm)
+
+    @api.get("/api/terminals/{terminal_id}")
+    async def terminals_get(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().get(terminal_id)
+
+    @api.patch("/api/terminals/{terminal_id}")
+    async def terminals_patch(terminal_id: str, body: TerminalPatchBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        owner = TerminalOwner(body.owner_kind, body.owner_id or None) if body.owner_kind else None
+        return await terminal_service().update(terminal_id, title=body.title, owner=owner)
+
+    @api.post("/api/terminals/{terminal_id}/kill")
+    async def terminals_kill(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().kill(terminal_id)
+
+    @api.post("/api/terminals/{terminal_id}/signal")
+    async def terminals_signal(terminal_id: str, body: TerminalSignalBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await terminal_service().signal(terminal_id, body.signal)
+        return {"ok": True}
+
+    @api.post("/api/terminals/{terminal_id}/restart")
+    async def terminals_restart(terminal_id: str, body: TerminalRestartBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        body = body or TerminalRestartBody()
+        return await terminal_service().restart(terminal_id, sandbox=body.sandbox, confirm_over_cap=body.confirm)
+
+    @api.delete("/api/terminals/{terminal_id}")
+    async def terminals_remove(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await terminal_service().remove(terminal_id)
+        return {"ok": True}
+
+    @api.get("/api/terminals/{terminal_id}/screen")
+    async def terminals_screen(terminal_id: str, format: Literal["text", "vt", "runs"] = "text", scrollback: int = Query(default=0, ge=0, le=10_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().read_screen(terminal_id, format=format, scrollback=scrollback)
+
+    @api.get("/api/terminals/{terminal_id}/audit")
+    async def terminals_audit(terminal_id: str, limit: int = Query(default=200, ge=1, le=1000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        # The audit outlives the row on purpose, so a removed terminal's history is still answered.
+        entries = await terminal_service().audit_log(terminal_id, limit=limit)
+        if not entries and await app.db.fetchone("SELECT 1 FROM terminals WHERE id = ?", (terminal_id,)) is None:
+            raise HTTPException(404, "no such terminal")
+        return {"entries": entries}
 
     @api.get("/api/services")
     async def all_services(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
@@ -3221,9 +3576,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 — the sender must get a status, and the failure goes to the inbox
             logger.warning("webhook %s could not run", provider, exc_info=True)
             await inbound.forget_delivery(provider, delivery_id)  # type: ignore[attr-defined]
-            inbox = app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("webhook_failed", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", severity="warning")  # type: ignore[attr-defined]
+            if app.notifications is not None:
+                await app.notifications.post(Draft("system", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", kind="webhook_failed", tone="warning", source=f"webhook:{provider}"))
             raise HTTPException(503, "accepted but could not start a run; see the inbox") from exc
         return {"status": "accepted", "delivery_id": delivery_id, **result}
 
@@ -3281,12 +3635,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def policy_grant(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Let one refused call through: ``{"key": "<approval key from the refusal>"}``."""
         try:
-            grants = await manager.grant(session_id, str(body.get("key") or ""))
+            grants = await manager.grant(session_id, str(body.get("key") or ""), via="app")
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"grants": grants}
+
+    @api.post("/api/sessions/{session_id}/policy/refuse")
+    async def policy_refuse(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Leave one refused call refused: ``{"key": "<approval key>"}``. The request stops being open."""
+        try:
+            return await manager.refuse(session_id, str(body.get("key") or ""), via="app")
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.get("/api/sessions/{session_id}/egress")
     async def session_egress(session_id: str, limit: int = 200, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -3919,7 +4283,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         selfdev = app.extensions.get("selfdev")
         supervisor = await selfdev.supervisor_status() if selfdev is not None else None  # type: ignore[attr-defined]
-        inbox = app.extensions.get("inbox")
         heartbeat = app.extensions.get("heartbeat")
         return {
             "model": app.config.model.model_dump(),
@@ -3927,7 +4290,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "supervisor": supervisor,
             "budget_exceeded": manager.budget_exceeded(),
             "sessions": await manager.list_sessions(limit=50),
-            "inbox_unread": await inbox.unread_count() if inbox is not None else 0,  # type: ignore[attr-defined]
+            "notifications": await app.notifications.summary() if app.notifications is not None else {"unseen": 0, "needs_you": 0},
             "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
 
@@ -3988,34 +4351,41 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         checks = await run_checks(_doctor_context(True))
         return {"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}
 
-    # -- inbox --------------------------------------------------------------------------
+    # -- notifications ------------------------------------------------------------------
 
-    @api.get("/api/inbox")
-    async def inbox_list(unread: int = 0, limit: int = 100, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            return {"entries": [], "unread": 0}
-        return {"entries": await inbox.list(limit=limit, unread_only=bool(unread)), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+    def notifications_service() -> NotificationService:
+        if app.notifications is None:
+            raise HTTPException(503, "notifications are not installed")
+        return app.notifications
 
-    @api.get("/api/inbox/unread")
-    async def inbox_unread(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        return {"unread": await inbox.unread_count() if inbox is not None else 0}  # type: ignore[attr-defined]
+    @api.get("/api/notifications")
+    async def notifications_list(
+        view: Literal["all", "unseen", "problems", "needs_you"] = "all",
+        project: str | None = Query(default=None, max_length=64),
+        before: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=100, ge=1, le=500),
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        return dict(await notifications_service().list(view, project_id=project, before=before, limit=limit))
 
-    @api.post("/api/inbox/read")
-    async def inbox_read(body: InboxReadBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            raise HTTPException(503, "inbox is not installed")
-        return {"marked": await inbox.mark_read(body.ids), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+    @api.get("/api/notifications/summary")
+    async def notifications_summary(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return dict(await notifications_service().summary())
 
-    @api.delete("/api/inbox/{entry_id}")
-    async def inbox_delete(entry_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            raise HTTPException(503, "inbox is not installed")
-        await inbox.delete(entry_id)  # type: ignore[attr-defined]
-        return {"deleted": entry_id}
+    @api.post("/api/notifications/seen")
+    async def notifications_seen(body: NotificationsSeenBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = notifications_service()
+        if sum((body.ids is not None, body.all, body.session_id is not None)) != 1:
+            raise HTTPException(422, "name exactly one of ids, all or session_id")
+        marked = await service.mark_seen(body.ids, everything=body.all, session_id=body.session_id)
+        return {"marked": marked, "summary": await service.summary()}
+
+    @api.delete("/api/notifications/{entry_id}")
+    async def notifications_delete(entry_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = notifications_service()
+        if not await service.delete(entry_id):
+            raise HTTPException(404, "no such notification")
+        return {"deleted": entry_id, "summary": await service.summary()}
 
     # -- heartbeat ------------------------------------------------------------------------
 

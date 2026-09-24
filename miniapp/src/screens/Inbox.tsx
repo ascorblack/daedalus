@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { api, Proposal } from "../api";
+import { useState } from "react";
+import { api, Notification, NotificationPage, NotificationSummary, Proposal } from "../api";
 import { Skeleton } from "../components";
 import { OverflowMenu, Sheet, deleteWithUndo } from "../dialogs";
 import { absTime, dayLabel, relTime } from "../format";
@@ -7,24 +7,15 @@ import { Icon, IconName } from "../icons";
 import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
+import { useStreamUp } from "../events";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
-type Entry = {
-  id: number;
-  at: string;
-  kind: string;
-  severity: "info" | "notice" | "warning" | "error";
-  title: string;
-  body: string;
-  session_id: string | null;
-  run_id: string | null;
-  read: number;
-};
-type Listing = { entries: Entry[]; unread: number };
-type Filter = "all" | "unread" | "problems";
+type Filter = "all" | "unseen" | "problems";
 
-const KIND_ICON: Record<string, IconName> = { rebuild: "wrench", run_failed: "stop", schedule: "clock", schedule_run: "clock", service: "globe", loop: "loop", loop_paused: "pause", heartbeat: "dot", inbound: "inbox", board_stale: "board", webhook_failed: "globe", learning_digest: "bulb", boot_guard: "wrench", proposal: "changes" };
+const SUMMARY = "/api/notifications/summary";
+
+const KIND_ICON: Record<string, IconName> = { rebuild: "wrench", run_failed: "stop", run_cap: "stop", schedule: "clock", schedule_run: "clock", reminder: "clock", service: "globe", loop: "loop", loop_paused: "pause", heartbeat: "dot", inbound: "inbox", board_stale: "board", webhook_failed: "globe", learning_digest: "bulb", boot_guard: "wrench", change_proposal: "changes" };
 
 function kindIcon(kind: string): IconName {
   if (KIND_ICON[kind]) return KIND_ICON[kind];
@@ -36,91 +27,70 @@ function kindIcon(kind: string): IconName {
 
 const kindLabel = (kind: string) => kind.replace(/_/g, " ");
 
-/** Same kind, same title shape, within ten minutes: one card with a count, not five. */
-type Group = { key: string; entries: Entry[]; kind: string; severity: Entry["severity"]; title: string; at: string; unread: number; session_id: string | null };
-
-function groupEntries(entries: Entry[]): Group[] {
-  const out: Group[] = [];
-  for (const e of entries) {
-    const shape = e.title.replace(/'[^']*'/g, "'…'").replace(/#\d+/g, "#…").replace(/\d+/g, "N");
-    const last = out[out.length - 1];
-    const within = last && Math.abs(Date.parse(last.entries[last.entries.length - 1].at) - Date.parse(e.at)) < 10 * 60000;
-    if (last && last.kind === e.kind && last.key === `${e.kind}|${shape}` && within) {
-      last.entries.push(e);
-      last.unread += e.read ? 0 : 1;
-      if (SEV[e.severity] > SEV[last.severity]) last.severity = e.severity;
-      continue;
-    }
-    out.push({ key: `${e.kind}|${shape}`, entries: [e], kind: e.kind, severity: e.severity, title: e.title, at: e.at, unread: e.read ? 0 : 1, session_id: e.session_id });
-  }
-  return out;
-}
-const SEV: Record<Entry["severity"], number> = { info: 0, notice: 1, warning: 2, error: 3 };
+/** The colour of the icon: the entry's tone, except that a quiet record stays grey whatever it says. */
+const toneClass = (e: Notification) => (e.level === "quiet" && e.tone === "info" ? "quiet" : e.tone);
 
 export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [filter, setFilter] = useState<Filter>("all");
-  const key = `/api/inbox?unread=${filter === "unread" ? 1 : 0}&limit=200`;
-  const { data, error, loading, refresh } = useQuery<Listing>(key, { pollMs: 15000, staleMs: 5000 });
+  const key = `/api/notifications?view=${filter}&limit=200`;
+  // A new or seen notification arrives as an event while the stream is up; only without it does the list poll.
+  const live = useStreamUp();
+  const { data, error, loading, refresh } = useQuery<NotificationPage>(key, { pollMs: live ? 0 : 15000, staleMs: 5000 });
   const proposals = useQuery<Proposal[]>("/api/proposals", { pollMs: 60000, staleMs: 30000 });
-  const [open, setOpen] = useState<string | null>(null);
-  const unread = data?.unread ?? 0;
-
-  const entries = useMemo(() => {
-    const all = data?.entries ?? [];
-    if (filter === "problems") return all.filter((e) => e.severity === "error" || e.severity === "warning");
-    return all;
-  }, [data, filter]);
-  const groups = useMemo(() => groupEntries(entries), [entries]);
-  const openKey = (g: Group) => `${g.key}|${g.entries[0].id}`;
+  const [open, setOpen] = useState<number | null>(null);
+  const unseen = data?.summary.unseen ?? 0;
+  const entries = data?.entries ?? [];
   const pending = (proposals.data ?? []).filter((p) => p.status === "pending");
 
-  function patch(fn: (list: Entry[]) => Entry[], unreadDelta = 0) {
+  /** Show a change before the server has confirmed it; the badge follows from the same summary. */
+  function patch(fn: (list: Notification[]) => Notification[], summary?: NotificationSummary) {
     if (!data) return;
-    prime(key, { entries: fn(data.entries), unread: Math.max(0, data.unread + unreadDelta) });
-    invalidate("/api/inbox/unread");
+    const next = summary ?? data.summary;
+    prime(key, { ...data, entries: fn(data.entries), summary: next });
+    prime(SUMMARY, next);
   }
 
   async function markAll() {
     try {
-      await api.post("/api/inbox/read", {});
-      patch((l) => l.map((e) => ({ ...e, read: 1 })), -unread);
+      const r = await api.post<{ marked: number; summary: NotificationSummary }>("/api/notifications/seen", { all: true });
+      patch((l) => l.map((e) => ({ ...e, seen: true })), r.summary);
       refresh();
     } catch (e) {
       toast(errorText(e));
     }
   }
 
-  async function markRead(ids: number[]) {
-    const fresh = ids.filter((id) => data?.entries.find((e) => e.id === id && !e.read));
-    if (!fresh.length) return;
-    patch((l) => l.map((e) => (fresh.includes(e.id) ? { ...e, read: 1 } : e)), -fresh.length);
+  async function markSeen(entry: Notification) {
+    if (entry.seen) return;
+    patch((l) => l.map((e) => (e.id === entry.id ? { ...e, seen: true } : e)));
     try {
-      await api.post("/api/inbox/read", { ids: fresh });
+      const r = await api.post<{ marked: number; summary: NotificationSummary }>("/api/notifications/seen", { ids: [entry.id] });
+      prime(SUMMARY, r.summary);
     } catch (e) {
       toast(errorText(e));
     }
   }
 
-  function toggle(g: Group) {
-    const next = open === openKey(g) ? null : openKey(g);
+  function toggle(entry: Notification) {
+    const next = open === entry.id ? null : entry.id;
     setOpen(next);
-    if (next) void markRead(g.entries.map((e) => e.id));
+    if (next !== null) void markSeen(entry);
   }
 
-  function remove(g: Group) {
-    const ids = g.entries.map((e) => e.id);
+  function remove(entry: Notification) {
     const before = data;
     hold(key);
-    patch((l) => l.filter((e) => !ids.includes(e.id)), -g.unread);
+    patch((l) => l.filter((e) => e.id !== entry.id));
     setOpen(null);
     deleteWithUndo(
-      plural("inbox.deleted", ids.length),
+      plural("inbox.deleted", 1),
       async () => {
         try {
-          for (const id of ids) await api.delete(`/api/inbox/${id}`);
+          await api.delete(`/api/notifications/${entry.id}`);
         } finally {
           release(key);
           refresh();
+          invalidate(SUMMARY);
         }
       },
       () => {
@@ -137,12 +107,12 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     <>
       <PageHeader
         title={screenTitle("inbox")}
-        subtitle={unread > 0 ? plural("inbox.unread", unread) : undefined}
-        actions={<button className="iconbtn" onClick={markAll} disabled={unread === 0} title={t("inbox.markall")} aria-label={t("inbox.markall")}><Icon name="check" /></button>}
+        subtitle={unseen > 0 ? plural("inbox.unread", unseen) : undefined}
+        actions={<button className="iconbtn" onClick={markAll} disabled={unseen === 0} title={t("inbox.markall")} aria-label={t("inbox.markall")}><Icon name="check" /></button>}
       >
         <div className="chips">
           <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{t("common.all")}</button>
-          <button className="chip select" aria-pressed={filter === "unread"} onClick={() => setFilter("unread")}>{t("inbox.filter.unread")}{unread > 0 ? ` · ${unread}` : ""}</button>
+          <button className="chip select" aria-pressed={filter === "unseen"} onClick={() => setFilter("unseen")}>{t("inbox.filter.unread")}{unseen > 0 ? ` · ${unseen}` : ""}</button>
           <button className="chip select" aria-pressed={filter === "problems"} onClick={() => setFilter("problems")}>{t("inbox.filter.problems")}</button>
         </div>
       </PageHeader>
@@ -157,19 +127,19 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         )}
         {loading && !error && <Skeleton rows={6} />}
         {error && !data && <div className="empty"><b>{t("inbox.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
-        {data && groups.length === 0 && pending.length === 0 && (
+        {data && entries.length === 0 && pending.length === 0 && (
           <div className="empty">
-            <b>{t(filter === "unread" ? "inbox.empty.unread" : filter === "problems" ? "inbox.empty.problems" : "inbox.empty")}</b>
+            <b>{t(filter === "unseen" ? "inbox.empty.unread" : filter === "problems" ? "inbox.empty.problems" : "inbox.empty")}</b>
           </div>
         )}
-        {groups.map((g) => {
-          const day = dayLabel(g.at);
+        {entries.map((entry) => {
+          const day = dayLabel(entry.updated_at);
           const heading = day !== lastDay ? day : null;
           lastDay = day;
           return (
-            <div key={g.key + g.entries[0].id}>
+            <div key={entry.id}>
               {heading && <div className="section-title">{heading}</div>}
-              <InboxRow g={g} open={open === openKey(g)} onToggle={() => toggle(g)} onOpen={onOpen} onRemove={() => remove(g)} onUnread={() => patch((l) => l.map((e) => (g.entries.some((x) => x.id === e.id) ? { ...e, read: 0 } : e)), g.entries.length)} />
+              <InboxRow entry={entry} open={open === entry.id} onToggle={() => toggle(entry)} onOpen={onOpen} onRemove={() => remove(entry)} onUnseen={() => patch((l) => l.map((e) => (e.id === entry.id ? { ...e, seen: false } : e)))} />
             </div>
           );
         })}
@@ -178,36 +148,27 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
   );
 }
 
-function InboxRow({ g, open, onToggle, onOpen, onRemove, onUnread }: { g: Group; open: boolean; onToggle: () => void; onOpen: (id: string) => void; onRemove: () => void; onUnread: () => void }) {
-  const many = g.entries.length > 1;
-  const names = many ? g.entries.map((e) => /'([^']*)'/.exec(e.title)?.[1] ?? "").filter(Boolean) : [];
-  const title = many ? `${g.entries.length} × ${g.title.replace(/'[^']*'/, "'…'")}` : g.title;
+function InboxRow({ entry, open, onToggle, onOpen, onRemove, onUnseen }: { entry: Notification; open: boolean; onToggle: () => void; onOpen: (id: string) => void; onRemove: () => void; onUnseen: () => void }) {
+  const tone = toneClass(entry);
   return (
-    <div className={`erow inbox ${g.unread ? "unread" : ""} sev-${g.severity}`} role="button" tabIndex={0} aria-expanded={open} onClick={onToggle} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
-      <span className={`kind ${g.severity}`} aria-label={g.severity}>
-        <Icon name={kindIcon(g.kind)} size={16} />
+    <div className={`erow inbox ${entry.seen ? "" : "unread"}`} role="button" tabIndex={0} aria-expanded={open} onClick={onToggle} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
+      <span className={`kind ${tone}`} aria-label={entry.tone}>
+        <Icon name={kindIcon(entry.kind)} size={16} />
       </span>
       <div className="erow-main">
         <div className="erow-head">
-          <span className={`erow-title ${open ? "" : "clamp-2"}`}>{title}</span>
-          <span className="erow-time num" title={absTime(g.at)}>{relTime(g.at)}</span>
+          <span className={`erow-title ${open ? "" : "clamp-2"}`}>{entry.count > 1 ? `${entry.count} × ${entry.title}` : entry.title}</span>
+          <span className="erow-time num" title={absTime(entry.updated_at)}>{relTime(entry.updated_at)}</span>
         </div>
         <div className="erow-meta">
-          <span>{kindLabel(g.kind)}</span>
-          {names.length > 0 && !open && <span className="sep">·</span>}
-          {names.length > 0 && !open && <span>{names.join(", ")}</span>}
+          <span>{kindLabel(entry.kind)}</span>
         </div>
         {open && (
           <div className="inbox-body" onClick={(e) => e.stopPropagation()}>
-            {g.entries.map((e) => (
-              <div key={e.id} className="inbox-entry">
-                {many && <div className="inbox-entry-title">{e.title} <span className="sub faint">{absTime(e.at)}</span></div>}
-                {e.body && <pre className="inbox-text">{e.body}</pre>}
-              </div>
-            ))}
+            {entry.body && <pre className="inbox-text">{entry.body}</pre>}
             <div className="btnrow">
-              {g.session_id && (
-                <button className="btn small" onClick={() => onOpen(g.session_id!)}>
+              {entry.session_id && (
+                <button className="btn small" onClick={() => onOpen(entry.session_id!)}>
                   <Icon name="bots" size={14} /> {t("inbox.open.session")}
                 </button>
               )}
@@ -216,9 +177,9 @@ function InboxRow({ g, open, onToggle, onOpen, onRemove, onUnread }: { g: Group;
                 small
                 label={t("inbox.actions")}
                 items={[
-                  { label: t("inbox.markunread"), icon: "inbox", onSelect: onUnread },
+                  { label: t("inbox.markunread"), icon: "inbox", onSelect: onUnseen },
                   "-",
-                  { label: many ? t("inbox.delete.many", { n: g.entries.length }) : t("common.delete"), icon: "trash", danger: true, onSelect: onRemove },
+                  { label: t("common.delete"), icon: "trash", danger: true, onSelect: onRemove },
                 ]}
               />
             </div>

@@ -119,7 +119,7 @@ func (t *Terminal) screenText() (string, int64, bool) {
 		_, rows := e.Size()
 		top := c.AbsRow - int64(c.Y)
 		text = strings.Join(e.Text(top, top+int64(rows)), "\n")
-		seq = t.fed
+		seq = t.fed.Load()
 	})
 	return text, seq, err == nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
+	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 // screenRegistry runs terminals the way the daemon does: the production emulator and the answerer.
@@ -161,14 +162,15 @@ func TestWaitFor(t *testing.T) {
 	}
 }
 
-// The colours a program asks for are the viewer's.
+// The colours a program asks for are those of the browser that owns the screen.
 func TestThemeAnswersColourQueries(t *testing.T) {
 	reg, dir := screenRegistry(t)
 	term := startIn(t, reg, dir, "colour", 80, 24, `stty raw -echo; sleep 0.3
 printf '\033]11;?\033\\'
 r=$(head -c 25 | od -An -c | tr -s ' \n' ' ')
 stty sane; printf '\nGOT%s\n' "$r"`)
-	term.SetTheme(emulator.Theme{Foreground: emulator.RGB{R: 1, G: 2, B: 3}, Background: emulator.RGB{R: 0xab, G: 0xcd, B: 0xef}})
+	// The browser that owns the screen says what its colours are when it attaches.
+	attachClient(t, term, ClientOptions{}, wire.Attach{Theme: &wire.Theme{FG: "#010203", BG: "rgb(171, 205, 239)"}})
 	out := waitOutput(t, term, "GOT")
 	if !strings.Contains(out, "a b a b / c d c d / e f e f") {
 		t.Fatalf("reply %q", out[strings.Index(out, "GOT"):])

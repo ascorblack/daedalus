@@ -17,6 +17,8 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.notifications import Draft
+
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -163,9 +165,8 @@ class Loops:
             (note.strip()[:400], _now().isoformat(), session_id),
         )
         await self._sync(session_id)
-        inbox = self.app.extensions.get("inbox")
-        if inbox is not None:
-            await inbox.post("loop_paused", "Loop paused: needs you", note.strip() or "The agent paused its loop.", severity="warning", session_id=session_id)
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft("question", "Loop paused: needs you", note.strip() or "The agent paused its loop.", kind="loop_paused", tone="warning", session_id=session_id, source="loop"))
         return await self.get(session_id) or {}
 
     async def resume(self, session_id: str, *, run_now: bool = True) -> dict[str, Any]:
@@ -348,9 +349,8 @@ class Loops:
         await self._fire_if_due(session_id)
 
     async def _notify(self, session_id: str, text: str) -> None:
-        inbox = self.app.extensions.get("inbox")
-        if inbox is not None:
-            await inbox.post("loop", "Loop", text, severity="notice", session_id=session_id)
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft("agent_notify", "Loop", text, kind="loop", session_id=session_id, source="loop"))
         front = self.app.front
         if front is not None:
             try:
