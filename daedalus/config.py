@@ -1206,7 +1206,17 @@ class HarnessConfig(BaseModel):
     delivered and the operator is asked to answer in the terminal."""
     ask_hold_s: int = Field(default=300, ge=10, le=3600)
     """How long a staff member's question to the orchestrator is held open before the tool returns
-    "no answer yet" and the worker goes on with what its brief allows."""
+    "pending" and the answer, when it comes, is delivered as a message instead."""
+    report_hold_s: int = Field(default=15, ge=1, le=120)
+    """How long a Report waits for the team's word on it ("commit first" is one). A CLI's own timeout
+    on a tool call is set above this and above ``ask_hold_s``."""
+    permission_hold_s: int = Field(default=300, ge=0, le=3600)
+    """How long a CLI's own permission or question is held open at its hook for an answer from the
+    app or the orchestrator. The CLI's dialog is on screen meanwhile where it draws one, so the
+    operator can answer there as well; 0 answers only on screen."""
+    team_hello_s: float = Field(default=30.0, ge=1, le=600)
+    """How long after a CLI is ready its team tools may take to say they loaded before the member is
+    shown with its team tools not connected."""
     stop_grace_s: float = Field(default=10.0, ge=0, le=120)
     """Between asking a CLI to exit and killing its terminal."""
     catalog_ttl_s: int = Field(default=21_600, ge=300)

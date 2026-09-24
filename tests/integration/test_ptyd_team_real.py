@@ -50,6 +50,16 @@ def logged(rig: Rig, what: str) -> list[dict[str, Any]]:
     return [entry for entry in read_log(rig.log) if entry["event"] == what]
 
 
+async def team_post(rig: Rig, tool: str) -> dict[str, Any]:
+    """The first team post of a tool; the server's announcements that the tools loaded come first."""
+    async with asyncio.timeout(30):
+        while True:
+            for event in rig.events:
+                if event["type"] == "hook" and event["data"].get("name") == "team" and event["data"]["body"].get("tool") == tool:
+                    return event
+            await asyncio.sleep(0.05)
+
+
 async def test_team_tools_through_the_real_team_mcp() -> None:
     async with Rig(ptyd_bin=Path(BINARY)) as rig:
         assert (rig.bin / "ptyd").resolve() == Path(BINARY).resolve()
@@ -60,16 +70,21 @@ async def test_team_tools_through_the_real_team_mcp() -> None:
         allow = ["mcp__daedalus_team__Report", "mcp__daedalus_team__AskOrchestrator"]
         term = await rig.spawn(
             ["claude", "--session-id", SESSION, "--settings", command_hooks(allow=allow), "--mcp-config", json.dumps(mcp),
-             "report:done:the task is finished; askorch:Which branch?|main|dev"],
+             "--", "report:done:the task is finished; askorch:Which branch?|main|dev"],
             launch_id=launch["launch_id"],
         )
-        report = await rig.event("hook", where={"name": "team"})
+        report = await team_post(rig, "report")
+        call_id = report["data"]["body"].pop("call_id")
         assert report["data"]["body"] == {"tool": "report", "kind": "done", "note": "the task is finished", "artifacts": []}
+        assert call_id.startswith(f"{launch['launch_id']}:")
         assert report["data"]["reply_id"] and report["data"]["hold_ms"] == 15_000
         await rig.client.call("hooks.reply", {"reply_id": report["data"]["reply_id"], "body": {"text": "commit first", "error": True}})
-        ask = await rig.event("hook", where={"name": "team"}, after=rig.events.index(report) + 1)
+        ask = await team_post(rig, "ask")
+        ask["data"]["body"].pop("call_id")
         assert ask["data"]["body"] == {"tool": "ask", "question": "Which branch?", "options": ["main", "dev"]}
         assert ask["data"]["hold_ms"] == 20_000
+        # The real server said the tools loaded, unheld, before any call.
+        assert {h["body"]["stage"] for h in rig.hooks("team") if h["body"]["tool"] == "hello"} == {"initialize", "tools/list"}
         await rig.client.call("hooks.reply", {"reply_id": ask["data"]["reply_id"], "body": {"text": "dev"}})
         screen = await rig.screen_until(term, "AskOrchestrator: dev")
         assert "Report: commit first" in screen

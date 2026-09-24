@@ -626,8 +626,14 @@ A **launch** is how a program in a terminal speaks back without typing on a scre
 ttl_s?}` → `{launch_id, hook_url, hook_token, dir, dial_dir, env{}, files[]}`
 
 - `launch_id` is the host's, like a terminal id; without one the daemon picks it.
-- `files` (at most 32 of 512 KiB, each one plain name) are written 0600 into `dir`,
-  `<state>/launches/<launch_id>/` (0700): a CLI's settings overlay, its MCP entry, a long prompt.
+- `files` (at most 32 of 512 KiB) are written 0600 into `dir`, `<state>/launches/<launch_id>/`
+  (0700): a CLI's settings overlay, its MCP entry, its system prompt. A name is one plain part, or up
+  to six joined by `/` for a file a CLI finds only at a fixed place under a directory it is given
+  (Claude Code's skills at `.claude/skills/<name>/SKILL.md`); the directories are made 0700 inside
+  the new launch directory, and `.`, `..` or an empty part is refused.
+- `hooks.put_file {launch_id, name, data: base64}` → `{path}` adds a file to an open launch later —
+  a message too long to type, which the CLI is told to read by its path. The name is one plain part,
+  the file must be new (never over something there, never through a link), at most 1024 per launch.
 - `ports` are the loopback ports `net.dial` may reach for it; `net.allow {launch_id, port}` adds one.
 - A terminal created with `launch_id` gets the launch's environment on top of the caller's:
   `DAEDALUS_LAUNCH_ID`, `DAEDALUS_HOOK_URL` (`http://127.0.0.1:<port>/hook/<launch_id>`),
@@ -683,7 +689,8 @@ Daedalus staff member has:
 
 Arguments are checked before anything is posted; a wrong one is a tool result marked as an error.
 The call is posted to the launch's hook listener as `team` with the body `{"tool": "report"|"ask",
-…the arguments}` (optional strings left out when empty, lists always present), held for the host's
+"call_id", …the arguments}` (optional strings left out when empty, lists always present; `call_id` is
+`<launch>:<process>:<n>`, on which the host dedupes a post it sees twice), held for the host's
 reply: `DAEDALUS_REPORT_HOLD_MS` (default 15 s) for a report, `DAEDALUS_ASK_HOLD_MS` (default 5 min)
 for a question, both capped by the launch's `hold_max_ms`. The host answers with `hooks.reply`:
 
@@ -692,7 +699,11 @@ for a question, both capped by the launch's `hold_max_ms`. The host answers with
 | `{"text": "…"}` | the text |
 | `{"text": "…", "error": true}` | the text, marked as an error (a report refused: "commit first") |
 | a JSON string, or plain text | that text |
-| none in time (204) | a report: `recorded` (it was published when posted); a question: "No answer yet. Continue with what the brief allows, or call Report with kind needs_input and stop." |
+| none in time (204) | a report: `recorded` (it was published when posted); a question: "Pending: nobody has answered yet. The answer will arrive as a message; …" — the host delivers a later answer as the worker's next message |
+
+On `initialize` and on `tools/list` the server also posts, unheld and without waiting, `{"tool":
+"hello", "stage": "initialize"|"tools/list", "client"?}`: the host's proof that the CLI loaded the
+team tools at all.
 
 401 or 410 tells the worker its session is no longer connected to its team. When the launch
 environment names `DAEDALUS_TEAM_URL` and `DAEDALUS_TEAM_TOKEN`, the calls go instead to

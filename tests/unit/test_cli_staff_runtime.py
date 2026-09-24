@@ -125,7 +125,7 @@ class StubClaude:
         # The task text, then this test's script as a segment of its own for the fake's scripted model.
         prompt = f"{spec.first_prompt};{self.script}"
         argv = ("claude", *session, "--settings", f"{LAUNCH_DIR}/settings.json", "--mcp-config", f"{LAUNCH_DIR}/mcp.json", "--permission-mode", "manual", prompt)
-        companions = (CompanionSpec("app-server", ("claude", "--session-id", str(uuid.uuid4())), ready_pattern="trust the files"),) if self.companion else ()
+        companions = (CompanionSpec("app-server", ("claude", "--session-id", str(uuid.uuid4())), ready_pattern="Quick safety check"),) if self.companion else ()
         return LaunchPlan(
             argv=argv,
             env={"DAEDALUS_REPORT_HOLD_MS": "20000"},
@@ -139,7 +139,9 @@ class StubClaude:
     def readiness(self, screen: str) -> ReadyStep:
         if "Select login method" in screen:
             return ReadyStep("fail", reason="Claude Code is not signed in")
-        if self.knows_trust and "Do you trust the files in this folder" in screen and "❯ 1. Yes, proceed" in screen:
+        if self.knows_trust and "Quick safety check" in screen and "❯ No, exit" in screen:
+            return ReadyStep("keys", ("Down",), "folder trust: down")
+        if self.knows_trust and "Quick safety check" in screen and "❯ Yes, I trust this folder" in screen:
             return ReadyStep("keys", ("Enter",), "folder trust")
         return ReadyStep()
 
@@ -216,14 +218,16 @@ class StubClaude:
 
     def classify_screen(self, text: str) -> ScreenClass:
         # Conservative on purpose: a busy screen is not recognised, so silence becomes no_signal.
-        if "Do you want to proceed" in text or "trust the files" in text:
+        if "Do you want to proceed" in text or "Quick safety check" in text:
             return ScreenClass.DIALOG
         if "? for shortcuts" in text:
             return ScreenClass.IDLE_COMPOSER
         return ScreenClass.UNKNOWN
 
     def composer_holds(self, screen: str, text: str) -> bool:
-        return False
+        # Enough for the fake: the composer line is the last "❯ " line, and a long paste shows a marker.
+        lines = [line for line in screen.splitlines() if line.startswith("❯ ")]
+        return bool(lines) and ("[Pasted text #" in lines[-1] or text.split()[-1] in lines[-1])
 
 
 class Notes:
@@ -245,7 +249,7 @@ class Stand:
     manager: SessionManager
     team: Team
     runtime: CliStaffRuntime
-    adapter: StubClaude
+    adapter: Any
     project: Project
     harness: HarnessConfig
 
@@ -280,7 +284,7 @@ class Stand:
         assert live is not None
         return live
 
-    def restart_runtime(self, adapter: StubClaude | None = None) -> CliStaffRuntime:
+    def restart_runtime(self, adapter: Any = None) -> CliStaffRuntime:
         self.runtime.close()
         self.adapter = adapter or self.adapter
         self.runtime = CliStaffRuntime(self.adapter, terminals=self.terminals, store=HarnessStore(self.manager.db), ingress=self.team.ingress, lookup=self.team.live, config=lambda: self.harness)
@@ -301,13 +305,13 @@ def terminals_service(db: Database, manager: SessionManager, run: Path, home: Pa
 
 
 @asynccontextmanager
-async def stand(settings: Settings, db: Database, *, adapter: StubClaude | None = None, extra_env: dict[str, str] | None = None, cap: int = 20, **config: Any) -> AsyncIterator[Stand]:
+async def stand(settings: Settings, db: Database, *, adapter: Any = None, extra_env: dict[str, str] | None = None, cap: int = 20, input_idle_ms: int = 0, **config: Any) -> AsyncIterator[Stand]:
     root = Path(tempfile.mkdtemp(prefix="ptyd-"))
     home, work, bin_dir, log = root / "home", root / "work", root / "bin", root / "fake-cli.jsonl"
     home.mkdir()
     work.mkdir()
     fake_cli.install(bin_dir)
-    ptyd = LivePtyd(root / "run", home=home, bin_dir=bin_dir, base_env={"FAKE_CLI_LOG": str(log), "FAKE_CLI_TIME_SCALE": "0.05", **(extra_env or {})}, input_idle_ms=0)
+    ptyd = LivePtyd(root / "run", home=home, bin_dir=bin_dir, base_env={"FAKE_CLI_LOG": str(log), "FAKE_CLI_TIME_SCALE": "0.05", **(extra_env or {})}, input_idle_ms=input_idle_ms)
     await ptyd.start()
     manager = await _manager(settings, db, ScriptedProvider([]))
     terminals = terminals_service(db, manager, root / "run", home, cap=cap)
@@ -369,7 +373,7 @@ async def test_a_session_runs_from_the_trust_dialog_to_its_release(settings: Set
         assert launch is not None and launch.terminal_id == row.terminal_id and launch.launch_dir and launch.session_ref == row.cli_session_id
         # The trust dialog was answered by the readiness gate, on screen, and written down as such.
         writes = await db.fetchall("SELECT detail_json FROM terminal_audit WHERE terminal_id = ? AND action = 'write'", (row.terminal_id,))
-        assert [json.loads(w["detail_json"]).get("note") for w in writes] == ["readiness: folder trust"]
+        assert [json.loads(w["detail_json"]).get("note") for w in writes] == ["readiness: folder trust: down", "readiness: folder trust"]
         assert json.loads((s.home / ".claude.json").read_text())["projects"][str(s.work)]["hasTrustDialogAccepted"] is True
         assert s.adapter.after_spawned == [launch.launch_id]
         # Where the CLI keeps the session, learnt from its first hook.
@@ -387,7 +391,8 @@ async def test_a_session_runs_from_the_trust_dialog_to_its_release(settings: Set
         last = await s.runtime.read(await s.team.live(row.id), ReadRequest("last"))  # type: ignore[arg-type]
         assert "hello" in last.text and last.next_cursor is not None
         turns = await s.runtime.read(await s.team.live(row.id), ReadRequest("turns", turns=2))  # type: ignore[arg-type]
-        assert turns.text.startswith("» [task") and "hello" in turns.text
+        # The protocol's line leads the first prompt, the task after it.
+        assert turns.text.startswith("» [team] You are Ada, staff of Bakery") and "[task" in turns.text and "hello" in turns.text
         screen = await s.runtime.read(await s.team.live(row.id), ReadRequest("screen"))  # type: ignore[arg-type]
         assert "? for shortcuts" in screen.text
 
@@ -418,7 +423,7 @@ async def test_a_dialog_the_adapter_does_not_know_is_waited_on_and_never_answere
         ada = await s.hire()
         await s.team.assign(ada, await s.task())
         failed = await s.status_event(ada, "error")
-        assert failed.payload["detail"].startswith("not ready after 1 s") and "Do you trust the files" in failed.payload["detail"]
+        assert failed.payload["detail"].startswith("not ready after 1 s") and "Quick safety check" in failed.payload["detail"]
         row = await s.session_row(ada)
         assert await db.fetchall("SELECT 1 FROM terminal_audit WHERE terminal_id = ? AND action = 'write'", (row.terminal_id,)) == []
 
@@ -559,22 +564,23 @@ async def test_a_companion_that_dies_takes_the_side_channel_with_it(settings: Se
 
 async def test_a_launch_at_the_machine_cap_waits_for_a_place(settings: Settings, db: Database) -> None:
     async with stand(settings, db, cap=1) as s:
+        # The operator's terminal holds the one place until it is killed: a Claude sitting at the trust
+        # question of a folder nobody trusted, where a program that exits by itself would free the
+        # place early and let the launch through without waiting — how this test once flaked.
+        mine = await s.terminals.create(TerminalSpec(env="container", owner=Owner("free"), argv=["claude"], created_by="operator"))
+        await s.terminals.wait_for(mine["id"], regex="Quick safety check", timeout=30)
         trust(s)
-        mine = await s.terminals.create(TerminalSpec(env="container", owner=Owner("free"), argv=["claude", "--version"], created_by="operator"))
         s.team._capacity = SimpleNamespace(running=_zero, cap=lambda: 20, waiting=lambda: 0, unavailable=lambda env: None)
         ada = await s.hire()
         assigning = asyncio.create_task(s.team.assign(ada, await s.task()))
-
-        async def queued() -> bool:
-            return bool(s.terminals.queue())
-
-        await eventually(queued, "the launch waits in the terminals' line")
+        # Woken by the line moving rather than by a poll racing the machine's load.
+        assert await s.terminals.wait_queue(bool, timeout=120), "the launch never joined the terminals' line"
         [waiter] = s.terminals.queue()
         assert waiter["actor"].startswith("agent:staff:") and waiter["profile"] == "harness:claude"
         assert not assigning.done()
         await s.terminals.kill(mine["id"])
-        assert (await asyncio.wait_for(assigning, 30))["state"] == "started"
-        await s.status_event(ada, "turn_done_unseen")
+        assert (await asyncio.wait_for(assigning, 120))["state"] == "started"
+        await s.status_event(ada, "turn_done_unseen", timeout=120)
 
 
 async def _zero() -> int:

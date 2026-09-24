@@ -480,6 +480,15 @@ class FakePtyd:
             env = {"DAEDALUS_LAUNCH_ID": launch_id, "DAEDALUS_HOOK_URL": f"http://127.0.0.1:1/hook/{launch_id}", "DAEDALUS_HOOK_TOKEN": token,
                    "DAEDALUS_HOOK_CMD": "/state/bin/hook-post", "DAEDALUS_PTYD_BIN": "/usr/local/bin/ptyd", "DAEDALUS_DIAL_DIR": f"/state/dial/{launch_id}", "DAEDALUS_LAUNCH_DIR": directory}
             return {"launch_id": launch_id, "hook_url": env["DAEDALUS_HOOK_URL"], "hook_token": token, "dir": directory, "dial_dir": env["DAEDALUS_DIAL_DIR"], "env": env, "files": sorted(files)}
+        if method == "hooks.put_file":
+            launch = self.launches.get(params["launch_id"])
+            if launch is None:
+                raise _RpcFail(1008, "no such launch")
+            name = str(params["name"])
+            if "/" in name or name in ("", ".", "..") or name in launch["files"]:
+                raise _RpcFail(-32602, f"no file may be written as {name!r}")
+            launch["files"][name] = base64.b64decode(params.get("data") or "")
+            return {"path": f"/state/launches/{params['launch_id']}/{name}"}
         if method == "hooks.unregister_launch":
             removed = params["launch_id"] in self.launches
             if removed:

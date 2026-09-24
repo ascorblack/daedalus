@@ -94,4 +94,7 @@ const (
 	// MaxLaunchFiles and MaxLaunchFileBytes bound the overlay files of one launch.
 	MaxLaunchFiles     = 32
 	MaxLaunchFileBytes = 512 << 10
+
+	// MaxLaunchPutFiles bounds the files added to a launch after it started (long messages).
+	MaxLaunchPutFiles = 1024
 )

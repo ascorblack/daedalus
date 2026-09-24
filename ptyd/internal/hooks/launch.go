@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,9 +41,29 @@ var (
 // directory name and a URL segment.
 var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// validFile is what an overlay file may be called: one name inside the launch directory, never a
-// path, so a file can never be written anywhere else.
+// validFile is what each part of an overlay file's name may be. A name is one such part, or a few
+// joined by '/' for a file a CLI only finds at a fixed place under a directory it is given (a skill
+// at `.claude/skills/<name>/SKILL.md`); never '.', '..' or an absolute path, so a file can never be
+// written outside the launch directory.
 var validFile = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// maxFileDepth is how many parts an overlay file's name may have.
+const maxFileDepth = 6
+
+// checkFileName refuses a name that is not a few plain parts inside the launch directory; with
+// nested false, exactly one.
+func checkFileName(name string, nested bool) error {
+	parts := strings.Split(name, "/")
+	if len(parts) > maxFileDepth || (!nested && len(parts) > 1) {
+		return fmt.Errorf("%w: file name %q: too deep a path", ErrInvalid, name)
+	}
+	for _, part := range parts {
+		if !validFile.MatchString(part) || part == "." || part == ".." {
+			return fmt.Errorf("%w: file name %q: parts of letters, digits, '.', '-' or '_' joined by '/'", ErrInvalid, name)
+		}
+	}
+	return nil
+}
 
 // Publisher is where the registry's events go: the daemon's event log, so hook posts share the one
 // sequence with terminal output and exits.
@@ -89,6 +110,7 @@ type Launch struct {
 	held      map[string]*held
 	streams   map[int]func()
 	nstream   int
+	nput      int // files written by PutFile
 	closed    bool
 	gen       int // bumped by every change that invalidates a pending expiry
 }
@@ -180,8 +202,8 @@ func (r *Registry) Register(s Spec) (Registered, error) {
 	}
 	names := make([]string, 0, len(s.Files))
 	for name, data := range s.Files {
-		if !validFile.MatchString(name) || name == "." || name == ".." {
-			return Registered{}, fmt.Errorf("%w: file name %q: one name of letters, digits, '.', '-' or '_'", ErrInvalid, name)
+		if err := checkFileName(name, true); err != nil {
+			return Registered{}, err
 		}
 		if len(data) > config.MaxLaunchFileBytes {
 			return Registered{}, fmt.Errorf("%w: file %s is larger than %d bytes", ErrInvalid, name, config.MaxLaunchFileBytes)
@@ -244,6 +266,49 @@ func (r *Registry) Register(s Spec) (Registered, error) {
 		Env: r.env(l, base), Files: names}, nil
 }
 
+// PutFile writes one more file into an open launch's directory — a message too long to type, which
+// the CLI is told to read by its path — and returns where. The name is one plain part and the file
+// must be new: nothing already in the directory, which the launch's own programs can write to, is
+// ever followed or overwritten.
+func (r *Registry) PutFile(launchID, name string, data []byte) (string, error) {
+	if err := checkFileName(name, false); err != nil {
+		return "", err
+	}
+	if len(data) > config.MaxLaunchFileBytes {
+		return "", fmt.Errorf("%w: file %s is larger than %d bytes", ErrInvalid, name, config.MaxLaunchFileBytes)
+	}
+	r.mu.Lock()
+	l := r.launches[launchID]
+	if l == nil || l.closed {
+		r.mu.Unlock()
+		return "", ErrNoLaunch
+	}
+	if l.nput >= config.MaxLaunchPutFiles {
+		r.mu.Unlock()
+		return "", fmt.Errorf("%w: at most %d files may be added to a launch", ErrTooMany, config.MaxLaunchPutFiles)
+	}
+	l.nput++
+	dir := l.Dir
+	r.mu.Unlock()
+	path := filepath.Join(dir, name)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("%w: file %s exists", ErrInvalid, name)
+		}
+		return "", err
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(path)
+		return "", werr
+	}
+	return path, nil
+}
+
 func (l *Launch) writeFiles(files map[string][]byte) error {
 	for _, dir := range []string{l.Dir, l.DialDir} {
 		// Mkdir, not MkdirAll: the directory must be new, so nothing planted in advance is reused.
@@ -251,8 +316,28 @@ func (l *Launch) writeFiles(files map[string][]byte) error {
 			return err
 		}
 	}
-	for name, data := range files {
-		f, err := os.OpenFile(filepath.Join(l.Dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// The directories a nested name needs are made here, inside a directory that did not exist a
+	// moment ago, so none of them can be a link planted in advance.
+	made := map[string]bool{}
+	for _, name := range names {
+		data := files[name]
+		parts := strings.Split(name, "/")
+		for i := 1; i < len(parts); i++ {
+			sub := filepath.Join(l.Dir, filepath.FromSlash(strings.Join(parts[:i], "/")))
+			if made[sub] {
+				continue
+			}
+			if err := os.Mkdir(sub, 0o700); err != nil {
+				return err
+			}
+			made[sub] = true
+		}
+		f, err := os.OpenFile(filepath.Join(l.Dir, filepath.FromSlash(name)), os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
 		if err != nil {
 			return err
 		}

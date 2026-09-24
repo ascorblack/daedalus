@@ -24,9 +24,16 @@ const ingressSource = "team"
 // directTimeout bounds a call on the host's own team route, which answers at once and never holds.
 const directTimeout = time.Minute
 
+// helloTimeout bounds the announcement that the CLI loaded the tools; it is never waited for by the
+// CLI, and a host that is away hears of the tools at the first call instead.
+const helloTimeout = 5 * time.Second
+
 // route is where the tools' calls go.
 type route interface {
 	call(ctx context.Context, req request, hold time.Duration) (text string, isErr bool)
+	// hello tells the host the CLI has started this server and read its tools: the proof that the
+	// team channel is up, before any call is made on it.
+	hello(ctx context.Context, fields map[string]any)
 }
 
 // routeFrom picks the route from the launch's environment. The host's team route is used when the
@@ -86,6 +93,17 @@ func (r ingress) call(ctx context.Context, req request, hold time.Duration) (str
 	return outcome(req, status, reply)
 }
 
+func (r ingress) hello(ctx context.Context, fields map[string]any) {
+	fields["tool"] = "hello"
+	b, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, helloTimeout)
+	defer cancel()
+	_, _, _ = hooks.Post(ctx, r.url, r.token, ingressSource, b, 0)
+}
+
 // direct posts to the host's team route, `<base>/report` or `<base>/ask`.
 type direct struct{ base, token string }
 
@@ -115,6 +133,10 @@ func (r direct) call(ctx context.Context, req request, _ time.Duration) (string,
 	}
 	return outcome(req, resp.StatusCode, reply)
 }
+
+// hello has nowhere to go on the host's own route, which has no such endpoint; the host learns of the
+// tools from the first call.
+func (r direct) hello(context.Context, map[string]any) {}
 
 // outcome turns the host's HTTP answer into the tool's result.
 func outcome(req request, status int, reply []byte) (string, bool) {

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +61,7 @@ func TestTeamToolsAgainstARunningDaemon(t *testing.T) {
 		t.Fatalf("the launch does not name the daemon's binary: %v", launch.Env)
 	}
 	env := map[string]string{"DAEDALUS_HOOK_URL": launch.Env["DAEDALUS_HOOK_URL"], "DAEDALUS_HOOK_TOKEN": launch.Env["DAEDALUS_HOOK_TOKEN"],
-		"DAEDALUS_ASK_HOLD_MS": "30000"}
+		"DAEDALUS_ASK_HOLD_MS": "30000", "DAEDALUS_LAUNCH_ID": "team1"}
 
 	mcp := subcommand(env, "team-mcp")
 	stdin, _ := mcp.StdinPipe()
@@ -110,22 +112,30 @@ func TestTeamToolsAgainstARunningDaemon(t *testing.T) {
 		}
 		return content[0].(map[string]any)["text"].(string)
 	}
+	// The server announces that the tools were loaded; those posts are counted apart from the calls.
+	var hellos []string
 	hookEvent := func() (body map[string]any, replyID string) {
 		t.Helper()
-		ev, err := c.WaitEvent("hook", "w1", 20*time.Second)
-		if err != nil {
-			t.Fatal(err)
+		for {
+			ev, err := c.WaitEvent("hook", "w1", 20*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data struct {
+				Name    string         `json:"name"`
+				Body    map[string]any `json:"body"`
+				ReplyID string         `json:"reply_id"`
+			}
+			_ = json.Unmarshal(ev.Data, &data)
+			if data.Name != "team" && data.Name != "Stop" {
+				t.Fatalf("hook %q", data.Name)
+			}
+			if data.Body["tool"] == "hello" {
+				hellos = append(hellos, fmt.Sprint(data.Body["stage"]))
+				continue
+			}
+			return data.Body, data.ReplyID
 		}
-		var data struct {
-			Name    string         `json:"name"`
-			Body    map[string]any `json:"body"`
-			ReplyID string         `json:"reply_id"`
-		}
-		_ = json.Unmarshal(ev.Data, &data)
-		if data.Name != "team" && data.Name != "Stop" {
-			t.Fatalf("hook %q", data.Name)
-		}
-		return data.Body, data.ReplyID
 	}
 
 	send(1, "initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test"}})
@@ -140,8 +150,12 @@ func TestTeamToolsAgainstARunningDaemon(t *testing.T) {
 
 	send(3, "tools/call", map[string]any{"name": "Report", "arguments": map[string]any{"kind": "checkpoint", "note": "tests pass"}})
 	body, replyID := hookEvent()
-	if body["tool"] != "report" || body["note"] != "tests pass" || replyID == "" {
+	if body["tool"] != "report" || body["note"] != "tests pass" || replyID == "" || !strings.HasPrefix(fmt.Sprint(body["call_id"]), "team1:") {
 		t.Fatalf("%v %q", body, replyID)
+	}
+	sort.Strings(hellos)
+	if fmt.Sprint(hellos) != "[initialize tools/list]" {
+		t.Fatalf("the loading of the tools was announced as %v", hellos)
 	}
 	call("hooks.reply", map[string]any{"launch_id": "team1", "reply_id": replyID, "body": map[string]any{"text": "recorded"}}, nil)
 	if got := text(next()); got != "recorded" {

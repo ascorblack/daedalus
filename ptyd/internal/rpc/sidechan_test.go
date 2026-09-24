@@ -416,6 +416,28 @@ func TestHookFromARealTerminal(t *testing.T) {
 	}
 }
 
+func TestLaunchFilesNestedAndAddedLaterOverTheSocket(t *testing.T) {
+	f, _ := startSide(t)
+	var r registered
+	f.call(t, "hooks.register_launch", map[string]any{"launch_id": "files1", "files": map[string][]byte{".claude/skills/team/SKILL.md": []byte("# team")}}, &r)
+	if b, err := os.ReadFile(filepath.Join(r.Dir, ".claude", "skills", "team", "SKILL.md")); err != nil || string(b) != "# team" {
+		t.Fatalf("%q %v", b, err)
+	}
+	var put struct {
+		Path string `json:"path"`
+	}
+	f.call(t, "hooks.put_file", map[string]any{"launch_id": "files1", "name": "message-1.md", "data": []byte("long")}, &put)
+	if b, err := os.ReadFile(put.Path); err != nil || string(b) != "long" || filepath.Dir(put.Path) != r.Dir {
+		t.Fatalf("%q %q %v", put.Path, b, err)
+	}
+	if we := f.callErr("hooks.put_file", map[string]any{"launch_id": "files1", "name": "../x", "data": []byte("x")}); we == nil || we.Code != wire.CodeInvalidParams {
+		t.Fatalf("a path was written: %v", we)
+	}
+	if we := f.callErr("hooks.put_file", map[string]any{"launch_id": "nope", "name": "m.md", "data": []byte("x")}); we == nil || we.Code != wire.CodeStaleLaunch {
+		t.Fatalf("a file for no launch: %v", we)
+	}
+}
+
 func TestHookReplyOverTheSocket(t *testing.T) {
 	f, _ := startSide(t)
 	f.call(t, "events.subscribe", map[string]any{"after_seq": 0}, nil)

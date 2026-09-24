@@ -348,6 +348,19 @@ class SideChannels:
             files=[str(f) for f in result.get("files") or []],
         )
 
+    async def put_launch_file(self, env: str, launch_id: str, name: str, data: bytes, *, actor: str = "system") -> str:
+        """Add a file to an open launch's directory and return its path: a message too long to type,
+        which the CLI is told to read. The daemon refuses a name that is a path or already exists."""
+        detail: dict[str, Any] = {"launch_id": launch_id, "name": name, "sha256": hashlib.sha256(data).hexdigest(), "length": len(data)}
+        terminal_id = self._launch_terminals.get(launch_id, "")
+        try:
+            result = await self._side_call(env, "hooks.put_file", {"launch_id": launch_id, "name": name, "data": base64.b64encode(data).decode()}, what="adding a file to the launch")
+        except TerminalError as exc:
+            await self.audit(terminal_id, env, actor, "launch_file", {**detail, "error": exc.message})
+            raise
+        await self.audit(terminal_id, env, actor, "launch_file", detail)
+        return str((result or {}).get("path") or "")
+
     async def unregister_launch(self, env: str, launch_id: str, *, actor: str = "system") -> bool:
         """End a launch now: its files go, its streams close, its held posts are answered 410."""
         result = await self._side_call(env, "hooks.unregister_launch", {"launch_id": launch_id}, what="ending the launch")
