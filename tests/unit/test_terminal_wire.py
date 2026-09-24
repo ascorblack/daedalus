@@ -141,3 +141,30 @@ def test_a_containers_limit_is_its_memory() -> None:
     machine = {"mem_total_bytes": 64 * gib, "mem_available_bytes": 40 * gib, "cgroup_limit_bytes": 8 * gib, "cgroup_used_bytes": 6 * gib, "cpus": 16, "cgroup_cpus": 2.0}
     assert load.effective_memory(machine) == (8 * gib, 2 * gib)
     assert load.effective_cpus(machine) == 2.0
+
+
+def test_a_windows_daemons_state_directory_is_remembered(tmp_path: Path, settings: object) -> None:
+    # A native daemon on Windows reports its state directory with a drive letter; it must be sealed
+    # like a Unix one, since the agent runs as the operator there.
+    from daedalus.terminals.endpoint import remember_state_dir, sealed_state_dirs
+
+    run = tmp_path / "hostrun"
+    configured = settings.model_copy(update={"terminals_host_dir": run})  # type: ignore[attr-defined]
+    remember_state_dir(run, "C:\\Users\\someone\\Daedalus\\data\\runtime\\ptyd\\state")
+    try:
+        assert [str(p) for p in sealed_state_dirs(configured)] == ["C:\\Users\\someone\\Daedalus\\data\\runtime\\ptyd\\state"]
+    finally:
+        remember_state_dir(run, "")
+    remember_state_dir(run, "relative\\state")
+    assert sealed_state_dirs(configured) == ()
+
+
+def test_the_notes_about_owners_hold_without_unix_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.terminals import endpoint as ep
+
+    monkeypatch.setattr(ep.os, "name", "nt")
+    monkeypatch.delattr(ep.os, "getuid", raising=False)
+    # Windows reports uid 0 for every file; the root-owned note would always fire there.
+    assert ep.owned_by_root(tmp_path) == ""
+    detail = ep.permission_detail(tmp_path / "token", PermissionError(13, "Access is denied"))
+    assert "this user" in detail and "uid" not in detail

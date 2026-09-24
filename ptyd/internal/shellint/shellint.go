@@ -45,6 +45,25 @@ const (
 // Kinds lists them, in the order `daemon.info` reports them.
 var Kinds = []string{Bash, Zsh, Fish, Pwsh}
 
+// KindsOn is what a daemon on goos can integrate with: on Windows only PowerShell, the host shell
+// there, since the other shells' scripts assume a Unix underneath them.
+func KindsOn(goos string) []string {
+	if goos == "windows" {
+		return []string{Pwsh}
+	}
+	return Kinds
+}
+
+// PlainArgs is the argv of a shell started without its integration: a login shell takes -l on Unix.
+// A Windows shell has no login flag (PowerShell reads the same profile in every console, and
+// Windows PowerShell and cmd.exe would take -l for something else or refuse it).
+func PlainArgs(shell string, login bool, goos string) []string {
+	if login && goos != "windows" {
+		return []string{shell, "-l"}
+	}
+	return []string{shell}
+}
+
 // KindOf names the integration for a shell program, or "" when there is none. A login shell's argv[0]
 // may carry the leading dash, and Windows programs their extension.
 func KindOf(program string) string {
@@ -167,8 +186,11 @@ func Rewrite(kind, shell string, login bool, dir, nonce, userZdotdir string, has
 		if login && strings.EqualFold(strings.TrimSuffix(filepath.Base(shell), ".exe"), "pwsh") && filepath.Separator == '/' {
 			argv = append(argv, "-Login")
 		}
+		// The script is read as text and run as a script block, not dot-sourced as a file: an execution
+		// policy governs script files, and Windows' default one (Restricted) refuses every file, which
+		// would cost the marks on most machines. The user's policy is left as it is, for their scripts.
 		argv = append(argv, "-NoLogo", "-NoExit", "-Command",
-			"try { . "+pwshQuote(filepath.Join(dir, "pwsh", "init.ps1"))+" } catch { }")
+			"try { . ([scriptblock]::Create([IO.File]::ReadAllText("+pwshQuote(filepath.Join(dir, "pwsh", "init.ps1"))+"))) } catch { }")
 		return Launch{Argv: argv, Env: env}, true
 	}
 	return Launch{}, false

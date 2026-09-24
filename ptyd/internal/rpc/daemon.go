@@ -15,6 +15,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
+	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
@@ -105,6 +106,8 @@ func termError(err error) error {
 		return wire.Errorf(wire.CodeTimeout, "%v", err)
 	case errors.Is(err, term.ErrKeyboardHeld):
 		return wire.Errorf(wire.CodeKeyboardHeld, "%v", err)
+	case errors.Is(err, ptyproc.ErrUnsupported):
+		return wire.Errorf(wire.CodeUnsupported, "%v", err)
 	}
 	return err
 }
@@ -165,5 +168,5 @@ func (d *Daemon) integrations() []string {
 	if d.ShellDir == "" {
 		return []string{}
 	}
-	return shellint.Kinds
+	return shellint.KindsOn(runtime.GOOS)
 }

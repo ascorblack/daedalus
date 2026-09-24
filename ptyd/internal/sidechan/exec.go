@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -126,7 +127,7 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	if !ok {
 		return ExecResult{}, fmt.Errorf("%w: %q is not an executable on PATH", ErrNotFound, r.Argv[0])
 	}
-	if !e.allow[filepath.Base(path)] {
+	if !e.allow[ProgramName(path, runtime.GOOS)] {
 		return ExecResult{}, fmt.Errorf("%w: %s is not among the programs exec.run may run", ErrForbidden, filepath.Base(path))
 	}
 
@@ -142,7 +143,8 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	if r.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(r.Stdin)
 	}
-	setGroup(cmd)
+	group := newGroup(cmd)
+	defer group.release()
 	// A daemonised grandchild that keeps the pipes open must not keep the call open after the
 	// program itself has exited.
 	cmd.WaitDelay = killGrace
@@ -150,6 +152,7 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	if err := cmd.Start(); err != nil {
 		return ExecResult{}, fmt.Errorf("starting %s: %w", filepath.Base(path), err)
 	}
+	group.started()
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 
@@ -161,9 +164,9 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	case werr = <-waited:
 	case <-timer.C:
 		timedOut = true
-		werr = endGroup(cmd, waited)
+		werr = endGroup(group, waited)
 	case <-ctx.Done():
-		werr = endGroup(cmd, waited)
+		werr = endGroup(group, waited)
 	}
 	res := ExecResult{ExitCode: -1, Stdout: stdout.String(), Stderr: stderr.String(),
 		Truncated: stdout.cut || stderr.cut, TimedOut: timedOut, DurationMs: time.Since(start).Milliseconds(), Path: path}
@@ -183,15 +186,32 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 }
 
 // endGroup hangs up the program's group, kills it after the grace, and waits for it.
-func endGroup(cmd *exec.Cmd, waited <-chan error) error {
-	signalGroup(cmd, false)
+func endGroup(group *procGroup, waited <-chan error) error {
+	group.signal(false)
 	select {
 	case err := <-waited:
 		return err
 	case <-time.After(killGrace):
 	}
-	signalGroup(cmd, true)
+	group.signal(true)
 	return <-waited
+}
+
+// ProgramName is the name a program is allowed by: the base name of its path, and on Windows
+// without the extension that makes it runnable and in lower case, so "claude.cmd" and "Git.exe"
+// are the "claude" and "git" of the list.
+func ProgramName(path, goos string) string {
+	if goos != "windows" {
+		return filepath.Base(path)
+	}
+	name := path[strings.LastIndexAny(path, `/\`)+1:]
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".exe", ".cmd", ".bat", ".com"} {
+		if strings.HasSuffix(lower, ext) {
+			return lower[:len(lower)-len(ext)]
+		}
+	}
+	return lower
 }
 
 // capped keeps the first max bytes written to it and counts the rest away, so a program never

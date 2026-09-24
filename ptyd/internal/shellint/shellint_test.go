@@ -1,3 +1,5 @@
+//go:build unix
+
 package shellint
 
 import (
@@ -75,7 +77,7 @@ func TestRewrite(t *testing.T) {
 			map[string]string{NonceEnv: "n", "ZDOTDIR": "/state/shell/zsh", UserZdotdirEnv: "/opt/zdot"}},
 		{Fish, "fish", true, "", false, "fish --login --init-command source '/state/shell/fish/init.fish'",
 			map[string]string{NonceEnv: "n"}},
-		{Pwsh, "pwsh", true, "", false, "pwsh -Login -NoLogo -NoExit -Command try { . '/state/shell/pwsh/init.ps1' } catch { }",
+		{Pwsh, "pwsh", true, "", false, "pwsh -Login -NoLogo -NoExit -Command try { . ([scriptblock]::Create([IO.File]::ReadAllText('/state/shell/pwsh/init.ps1'))) } catch { }",
 			map[string]string{NonceEnv: "n"}},
 	}
 	for _, c := range cases {

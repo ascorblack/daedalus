@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,7 +46,7 @@ serve flags:
 
 func main() {
 	// Called through the hook command's link, the daemon is that command.
-	if filepath.Base(os.Args[0]) == "hook-post" {
+	if calledAs(os.Args[0]) == "hook-post" {
 		os.Exit(hookPost(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
@@ -74,12 +75,29 @@ func main() {
 	}
 }
 
+// calledAs is the name the daemon was started under, without the extension Windows gives every
+// program and in lower case, as Windows names are.
+func calledAs(arg0 string) string {
+	name := filepath.Base(filepath.ToSlash(arg0))
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	if strings.EqualFold(filepath.Ext(name), ".exe") {
+		name = name[:len(name)-len(".exe")]
+	}
+	return strings.ToLower(name)
+}
+
 func serve(args []string) error {
 	cfg, err := config.Parse(args)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return err
+	}
+	// Launch tokens, overlays and the journal of agent writes are kept here.
+	if err := server.RestrictDir(cfg.StateDir); err != nil {
 		return err
 	}
 	log, logCloser, err := logx.New(cfg.LogFile, cfg.LogLevel)

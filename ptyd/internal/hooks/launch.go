@@ -112,7 +112,7 @@ func NewRegistry(stateDir, ptydPath string, pub Publisher, log *slog.Logger) (*R
 	// The hook command is one path, not "ptyd hook-post": a CLI's configuration may quote it as a
 	// single word, and the daemon's path may hold a space. The link is the daemon itself, which
 	// answers to the name it is called by.
-	if err := os.Symlink(ptydPath, r.HookCommand()); err != nil {
+	if err := linkHookCommand(ptydPath, r.HookCommand()); err != nil {
 		return nil, err
 	}
 	real, err := filepath.EvalSymlinks(r.dialsDir())
@@ -130,7 +130,7 @@ func (r *Registry) RealDialPath(l *Launch, name string) string {
 }
 
 // HookCommand is the command a launch's programs run to post a hook: `<command> <name>`.
-func (r *Registry) HookCommand() string { return filepath.Join(r.binDir(), "hook-post") }
+func (r *Registry) HookCommand() string { return filepath.Join(r.binDir(), hookCommandName) }
 
 func (r *Registry) binDir() string      { return filepath.Join(r.stateDir, "bin") }
 func (r *Registry) launchesDir() string { return filepath.Join(r.stateDir, "launches") }

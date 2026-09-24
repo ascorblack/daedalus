@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Env != "host" || c.Listen != "unix" || c.Limits.RingBytes != DefaultRingBytes || c.Shell == "" {
+	if c.Env != "host" || c.Listen != DefaultListen(runtime.GOOS) || c.Limits.RingBytes != DefaultRingBytes || c.Shell == "" {
 		t.Fatalf("%+v", c)
 	}
 	bad := [][]string{
@@ -52,6 +53,39 @@ func TestConfigFile(t *testing.T) {
 	for _, body := range []string{`{"limits":{"max_terminal":7}}`, `{"limits":{"ring_bytes":5}}`, `{"limits":{"kill_grace_ms":999999}}`, `nope`} {
 		if _, err := Parse(args(write(body))); err == nil || !strings.Contains(err.Error(), "config") {
 			t.Errorf("%s: %v", body, err)
+		}
+	}
+}
+
+func TestAWindowsHostPrefersPowerShell7(t *testing.T) {
+	found := func(names ...string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			for _, n := range names {
+				if n == name {
+					return `C:\Program Files\PowerShell\7\` + name, nil
+				}
+			}
+			return "", os.ErrNotExist
+		}
+	}
+	if got := WindowsShell(found("pwsh.exe", "powershell.exe")); got != "pwsh.exe" {
+		t.Errorf("with pwsh installed: %q", got)
+	}
+	if got := WindowsShell(found("powershell.exe")); got != "powershell.exe" {
+		t.Errorf("without pwsh: %q", got)
+	}
+	if got := WindowsShell(found()); got != "powershell.exe" {
+		t.Errorf("with nothing found: %q", got)
+	}
+}
+
+func TestWindowsListensOnLoopbackTCP(t *testing.T) {
+	if got := DefaultListen("windows"); got != "tcp:127.0.0.1:0" {
+		t.Errorf("windows: %q", got)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got := DefaultListen(goos); got != "unix" {
+			t.Errorf("%s: %q", goos, got)
 		}
 	}
 }

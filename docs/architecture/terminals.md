@@ -22,9 +22,9 @@ ptyd version
 | `--env` | the environment's name, echoed to clients (required) |
 | `--run-dir` | the run directory: endpoint, token, socket (required) |
 | `--state-dir` | the journal of agent writes, terminal logs, launch directories and dial sockets (required) |
-| `--listen` | `unix` (a socket in the run directory), or `tcp:127.0.0.1:<port>` |
+| `--listen` | `unix` (a socket in the run directory), or `tcp:127.0.0.1:<port>`; on Windows `tcp:127.0.0.1:0` |
 | `--home` | the home directory of spawned programs (`$HOME`) |
-| `--shell` | the login shell: `$SHELL`, then the user's passwd entry, then `/bin/bash`, then `/bin/sh` |
+| `--shell` | the login shell: `$SHELL`, then the user's passwd entry, then `/bin/bash`, then `/bin/sh`; on Windows `pwsh.exe` when PATH finds it, else `powershell.exe` |
 | `--hooks-listen` | loopback address of the hook listener (`127.0.0.1:0`); anything off the loopback interface is refused |
 | `--config` | a JSON file: `{"limits": {"max_terminals", "ring_bytes", "input_idle_ms", "kill_grace_ms"}, "exec": {"allow": []}, "fs": {"roots": [], "deny": []}}`; the lists only add to the built-in ones; unknown keys are refused |
 | `--log-file`, `--log-level` | the daemon's own JSON-lines log (stderr, `info`) |
@@ -54,6 +54,37 @@ it differs from the running daemon's. Updating is the operator's: the route belo
 (`deploy/rebuild.sh`, the `selfdev` profile) to run `docker compose up -d --no-build --no-deps
 terminals`, which ends every container terminal, and refuses with the count until the operator
 confirms. Without a rebuilder the refusal names the command to run on the server.
+
+### On Windows
+
+The daemon runs on Windows as the host environment of a native install (below). What differs:
+
+- **The terminal** is a pseudoconsole (ConPTY) instead of a PTY. The console host renders the
+  program's console into VT sequences, and those are what the scanner and the emulator read. The
+  program is created suspended, put in a job object that ends every process in it when it is
+  closed or terminated, and only then resumed, so nothing it starts is born outside the job.
+- **The endpoint** is loopback TCP (`tcp:127.0.0.1:<port>`): the host's asyncio has no unix-socket
+  client on Windows. The port is sealed from the agent like the hook listener's. The run and state
+  directories get an access list that gives this user, and nobody else, full control (inherited by
+  the token and every file made inside); a lock held on `ptyd.lock` keeps a second daemon out, since
+  there is no socket file to find alive.
+- **The shell** is PowerShell 7 (`pwsh.exe`) when PATH finds it, else Windows PowerShell, with no
+  login flag. Its integration is loaded as text run as a script block rather than dot-sourced as a
+  file, because the default execution policy refuses every script file; the user's policy is not
+  changed. Older console hosts drop OSC sequences they do not know, and then the marks never
+  arrive: the shell works, and `terminal.commands` answers 1007.
+- **Signals:** `INT` is a Ctrl+C typed into the console; `TERM`, `HUP`, `QUIT` and `KILL` terminate
+  the job (with `group`) or the program; the rest answer 1007. `terminal.kill` closes the console
+  first, which is the hangup (attached programs get `CTRL_CLOSE_EVENT`), and terminates the job
+  after the grace. There is no foreground process group, so `busy` comes only from the shell's marks.
+- **Programs** are found by Windows rules: `PATH` split on `;`, each of `PATHEXT` tried (a CLI
+  installed by npm is a `.cmd`), the current directory not searched. Variable names are one name
+  whatever their case. `exec.run` holds its program in a job too, and allows it by its name without
+  the extension (`claude.cmd` is `claude`); fs paths are compared with the roots and the deny list
+  in lower case.
+- **The hook command** is `<state>\bin\hook-post.exe`, a hard link to the daemon (a copy where a
+  link cannot be made): a symbolic link needs a privilege an ordinary account lacks.
+- The sandbox is `not available on Windows`, and process statistics report `supported: false`.
 
 ### On a server: the host terminal
 
@@ -270,7 +301,7 @@ its last 64 KiB.
   grace for the program to exit, then sends `SIGKILL` to the group and to every process of the
   terminal it can find: on Linux, the process tree, the session, and every process whose environment
   carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called `setsid` after its
-  parent exited. Outside Linux only the process group is signalled.
+  parent exited. On macOS only the process group is signalled; Windows is described above.
 - A program that exits while a background job still holds the PTY open is reported exited after
   half a second of draining; closing the PTY hangs the job up, as closing a terminal window would.
 - Exited terminals are kept, with their screens, for an hour, then forgotten.
@@ -539,7 +570,7 @@ the shell would have:
 | bash | `bash --init-file <state>/shell/bash/init.sh -i`, with `DAEDALUS_SHELL_LOGIN=1` for a login shell | `/etc/profile` and the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` (else `~/.bashrc`) for a login shell, since a login bash never reads `--init-file`; `~/.bashrc` otherwise |
 | zsh | `zsh -l` with `ZDOTDIR=<state>/shell/zsh`, and `DAEDALUS_USER_ZDOTDIR` when the environment had a `ZDOTDIR` | `.zshenv`, `.zprofile` and `.zshrc` from the user's `ZDOTDIR` (or home), each sourced at the top level with `ZDOTDIR` as the user's files expect it; after `.zshrc`, `ZDOTDIR` is handed back for good, so zsh reads the user's own `.zlogin` and a nested zsh starts plainly |
 | fish | `fish --login --init-command "source <state>/shell/fish/init.fish"` | the user's configuration, as always: the init command runs after it |
-| PowerShell | `pwsh [-Login] -NoLogo -NoExit -Command "try { . '<state>/shell/pwsh/init.ps1' } catch { }"` | the user's profile, as always. Tested with pwsh on Linux; not yet run by a daemon on Windows, where it is meant for |
+| PowerShell | `pwsh [-Login] -NoLogo -NoExit -Command "try { . ([scriptblock]::Create([IO.File]::ReadAllText('<state>/shell/pwsh/init.ps1'))) } catch { }"` (no `-Login` on Windows) | the user's profile, as always. Read as text so no execution policy stops it. Tested with pwsh on Linux; not yet run by a daemon on Windows, where it is meant for |
 
 **The marks.** `OSC 133 ; A` where the prompt starts and `B` where it ends, `C` when a command starts,
 `D ; <exit status>` when it ends, `OSC 633 ; E ; <command line>` just before `C` (a backslash doubled,

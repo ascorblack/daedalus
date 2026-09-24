@@ -35,7 +35,7 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `internal/answer` | the answers to terminal queries, as xterm.js gives them; `testdata/xterm-replies.json` is recorded from xterm.js |
 | `cmd/ptyd-replay` | plays a terminal recording through the emulator and writes its snapshots, for the cross-check against xterm.js |
 | `libghostty` | the pinned sources of the screen emulator, the patch carried against them, and the script that builds it |
-| `internal/ptyproc` | PTY start, resize, signals, ending a process tree |
+| `internal/ptyproc` | PTY start, resize, signals, ending a process tree; on Windows a pseudoconsole (ConPTY) and a job object |
 | `internal/procstat` | the process table and the machine's memory and CPU, from `/proc` |
 | `internal/events` | the ordered event log and its per-terminal rate limits |
 | `internal/sidechan` | `exec.run` and its program list, `fs.*` with its roots and deny list, `net.dial` |
@@ -77,8 +77,15 @@ docker build -q -t ptyd-toolchain -f libghostty/toolchain.Dockerfile libghostty
 docker run --rm --memory 6g --memory-swap 6g --user "$(id -u):$(id -g)" -v "$PWD":/src -w /src \
   -e HOME=/tmp -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/go-mod -e GOFLAGS=-buildvcs=false \
   ptyd-toolchain sh -c 'export PKG_CONFIG_PATH="$(libghostty/build.sh)" && test -z "$(gofmt -l cmd internal)" &&
-    go vet ./... && go test -race ./... && GOOS=darwin go vet ./...'
+    go vet ./... && go test -race ./... && GOOS=darwin go vet ./... && GOOS=windows go vet ./... &&
+    GOOS=windows GOARCH=arm64 go vet ./...'
 ```
+
+The two vets for other systems compile the daemon without cgo, so they check the Windows and macOS
+halves (`*_windows.go`: the pseudoconsole, the job object, the access list) but not the emulator's
+link. The rules of the Windows half that are text — the command line, the environment block, the
+program lookup, the path comparisons, the access list — are plain functions with tests that run on
+every system. What needs a real Windows (a console, a job) is tested only there.
 
 The tests start real PTYs, and real shells: the image carries zsh and fish beside bash, so the
 shell-integration tests run for each (a shell that is missing is skipped, and says so). Fuzzers (`FuzzScan`, `FuzzFrame`) and `TestProbeCorpus` (a directory of

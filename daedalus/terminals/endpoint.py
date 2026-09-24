@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -48,8 +48,10 @@ def permission_detail(path: Path, exc: OSError) -> str:
     userns-remap is an unprivileged user on the host and does not, and nothing in the container can
     change that.
     """
+    # Windows has no uid; there the access list of the run directory is the whole story.
+    who = f"uid {os.getuid()}" if hasattr(os, "getuid") else "this user"
     return (
-        f"{path}: {exc.strerror or exc} — this process runs as uid {os.getuid()} and may not open the terminal service's files; "
+        f"{path}: {exc.strerror or exc} — this process runs as {who} and may not open the terminal service's files; "
         "with rootless Docker or userns-remap, root in the container is not root on the host"
     )
 
@@ -97,6 +99,10 @@ def owned_by_root(run_dir: Path) -> str:
     cannot write its files into that directory, so installing it would fail until it is handed over.
     Inside the container the directory's owner is the one fact available; the fix is on the host.
     """
+    if os.name == "nt":
+        # Windows reports every file as owned by uid 0, so the note would always be wrong there; and
+        # nothing there is a Docker bind-mount source for a host daemon.
+        return ""
     try:
         owner = run_dir.stat().st_uid
     except OSError:
@@ -122,7 +128,9 @@ and dial sockets, and the journal of agent writes."""
 
 
 def remember_state_dir(run_dir: Path, state_dir: str) -> None:
-    if state_dir.startswith("/"):
+    # Absolute by the rules of the daemon's system: a Windows daemon reports "C:\\...", which a
+    # startswith("/") test used to drop, leaving its launch overlays unsealed natively on Windows.
+    if state_dir.startswith("/") or PureWindowsPath(state_dir).is_absolute():
         _state_dirs[str(run_dir)] = state_dir
     else:
         _state_dirs.pop(str(run_dir), None)
