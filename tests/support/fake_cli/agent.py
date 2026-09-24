@@ -146,6 +146,9 @@ class FakeAgent:
                 self.tui.queued.remove(text)
             self.tui.say(f"> {text}")
             await self.on_prompt(text, queued=True)
+            # The model answers what was injected inside the same turn, as it does in the real CLIs.
+            for step in script_of(text):
+                await self.step(step)
 
     async def escape(self) -> None:
         if self.busy:
@@ -181,11 +184,11 @@ class FakeAgent:
         if outcome == "cancelled":
             self.tui.say("⎿ Interrupted by user")
             await self.on_turn_cancelled()
-        elif outcome == "completed":
-            if silent:
-                self.log("turn_completed", silent=True)
-            else:
-                await self.on_turn_completed()
+        elif outcome == "completed" and not silent:
+            await self.on_turn_completed()
+        # After every hook and event of the turn: the one moment a test can say "nothing more about
+        # this turn is coming" without guessing a delay.
+        self.log("turn_ended", outcome=outcome, silent=silent)
         self.turns += 1
         if self.faults.exit_after and self.turns >= self.faults.exit_after:
             self.crash()

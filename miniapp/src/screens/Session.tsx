@@ -27,6 +27,8 @@ import { useMedia } from "../shell";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
 import { usePresenceScope } from "../presence";
+import { endsTerminals, TerminalButton, TerminalDock, TerminalFull, TerminalSheet, useSessionTerminals, useTerminalDock } from "../terminal/dock";
+import { insideTerminal } from "../terminal/keys";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -75,6 +77,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const phone = !useMedia("(min-width: 1024px)");
   const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane });
   const [panelPct, dragPanel] = usePanelWidth();
+  // The session's terminals: the dock under the conversation on a desktop, a sheet and a full-screen
+  // view on a phone. Listed here because the header's button, the dock and the delete dialog all count them.
+  const sessionTerminals = useSessionTerminals(id);
   const body = useRef<HTMLDivElement>(null);
   const [detailsFocus, setDetailsFocus] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
@@ -834,7 +839,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function remove() {
-    if (!(await confirmAsync(t("session.delete.title"), { body: t("session.delete.body"), action: t("session.delete.action") }))) return;
+    const ends = endsTerminals(sessionTerminals.running.length);
+    if (!(await confirmAsync(t("session.delete.title"), { body: ends ? `${t("session.delete.body")} ${ends}` : t("session.delete.body"), action: t("session.delete.action") }))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
       onBack();
@@ -886,6 +892,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   useEffect(() => {
     if (phone || pane === "right") return;
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+. belongs to the program in a focused terminal.
+      if (insideTerminal(e.target)) return;
       const which = panelShortcut(e);
       if (!which) return;
       e.preventDefault();
@@ -895,6 +903,24 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [phone, pane, panel.toggle, panel.expand]);
+
+  const terminalDock = useTerminalDock(id, sessionTerminals, { preferredEnv: detail?.project?.settings?.default_env, phone, toast });
+  const openTerminalFile = useCallback((path: string, line?: number) => openPreview({ base: sessionBase(id), path, lines: line ? String(line) : undefined }), [id, openPreview]);
+  const toggleDock = terminalDock.toggle;
+
+  // Ctrl+` opens and closes the terminal dock, from anywhere in the session — the terminal included,
+  // where it is the one key the program does not get. Matched by the physical key, so it works in a
+  // Russian layout too, where the same key types "ё".
+  useEffect(() => {
+    if (phone || pane === "right") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.code !== "Backquote") return;
+      e.preventDefault();
+      toggleDock();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [phone, pane, toggleDock]);
 
   const sessionCtx = useMemo(
     () => ({
@@ -969,6 +995,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           {detail && ((detail.subagents?.length ?? 0) > 0 || detail.subagent_of) && (
             <SubagentsMenu detail={detail} onOpen={onOpen} />
           )}
+          <TerminalButton dock={terminalDock} phone={phone} />
           {!phone && <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
           </button>}
@@ -1066,6 +1093,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             phone={phone}
             toast={toast}
           />
+          {!phone && <TerminalDock dock={terminalDock} workspace={detail?.workspace} fileOpener={openTerminalFile} />}
         </div>
         {detail && (
           <Panel
@@ -1114,6 +1142,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           />
         )}
       </div>
+
+      <TerminalFull dock={terminalDock} phone={phone} workspace={detail?.workspace} fileOpener={openTerminalFile} />
+      <TerminalSheet dock={terminalDock} />
 
       {commandResult && (
         <Overlay><div className="sheet-backdrop" onClick={() => setCommandResult(null)}>

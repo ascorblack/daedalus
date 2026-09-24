@@ -157,7 +157,8 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
 
 // ── overflow menu ────────────────────────────────────────────────────────────────────────
 
-export type MenuItem = { label: string; icon?: IconName; danger?: boolean; disabled?: boolean; onSelect: () => void } | "-";
+/** `warn` marks an item that reaches outside the sandbox (a terminal on the machine itself): amber, not red. */
+export type MenuItem = { label: string; icon?: IconName; danger?: boolean; warn?: boolean; disabled?: boolean; hint?: string; onSelect: () => void } | "-";
 
 /** With `trigger`, the button is that content (a title with a chevron) rather than an icon. */
 export function OverflowMenu({ items, label, icon = "more", small, className, trigger: customTrigger }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string; trigger?: ReactNode }) {
@@ -250,7 +251,7 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
             it === "-" ? (
               <div key={i} className="menu-sep" />
             ) : (
-              <button key={i} role="menuitem" className={it.danger ? "danger" : ""} disabled={it.disabled} onClick={() => { setOpen(false); it.onSelect(); }}>
+              <button key={i} role="menuitem" className={it.danger ? "danger" : it.warn ? "warn" : ""} disabled={it.disabled} title={it.hint} onClick={() => { setOpen(false); it.onSelect(); }}>
                 {it.icon && <Icon name={it.icon} size={16} />}
                 {it.label}
               </button>

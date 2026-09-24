@@ -399,6 +399,7 @@ SETTINGS = {
         "qwen-local": {"provider": "vllm", "model": "Qwen3.8", "label": "Local Qwen3.8", "thinking": False, "reasoning_effort": "", "images": False, "context_window": 65536, "max_output_tokens": 4096},
     },
     "providers": {}, "prompt": {"rules": ""}, "vision": {"preset": "gpt-5.6-luna", "max_output_tokens": 800},
+    "orchestrator": {"preset": "", "strongest": "claude-opus-5"},
     "asr": {"provider": "", "url": "", "api_key": "", "model": "", "language": "auto", "timeout_seconds": 60, "max_seconds": 120, "autosend": False},
     "tools": {"web": {"fetch_timeout_seconds": 30, "proxy": "", "user_agent": "", "fetch_max_chars": 40000, "search": {"backend": "searxng", "fallback": [], "results": 8, "timeout_seconds": 20, "searxng": {"url": "", "engines": "", "categories": "", "safesearch": 0}, "duckduckgo": {"url": "", "region": ""}, "serper": {"base_url": "", "gl": "", "hl": ""}, "keenable": {"base_url": "", "snippet_max_length": 0}, "tavily": {"base_url": "", "depth": ""}, "exa": {"base_url": "", "type": ""}, "perplexity": {"base_url": ""}}}, "exec": {"max_output_chars": 20000}},
     "self_change": {"approval": "manual", "auto_rebuild": True},
@@ -1194,6 +1195,63 @@ def run_composer() -> int:
     return result or UNHANDLED.report()
 
 
+# The session's terminal dock, as the mock-up drew it: the tests failing in one pane, the dev server in
+# the other. The terminal's own text is what the programs print, the same in both languages.
+ESC = "\x1b["
+DOCK_TESTS = (
+    f"{ESC}32m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ git status -s\r\n"
+    f" {ESC}33mM{ESC}0m src/pages/checkout.tsx\r\n {ESC}33mM{ESC}0m src/lib/cart.ts\r\n{ESC}31m??{ESC}0m src/pages/checkout.test.tsx\r\n"
+    f"{ESC}32m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ npm test -- checkout\r\n\r\n"
+    f" {ESC}32m✓{ESC}0m the cart adds up the total {ESC}2m(4 ms){ESC}0m\r\n"
+    f" {ESC}32m✓{ESC}0m an empty cart leads back to the menu {ESC}2m(2 ms){ESC}0m\r\n"
+    f" {ESC}31m✗ promo code SPRING10{ESC}0m\r\n   Expected: {ESC}32m1080{ESC}0m\r\n   Received: {ESC}31m1200{ESC}0m\r\n\r\n"
+    f" Tests: {ESC}31m1 failed{ESC}0m, {ESC}32m2 passed{ESC}0m, 3 total\r\n"
+    f"{ESC}31m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ "
+)
+DOCK_DEV = (
+    f"\r\n  {ESC}1;32mVITE{ESC}0m {ESC}32mv7.1.4{ESC}0m  ready in {ESC}1m412{ESC}0m ms\r\n\r\n"
+    f"  {ESC}32m➜{ESC}0m  {ESC}1mLocal{ESC}0m:   {ESC}36mhttp://127.0.0.1:8124/{ESC}0m\r\n"
+    f"  {ESC}2m➜  Network: use --host to expose{ESC}0m\r\n"
+    f"{ESC}2m14:02:11{ESC}0m {ESC}36m[vite]{ESC}0m hmr update /src/pages/checkout.tsx\r\n"
+    f"{ESC}2m14:02:19{ESC}0m {ESC}36m[vite]{ESC}0m hmr update /src/lib/cart.ts\r\n"
+)
+
+
+def dock_shots(context, prefix: str = "") -> None:  # type: ignore[no-untyped-def]
+    """The dock under the conversation (desktop), or one terminal full screen (phone)."""
+    from terminal_stub import TerminalStub, dock_state
+
+    term = TerminalStub(S1)
+    term.add("d1tests00000", title="bash · bakery-site", busy=True)
+    term.add("d2devsrv0000", title="npm run dev", busy=True)
+    term.emit("d1tests00000", DOCK_TESTS)
+    term.emit("d2devsrv0000", DOCK_DEV)
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    term.install(page)
+    # The DOM renderer: under an emulated device scale factor Chromium reports the canvas's device
+    # pixels at scale 1, and the WebGL renderer, which sizes itself from them, draws doubled glyphs.
+    page.add_init_script("try { localStorage.setItem('daedalus.term.renderer', 'dom'); } catch (e) {}")
+    if prefix:
+        # A phone has no dock: the header's list opens a terminal over the whole screen.
+        page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
+        page.locator(".chat-head .term-button").click()
+        page.locator(".term-sheet .term-sheet-row").first.click()
+        page.wait_for_selector(".term-full .term-view[data-state='live']", timeout=15000)
+        page.wait_for_timeout(900)
+        page.screenshot(path=str(OUT / "phone-session-terminal.png"))
+        print("wrote phone-session-terminal")
+    else:
+        page.add_init_script(dock_state(S1, ["d1tests00000", "d2devsrv0000"], split="d2devsrv0000", height=330))
+        page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".term-dock.open .term-view[data-state='live']", timeout=15000)
+        page.wait_for_timeout(1200)
+        page.screenshot(path=str(OUT / "session-dock.png"))
+        print("wrote session-dock")
+    page.close()
+
+
 def open_bell(page: Page) -> None:
     """The bell's popover over the agents: what needs you, with its buttons, and the day's feed."""
     page.locator(".sidebar .bell").click()
@@ -1252,6 +1310,7 @@ def run() -> int:
         shot(page, "session-folded", f"agents/{S1}", wait=".chat-scroll .timeline", before=fold_sidebar, settle=500)
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
+        dock_shots(desk)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
         shot(page, "team", f"project/{P1}/team", wait=".staff-row")
         shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
@@ -1290,6 +1349,7 @@ def run() -> int:
         shot(page, "phone-bots", "agents")
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", settle=300)
         shot(page, "phone-session-panel", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_phone_panel, settle=600)
+        dock_shots(phone, "phone-")
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
