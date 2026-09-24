@@ -38,6 +38,7 @@ func (d *Daemon) registerSide(srv *server.Server) {
 	srv.Handle("fs.read", d.fsRead)
 	srv.Handle("fs.tail", d.fsTail)
 	srv.Handle("fs.set_roots", d.fsSetRoots)
+	srv.Handle("fs.mkdir", d.fsMkdir)
 	srv.Handle("net.dial", d.netDial)
 	srv.Handle("net.allow", d.netAllow)
 	srv.Handle("hooks.register_launch", d.registerLaunch)
@@ -110,12 +111,17 @@ func (d *Daemon) execRun(ctx context.Context, c *server.Conn, params json.RawMes
 
 func (d *Daemon) fsStat(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {
 	var p struct {
-		Path string `json:"path"`
+		Path   string `json:"path"`
+		AsRoot bool   `json:"as_root"`
 	}
 	if err := decode(params, &p); err != nil {
 		return nil, err
 	}
-	st, err := d.Side.FS.Stat(p.Path)
+	stat := d.Side.FS.Stat
+	if p.AsRoot {
+		stat = d.Side.FS.StatRoot
+	}
+	st, err := stat(p.Path)
 	if err != nil {
 		d.logRefusal("fs.stat", p.Path, err)
 		return nil, sideError(err)
@@ -178,6 +184,25 @@ func (d *Daemon) fsTail(ctx context.Context, c *server.Conn, params json.RawMess
 		return nil, sideError(err)
 	}
 	return t, nil
+}
+
+func (d *Daemon) fsMkdir(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {
+	var p struct {
+		Path string `json:"path"`
+	}
+	if err := decode(params, &p); err != nil {
+		return nil, err
+	}
+	st, created, err := d.Side.FS.MkdirRoot(p.Path)
+	if err != nil {
+		d.logRefusal("fs.mkdir", p.Path, err)
+		return nil, sideError(err)
+	}
+	d.Log.Info("fs.mkdir", "path", p.Path, "created", created)
+	return struct {
+		sidechan.Stat
+		Created bool `json:"created"`
+	}{st, created}, nil
 }
 
 func (d *Daemon) fsSetRoots(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {

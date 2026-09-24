@@ -1,0 +1,18 @@
+# The host terminal: `ptyd` on the server itself, as the operator, so the app can open a shell here.
+# deploy/host-terminal.sh fills in the run directory the agent's container mounts (the --run-dir
+# argument below) and installs the result as ~/.config/systemd/user/daedalus-ptyd.service.
+# Removing it: systemctl --user disable --now daedalus-ptyd
+[Unit]
+Description=Daedalus host terminals
+
+[Service]
+# The PATH and locale of the shell the installer ran in. A user unit otherwise gets systemd's minimal
+# PATH, and a CLI installed under ~/.local/bin would not be found by the programs the daemon runs.
+EnvironmentFile=-%h/.config/daedalus/ptyd.env
+ExecStart=%h/.local/lib/daedalus/ptyd serve --env host --run-dir "@RUN_DIR@" --state-dir %h/.local/state/daedalus-ptyd
+Restart=on-failure
+RestartSec=2
+# KillMode stays control-group: ptyd owns its PTYs, and when it stops they stop.
+
+[Install]
+WantedBy=default.target

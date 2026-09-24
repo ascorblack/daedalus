@@ -82,28 +82,31 @@ class JournalNote(BaseModel):
     text: str = Field(max_length=JOURNAL_NOTE_MAX_CHARS)
 
 
-def host_bridge(settings: Any) -> bool:
+def host_bridge(settings: Any, terminals: Any = None) -> bool:
     """Whether a terminal daemon answers on the host, so a host folder can be worked in by anything.
 
-    The daemon writes its ``endpoint`` into the run directory the host is told about; an empty or
-    missing directory is a bridge that is not installed. Read at the moment of asking, because the
-    bridge is installed and removed while this process runs, and the directory is mounted either way.
-    The setting belongs to the terminals, which may not be configured on this installation at all.
+    With the terminals service running, its live connection is the answer: a daemon that was killed
+    leaves its ``endpoint`` behind, and a folder accepted on the strength of that file would be a row
+    nothing could open. Without the service (the doctor, a test) the directory is read at the moment
+    of asking, because the bridge is installed and removed while this process runs, and the directory
+    is mounted either way; an empty or missing one is a bridge that is not installed.
     """
+    if terminals is not None and terminals.configured("host"):
+        return bool(terminals.available("host"))
     directory = getattr(settings, "terminals_host_dir", None)
     if not directory:
         return False
     return (Path(directory) / "endpoint").is_file()
 
 
-def environments(settings: Any, local_env: str) -> dict[str, Any]:
+def environments(settings: Any, local_env: str, terminals: Any = None) -> dict[str, Any]:
     """Which environments a folder of this installation may live in.
 
     Natively the process is on the host and there is no container. In Docker the container is where
     the process is, and the host is reachable only through its terminal bridge, and only by what runs
     in a terminal: a folder there without a bridge would be a row nothing could ever open.
     """
-    bridge = host_bridge(settings)
+    bridge = host_bridge(settings, terminals)
     available = [local_env] + (["host"] if local_env == "container" and bridge else [])
     return {"local": local_env, "available": available, "host_bridge": bridge, "docker": local_env == "container"}
 
@@ -125,7 +128,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     settings = app.settings
 
     def view(project: Project, sessions: list[dict[str, Any]]) -> dict[str, Any]:
-        bridge = host_bridge(settings)
+        bridge = host_bridge(settings, app.extensions.get("terminals"))
         body = project.view()
         for folder_view, folder in zip(body["folders"], project.folders, strict=True):
             folder_view["reach"] = reach(folder, manager.projects.local_env, bridge)
@@ -148,7 +151,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         """A folder or a default in an environment this installation cannot reach is refused at the door."""
         if env is None:
             return
-        offered = environments(settings, manager.projects.local_env)
+        offered = environments(settings, manager.projects.local_env, app.extensions.get("terminals"))
         if env in offered["available"]:
             return
         if env == "host":
@@ -179,7 +182,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     @api.get("/api/project-environments")
     async def project_environments(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Where a folder may live, for the environment choice when a folder is added."""
-        return environments(settings, manager.projects.local_env)
+        return environments(settings, manager.projects.local_env, app.extensions.get("terminals"))
 
     @api.post("/api/projects")
     async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

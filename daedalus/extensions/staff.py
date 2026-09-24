@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
@@ -48,10 +48,12 @@ from daedalus.staff_runtime import (
 )
 from daedalus.stores.projects import Project, ProjectFolder
 from daedalus.stores.staff import ACTIVE_STATUSES, HARNESS_NAMES, Ask, Staff, StaffBusy, StaffError, StaffSession
+from daedalus.terminals.bridge import HostBridge
 
 if TYPE_CHECKING:
     from daedalus.app import Application
     from daedalus.host.session_runner import SessionManager
+    from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +141,9 @@ class Team:
         assert app.manager is not None
         self.manager: SessionManager = app.manager
         self.runtimes: dict[str, StaffRuntime] = {"daedalus": DaedalusStaffRuntime(self.manager)}
-        self.worktrees = StaffWorktrees(self.manager.projects.local_env)
+        # A host folder in Docker is worked in through the host terminal bridge; the service is
+        # looked up per call, so a bridge installed after the start is used without a restart.
+        self.worktrees = StaffWorktrees(self.manager.projects.local_env, host=HostBridge(lambda: cast("Terminals | None", app.extensions.get("terminals"))))
         self.ingress = Ingress(self)
         self._capacity = capacity
         """A fixed :class:`MachineCapacity` for tests; otherwise the terminals service is asked each time."""

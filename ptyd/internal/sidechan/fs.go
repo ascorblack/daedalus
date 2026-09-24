@@ -109,10 +109,6 @@ func (f *FS) SetRoots(roots []string) (accepted []string, refused []Refusal, err
 	if len(roots) > config.MaxRoots {
 		return nil, nil, fmt.Errorf("%w: at most %d roots", ErrInvalid, config.MaxRoots)
 	}
-	homes := []string{f.home}
-	if real, err := filepath.EvalSymlinks(f.home); err == nil {
-		homes = append(homes, real)
-	}
 	seen := map[string]bool{}
 	for _, root := range roots {
 		if !filepath.IsAbs(root) {
@@ -124,21 +120,7 @@ func (f *FS) SetRoots(roots []string) (accepted []string, refused []Refusal, err
 		if r, err := filepath.EvalSymlinks(clean); err == nil {
 			real = r
 		}
-		reason := ""
-		for _, p := range []string{clean, real} {
-			for _, home := range homes {
-				if under(p, home) {
-					reason = "holds the home directory"
-				}
-			}
-			if f.sealedPath(p) || f.denied(p) {
-				reason = "is the terminal service's own or a denied path"
-			}
-		}
-		if clean == "/" || real == "/" {
-			reason = "is the root of the filesystem"
-		}
-		if reason != "" {
+		if reason := f.rootRefusal(clean, real); reason != "" {
 			refused = append(refused, Refusal{root, reason})
 			continue
 		}
@@ -151,6 +133,105 @@ func (f *FS) SetRoots(roots []string) (accepted []string, refused []Refusal, err
 	f.hostRoots = accepted
 	f.mu.Unlock()
 	return accepted, refused, nil
+}
+
+// rootRefusal says why a path, as written and as resolved, could not be a root; "" when it could.
+func (f *FS) rootRefusal(clean, real string) string {
+	homes := []string{f.home}
+	if r, err := filepath.EvalSymlinks(f.home); err == nil {
+		homes = append(homes, r)
+	}
+	if clean == "/" || real == "/" {
+		return "is the root of the filesystem"
+	}
+	reason := ""
+	for _, p := range []string{clean, real} {
+		for _, home := range homes {
+			if under(p, home) {
+				reason = "holds the home directory"
+			}
+		}
+		if f.sealedPath(p) || f.denied(p) {
+			reason = "is the terminal service's own or a denied path"
+		}
+	}
+	return reason
+}
+
+// checkRoot resolves a path the host is about to make a root and holds it to the rules a root is
+// held to. It returns the cleaned path, its resolution (that of the deepest existing ancestor with
+// the rest appended, when it is missing) and whether it exists.
+func (f *FS) checkRoot(p string) (clean, real string, exists bool, err error) {
+	if !filepath.IsAbs(p) {
+		return "", "", false, fmt.Errorf("%w: the path must be absolute", ErrInvalid)
+	}
+	clean = filepath.Clean(p)
+	real, err = filepath.EvalSymlinks(clean)
+	exists = err == nil
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", false, err
+		}
+		real = resolveMissing(clean)
+	}
+	if reason := f.rootRefusal(clean, real); reason != "" {
+		return "", "", false, fmt.Errorf("%w: %s cannot be a folder of a project: it %s", ErrForbidden, clean, reason)
+	}
+	return clean, real, exists, nil
+}
+
+// StatRoot describes a path that is to become a root — a project folder being added — and so is
+// not under one yet. It answers only what a folder check needs (whether it is there, whether it is a
+// directory, whether this user may write in it), for any path that could be a root; a path that
+// could not is refused as SetRoots would refuse it.
+func (f *FS) StatRoot(p string) (Stat, error) {
+	_, real, exists, err := f.checkRoot(p)
+	if err != nil || !exists {
+		return Stat{}, err
+	}
+	st, err := os.Stat(real)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Stat{}, nil
+		}
+		return Stat{}, err
+	}
+	out := statOf(st)
+	out.Writable = writable(real)
+	return out, nil
+}
+
+// MkdirRoot creates a directory that is to become a root, with its missing parents, as this user
+// and under this user's umask. An existing directory is left as it is (created is false). This is
+// the side channels' only write: a project folder on the host has to exist before anything, a
+// terminal included, can be started in it.
+func (f *FS) MkdirRoot(p string) (st Stat, created bool, err error) {
+	clean, real, exists, err := f.checkRoot(p)
+	if err != nil {
+		return Stat{}, false, err
+	}
+	if exists {
+		info, err := os.Stat(real)
+		if err != nil {
+			return Stat{}, false, err
+		}
+		if !info.IsDir() {
+			return Stat{}, false, fmt.Errorf("%w: %s exists and is not a directory", ErrInvalid, clean)
+		}
+		out := statOf(info)
+		out.Writable = writable(real)
+		return out, false, nil
+	}
+	if err := os.MkdirAll(clean, 0o777); err != nil {
+		return Stat{}, false, err
+	}
+	// Checked again as made: a parent swapped for a symlink between the check and the MkdirAll
+	// would have put the directory somewhere a root may not be, and the host must not take it.
+	if _, _, _, err := f.checkRoot(clean); err != nil {
+		return Stat{}, true, err
+	}
+	st, err = f.StatRoot(clean)
+	return st, true, err
 }
 
 // Roots is every root in force: the host's and the configuration's.
@@ -286,6 +367,8 @@ type Stat struct {
 	Mtime  time.Time `json:"mtime,omitzero"`
 	Mode   string    `json:"mode,omitempty"`
 	FileID string    `json:"file_id,omitempty"`
+	// Writable is whether this user may create files in it; only a folder check asks.
+	Writable *bool `json:"writable,omitempty"`
 }
 
 func statOf(st os.FileInfo) Stat {

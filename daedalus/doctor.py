@@ -556,10 +556,16 @@ TERMINAL_FIXES = {
     # An empty run directory in a compose install: the stack predates the terminals service, which a
     # restart of the agent's container does not create, and its image may predate the daemon.
     "not_installed_container": "create the terminals service: docker compose -f deploy/compose.yaml --env-file .env up -d --build",
-    "not_running": "start the terminal service: docker compose up -d terminals, or the host bridge's systemd unit",
+    # The host bridge is a systemd user unit of the operator's, so every fix for it is a command on
+    # the server, run as the operator rather than with sudo.
+    "not_installed_host": "on the server, as yourself: bash deploy/setup.sh, and answer yes to \"Host terminal\"",
+    "not_running": "start the terminal service: docker compose up -d terminals",
+    "not_running_host": "on the server, as yourself: systemctl --user restart daedalus-ptyd (its log: journalctl --user -u daedalus-ptyd); if it stops when you log out, sudo loginctl enable-linger $USER",
     "refused": "the token changed under the connection; it retries on its own — if it persists, restart the terminal service",
     "unreachable": "read the terminal service's log; the host keeps retrying",
+    "permission_denied": "the host terminal needs Docker running as root: with rootless Docker or userns-remap, root in this container is an ordinary user on the host and cannot open your 0700 directory",
     "protocol_mismatch": "recreate the terminals service from this build's image (docker compose up -d terminals), which ends its terminals",
+    "protocol_mismatch_host": "on the server, as yourself: bash deploy/setup.sh copies this build's daemon to the host and restarts it, which ends the host terminals",
 }
 
 
@@ -593,7 +599,7 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
             finally:
                 await client.close()
         if not available:
-            label = {"not_installed": "not installed", "not_running": "not running", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
+            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
             severity = "info" if reason == "not_installed" and env == "host" else "warn"
             fix = TERMINAL_FIXES.get(f"{reason}_{env}") or TERMINAL_FIXES.get(reason, "")
             out.append(Check(name, False, f"{label}: {detail}", severity, fix))
