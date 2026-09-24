@@ -119,6 +119,11 @@ var messages = map[Lang]map[string]string{
 		"change.reverted":        "The change was reversed",
 		"change.failed":          "The change was not applied",
 		"docker.missing":         "Daedalus needs Docker: install Docker Desktop, start it, and try again. Or set this up to run on this machine instead.",
+
+		"watch.open":      "Open",
+		"watch.away.one":  "%d notification while the launcher was away",
+		"watch.away.few":  "%d notifications while the launcher was away",
+		"watch.away.many": "%d notifications while the launcher was away",
 	},
 	LangRU: {
 		"setup.title": "Настройка Daedalus",
@@ -218,6 +223,11 @@ var messages = map[Lang]map[string]string{
 		"change.reverted":        "Изменение откачено",
 		"change.failed":          "Изменение не применилось",
 		"docker.missing":         "Daedalus нужен Docker: установите Docker Desktop, запустите его и попробуйте снова. Или выберите запуск прямо на этом компьютере.",
+
+		"watch.open":      "Открыть",
+		"watch.away.one":  "%d уведомление, пока лаунчер был закрыт",
+		"watch.away.few":  "%d уведомления, пока лаунчер был закрыт",
+		"watch.away.many": "%d уведомлений, пока лаунчер был закрыт",
 	},
 }
 
