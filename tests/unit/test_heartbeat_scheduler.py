@@ -85,7 +85,8 @@ async def test_message_reminder_is_delivered_without_a_model_call(app: Any) -> N
     assert app.front.outbox.sent and "take the pills" in app.front.outbox.sent[0]
     [entry] = (await app.notifications.list())["entries"]
     assert (entry["kind"], entry["category"]) == ("reminder", "reminder")
-    assert entry["delivered"] == {"telegram": "handled"}  # the chat already carried it
+    assert entry["delivered"]["telegram"] == "handled"  # the chat already carried it
+    assert entry["delivered"]["push"] == "skipped: no device"
     fired = await app.manager.bus.replay(0, None, limit=10)
     assert [(e.type, e.payload["name"]) for e in fired if e.type == "schedule.fired"] == [("schedule.fired", "pills")]
     row = await app.db.fetchone("SELECT enabled, next_run_at FROM schedules WHERE id = ?", (created["id"],))

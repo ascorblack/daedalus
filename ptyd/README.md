@@ -23,7 +23,7 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `cmd/ptyd` | flags, signals, shutdown |
 | `internal/server` | the run directory, the token handshake, channels, the JSON-RPC dispatcher; `clienttest` is a client for tests |
 | `internal/rpc` | the methods |
-| `internal/term` | one terminal (reader, emulator goroutine, input arbitration, keys, environment) and the registry |
+| `internal/term` | one terminal (reader, emulator goroutine, input arbitration, keys, environment), its attachments (flow control, size ownership, the keyboard), and the registry |
 | `internal/scan` | the clamps and the marks, over the raw output |
 | `internal/ring` | the output ring, by absolute offset |
 | `internal/emulator` | the emulator interface; `basic` (modes only) and `fake` (for tests) |
