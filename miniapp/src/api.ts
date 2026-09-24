@@ -635,6 +635,8 @@ export type Settings = {
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
   vision: { preset: string; max_output_tokens: number };
+  /** A project orchestrator's defaults. `strongest` is what an empty `preset` means, sent by the host. */
+  orchestrator?: { preset: string; strongest?: string };
   asr: { provider: string; url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
   tools: {
     web: { fetch_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search: WebSearchConf };

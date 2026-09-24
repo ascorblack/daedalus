@@ -176,34 +176,29 @@ async def test_claude_permission_dialog_answered_with_keys_and_its_late_notifica
         assert agents[0]["status"] == "waiting" and agents[0]["waitingFor"] == "dialog open"
         await term.write(keys=["Down", "Down", "Enter"])  # "No, and tell Claude what to do differently"
         await rig.event("hook", where={"name": "Stop"})
-        assert "I did not run rm -rf build" in await term.screen()
+        await rig.screen_until(term, "I did not run rm -rf build")
         # The idle notification comes a (scaled) minute after the turn and is only a notification.
-        idle = await rig.event("hook", where={"name": "Notification"}, after=len(rig.events) - 1)
-        assert idle["data"]["body"]["notification_type"] == "idle_prompt"
+        await wait(lambda: any(h["body"]["notification_type"] == "idle_prompt" for h in rig.hooks("Notification")))
 
 
 async def test_claude_queues_a_message_typed_while_busy_and_esc_interrupts_without_stop() -> None:
     async with Rig() as rig:
         trust(rig, rig.work)
         launch = await rig.register()
-        term = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch), "slow:4"], launch_id=launch["launch_id"])
+        # Long enough that the turn cannot end on its own during the test: it ends by the Esc below.
+        term = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch), "slow:1000"], launch_id=launch["launch_id"])
         await rig.screen_until(term, "Read\\(")
         await term.write(paste="echo:steered in")
         await term.write(keys=["Enter"])
         await rig.screen_until(term, "queued: echo:steered in")
         await wait(lambda: len(rig.hooks("UserPromptSubmit")) == 2)
         assert rig.hooks("UserPromptSubmit")[1]["body"]["prompt"] == "echo:steered in"
-        await rig.event("hook", where={"name": "Stop"})
-        assert len(rig.hooks("Stop")) == 1  # injected into the running turn, not a turn of its own
-        assert "steered in" in await term.screen()
-        stops = len(rig.hooks("Stop"))
-        await term.write(paste="slow:20")
-        await term.write(keys=["Enter"])
-        await rig.screen_until(term, "Read\\(")
+        await rig.screen_until(term, "● steered in")  # injected into the running turn
         await term.write(keys=["Esc"])
+        await wait(lambda: bool(log_events(rig, "turn_ended")))
+        assert log_events(rig, "turn_ended")[0]["outcome"] == "cancelled"
         await rig.screen_until(term, "Interrupted by user")
-        await asyncio.sleep(0.3)
-        assert len(rig.hooks("Stop")) == stops
+        assert rig.hooks("Stop") == []  # one turn, interrupted: no Stop at all
         transcript = Path(rig.hooks("SessionStart")[0]["body"]["transcript_path"]).read_text()
         assert "[Request interrupted by user]" in transcript
         # Esc twice on an idle composer opens the rewind dialog: an adapter sends it once.
@@ -219,12 +214,14 @@ async def test_claude_paste_collapse_burst_guard_and_the_swallowed_enter() -> No
         term = await rig.spawn(["claude", "--session-id", SESSION, "--settings", claude_settings(launch)], launch_id=launch["launch_id"])
         await rig.event("hook", where={"name": "SessionStart"})
         long = "echo:" + "x" * 900 + "\nsecond line\nthird line"
-        await term.write(paste=long)
-        await term.write(keys=["Enter"])  # inside the burst window: swallowed
+        # The paste and its Enter in one write, so they reach the TUI together however loaded the
+        # machine is: the Enter is inside the burst window by construction.
+        await term.write(text=f"\x1b[200~{long}\x1b[201~\r")
+        await wait(lambda: len(log_events(rig, "enter_swallowed")) == 1)
         screen = await rig.screen_until(term, r"\[Pasted text #1 \+3 lines\]")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)  # a lower bound past the window, counted from after the TUI had it
         await term.write(keys=["Enter"])  # the fault: swallowed once more
-        await asyncio.sleep(0.1)
+        await wait(lambda: len(log_events(rig, "enter_swallowed")) == 2)
         assert "[Pasted text #1" in await term.screen()
         await term.write(keys=["Enter"])
         await rig.event("hook", where={"name": "UserPromptSubmit"})
@@ -243,11 +240,7 @@ async def test_a_dialog_during_a_paste_catches_an_enter() -> None:
         await term.write(paste="echo:lost")
         await rig.screen_until(term, "a notice opened while you were pasting")
         await term.write(keys=["Enter"])
-        # The write returns once the bytes are in the terminal; the fake reads them and logs a moment
-        # later. Checking at once failed about one run in two on a loaded machine.
-        async with asyncio.timeout(10):
-            while not log_events(rig, "enter_into_dialog"):
-                await asyncio.sleep(0.02)
+        await wait(lambda: bool(log_events(rig, "enter_into_dialog")))
         assert not log_events(rig, "submitted")
 
 
@@ -399,9 +392,10 @@ async def test_codex_turn_steer_and_acknowledgement_by_client_id() -> None:
     async with Rig() as rig:
         client, tui, thread = await codex_session(rig)
         await rig.screen_until(tui, f"resumed thread {thread}")
-        started = await client.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "slow:3"}], "clientUserMessageId": "msg-1"})
+        # A turn long enough never to end by itself here: it is interrupted once the steer is in.
+        started = await client.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "slow:1000"}], "clientUserMessageId": "msg-1"})
         turn = started["result"]["turn"]["id"]
-        await client.until(lambda: client.note("item/started") is not None)
+        await client.until(lambda: any(n["method"] == "item/started" and n["params"]["item"]["type"] == "commandExecution" for n in client.notes))
         ack = next(n for n in client.notes if n["method"] == "item/started" and n["params"]["item"]["type"] == "userMessage")
         assert ack["params"]["item"]["clientId"] == "msg-1"
         wrong = await client.call("turn/steer", {"threadId": thread, "input": [{"type": "text", "text": "x"}], "expectedTurnId": "not-it"})
@@ -409,17 +403,20 @@ async def test_codex_turn_steer_and_acknowledgement_by_client_id() -> None:
         steered = await client.call("turn/steer", {"threadId": thread, "input": [{"type": "text", "text": "echo:steered"}], "expectedTurnId": turn, "clientUserMessageId": "msg-2"})
         assert steered["result"]["turnId"] == turn
         await client.until(lambda: any(n["method"] == "item/started" and n["params"]["item"].get("clientId") == "msg-2" for n in client.notes))
-        await client.until(lambda: client.note("turn/completed") is not None)
-        completed = client.note("turn/completed")
-        assert completed is not None and completed["params"]["turn"]["status"] == "completed"
-        assert client.note("thread/tokenUsage/updated") is not None
-        items = await client.call("thread/items/list", {"threadId": thread})
-        texts = [i.get("text") for i in items["result"]["data"] if i["type"] == "agentMessage"]
-        assert "steered" in texts
+        await client.until(lambda: any(n["method"] == "item/completed" and n["params"]["item"].get("text") == "steered" for n in client.notes))
         await rig.screen_until(tui, "• steered")
-        interrupted = await client.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "slow:20"}]})
-        await client.call("turn/interrupt", {"threadId": thread, "turnId": interrupted["result"]["turn"]["id"]})
-        await client.until(lambda: any(n["method"] == "turn/completed" and n["params"]["turn"]["status"] == "interrupted" for n in client.notes))
+        await client.call("turn/interrupt", {"threadId": thread, "turnId": turn})
+        await client.until(lambda: client.note("turn/completed") is not None)
+        interrupted = client.note("turn/completed")
+        assert interrupted is not None and interrupted["params"]["turn"]["status"] == "interrupted"
+        items = await client.call("thread/items/list", {"threadId": thread})
+        assert "steered" in [i.get("text") for i in items["result"]["data"] if i["type"] == "agentMessage"]
+        done = await client.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "echo:done"}]})
+        done_id = done["result"]["turn"]["id"]
+        await client.until(lambda: any(n["method"] == "turn/completed" and n["params"]["turn"]["id"] == done_id for n in client.notes))
+        completed = next(n for n in client.notes if n["method"] == "turn/completed" and n["params"]["turn"]["id"] == done_id)
+        assert completed["params"]["turn"]["status"] == "completed"
+        assert client.note("thread/tokenUsage/updated") is not None
         await client.close()
 
 
@@ -498,7 +495,7 @@ async def test_opencode_server_events_prompt_and_permission_reply() -> None:
         _, session = await asyncio.to_thread(http, "POST", f"{base}/session", {"title": "staff"}, "pw")
         await asyncio.to_thread(http, "POST", f"{base}/tui/select-session", {"sessionID": session["id"]}, "pw")
         await asyncio.to_thread(http, "POST", f"{base}/tui/append-prompt", {"text": "perm:npm test"}, "pw")
-        assert "perm:npm test" in await term.screen()  # the operator sees the text arrive
+        await rig.screen_until(term, "perm:npm test")  # the operator sees the text arrive
         await asyncio.to_thread(http, "POST", f"{base}/tui/submit-prompt", {}, "pw")
         asked = await wait_event(events, "permission.asked")
         user = next(e for e in events if e["type"] == "message.updated" and e["properties"]["info"]["role"] == "user")
@@ -524,13 +521,17 @@ async def test_opencode_has_no_steering_and_a_taken_port_ends_it() -> None:
         await rig.screen_until(term, "enter send")
         base = f"http://127.0.0.1:{port}"
         _, session = await asyncio.to_thread(http, "POST", f"{base}/session", {})
-        await asyncio.to_thread(http, "POST", f"{base}/session/{session['id']}/prompt_async", {"parts": [{"type": "text", "text": "slow:2"}]})
+        await asyncio.to_thread(http, "POST", f"{base}/session/{session['id']}/prompt_async", {"parts": [{"type": "text", "text": "slow:1000"}]})
         await rig.screen_until(term, "Read\\(")
         await asyncio.to_thread(http, "POST", f"{base}/session/{session['id']}/prompt_async", {"parts": [{"type": "text", "text": "echo:after the turn"}]})
+        await wait(lambda: len(log_events(rig, "submitted")) == 2)
+        await rig.screen_until(term, r"file2\.txt")  # the turn went on past a tool boundary without it
+        assert "● after the turn" not in await term.screen()  # only shown as queued
+        await asyncio.to_thread(http, "POST", f"{base}/session/{session['id']}/abort", {})
         await rig.screen_until(term, "● after the turn")
         screen = (await term.screen()).splitlines()
-        worked = next(i for i, line in enumerate(screen) if "Worked through" in line)
-        assert worked < next(i for i, line in enumerate(screen) if "● after the turn" in line)  # queued, not steered
+        interrupted = next(i for i, line in enumerate(screen) if "Interrupted by user" in line)
+        assert interrupted < next(i for i, line in enumerate(screen) if "● after the turn" in line)  # queued, not steered
         clash = await rig.spawn(["opencode", str(rig.work), "--port", str(port)])
         await rig.event("terminal.exited", where={"exit_code": 1})
         assert f"Failed to start server on port {port}" in await clash.screen()
@@ -552,10 +553,12 @@ async def test_pi_bridge_sends_steers_and_acknowledges_by_id() -> None:
             writer.write((json.dumps(message) + "\n").encode())
             return dict(json.loads(await reader.readline()))
 
-        assert (await op({"op": "send", "id": "m1", "text": "slow:3"}))["ok"]
+        assert (await op({"op": "send", "id": "m1", "text": "slow:1000"}))["ok"]
         await rig.screen_until(term, "Read\\(")
         assert (await op({"op": "state"}))["idle"] is False
         await op({"op": "send", "id": "m2", "text": "echo:steered", "deliverAs": "steer"})
+        await rig.screen_until(term, "● steered")  # taken in after a tool call, inside the turn
+        assert (await op({"op": "abort"}))["ok"]
         await wait_hook(rig, "agent_settled")
         inputs = [(h["body"]["id"], h["body"]["source"]) for h in rig.hooks("pi") if h["body"]["event"] == "input"]
         assert inputs == [("m1", "extension"), ("m2", "extension")]
@@ -571,8 +574,9 @@ async def test_pi_under_tmux_loses_every_enter_and_credentials_are_a_trap() -> N
         await rig.screen_until(term, "enter send")
         await term.write(paste="echo:never")
         await term.write(keys=["Enter"])
-        await asyncio.sleep(0.2)
+        await wait(lambda: bool(log_events(rig, "enter_swallowed")))
         assert [e["reason"] for e in log_events(rig, "enter_swallowed")] == ["environment"]
+        assert not log_events(rig, "submitted")
         check = await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--json", "--no-refresh"])
         assert json.loads(check.stdout) == {"provider": "anthropic", "authenticated": True}
         await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--credentials"])
@@ -603,7 +607,7 @@ async def test_grok_session_files_and_the_preselected_permission_row() -> None:
         term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "perm:ls"], env={"GROK_DEFAULT_SELECTED_PERMISSION": "allow_once"})
         assert "❯ 1. Allow once" in await rig.screen_until(term, r"Allow Bash\?")
         await term.write(text="1")  # no digit shortcuts in this dialog
-        await asyncio.sleep(0.1)
+        await wait(lambda: bool(log_events(rig, "typed_into_dialog")))
         assert "Allow Bash?" in await term.screen()
         await term.write(keys=["Enter"])
         await rig.screen_until(term, "Ran ls")
@@ -616,7 +620,7 @@ async def test_grok_cancels_and_sends_and_runs_hooks_from_its_agent_file() -> No
         agent = rig.work / "daedalus-staff.md"
         hooks = {name: [{"hooks": [hook]}] for name in ("SessionStart", "UserPromptSubmit", "Stop", "StopCancelled")}
         agent.write_text(f"---\nname: staff\nhooks: {json.dumps(hooks)}\n---\nYou are staff.\n")
-        term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "--agent", str(agent), "slow:10"], launch_id=launch["launch_id"])
+        term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "--agent", str(agent), "slow:1000"], launch_id=launch["launch_id"])
         await rig.screen_until(term, "Read\\(")
         await term.write(paste="echo:instead")
         await term.write(keys=["Enter"])
@@ -635,9 +639,8 @@ async def test_grok_runs_the_operators_claude_hooks_unless_told_not_to() -> None
         term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "echo:a"])
         await rig.screen_until(term, "● a")
         await wait(lambda: bool(log_events(rig, "claude_hooks_ran")))
-        other = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", "9c1d7a60-2f7e-4d38-9a57-6f1f0b0e8a11", "--trust", "echo:b"], env={"GROK_COMPAT_CLAUDE_HOOKS": "0"})
-        await rig.screen_until(other, "● b")
-        await asyncio.sleep(0.2)
+        await rig.spawn(["grok", "--cwd", str(rig.work), "-s", "9c1d7a60-2f7e-4d38-9a57-6f1f0b0e8a11", "--trust", "echo:b"], env={"GROK_COMPAT_CLAUDE_HOOKS": "0"})
+        await wait(lambda: len(log_events(rig, "turn_ended")) == 2)  # its Stop hooks, if any, have run
         assert len(log_events(rig, "claude_hooks_ran")) == 1
 
 

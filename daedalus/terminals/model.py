@@ -73,6 +73,12 @@ class EnvStatus:
     public_host: str = ""
     preview_poll_ms: int = 3000
     running: int = 0
+    image_version: str = ""
+    """The daemon this installation's image carries, where the host can know it (the container
+    environment of a compose install); empty elsewhere."""
+    update_available: bool = False
+    """The running daemon is not the one in the image: recreating the service would update it, and
+    end its terminals."""
 
     def view(self) -> dict[str, Any]:
         return {
@@ -88,6 +94,8 @@ class EnvStatus:
             "public_host": self.public_host,
             "preview_poll_ms": self.preview_poll_ms,
             "running": self.running,
+            "image_version": self.image_version,
+            "update_available": self.update_available,
         }
 
 
@@ -264,6 +272,18 @@ class TimedOut(TerminalError):
     status, code = 504, "timeout"
 
 
+class LiveTerminals(TerminalError):
+    """Recreating the daemon would end running terminals, and the operator has not said yes to that."""
+
+    status, code = 409, "live_terminals"
+
+
+class NoRebuilder(TerminalError):
+    """Nothing on this installation can recreate the terminals service; the operator runs the command."""
+
+    status, code = 503, "no_rebuilder"
+
+
 __all__ = [
     "ENVS",
     "OWNER_KINDS",
@@ -278,6 +298,8 @@ __all__ = [
     "InvalidRequest",
     "Launch",
     "LaunchSpec",
+    "LiveTerminals",
+    "NoRebuilder",
     "NotFound",
     "Origin",
     "OutputChunk",

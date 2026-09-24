@@ -433,7 +433,12 @@ func (f *fixture) waitOutputSince(t *testing.T, id, want string, since int64) {
 func TestStatsCountTheDaemonsShare(t *testing.T) {
 	f := start(t)
 	f.call(t, "terminal.create", map[string]any{"id": "cost", "argv": []string{"sh", "-c", "yes | head -c 100000; exec cat"}}, nil)
-	f.waitOutput(t, "cost", "y\ny\n")
+	// Every byte read, not only the first: the ring grows as the output arrives.
+	eventually(t, "the whole output read", func() bool {
+		var info term.Info
+		f.call(t, "terminal.get", map[string]any{"id": "cost"}, &info)
+		return info.OutputSeq >= 100000
+	})
 	var s struct {
 		Terminals []struct {
 			ID          string `json:"id"`

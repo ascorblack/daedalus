@@ -75,3 +75,14 @@ export function priceFor(model: string, picked: Picked): ModelEntry["pricing"] |
   const p = picked.pricing;
   return p?.input !== undefined && p?.output !== undefined ? p : null;
 }
+
+/**
+ * The preset a project orchestrator runs unless its project names one: the one chosen in Settings,
+ * or, while none is (or the chosen one was removed), the one the host judges strongest. The select
+ * shows that one chosen, so what it shows is what runs.
+ */
+export function orchestratorPreset(presets: Record<string, Preset>, chosen: string | undefined, strongest: string | undefined): string {
+  if (chosen && chosen in presets) return chosen;
+  if (strongest && strongest in presets) return strongest;
+  return Object.keys(presets)[0] ?? "";
+}
