@@ -2561,6 +2561,27 @@ button.staff-row:hover { background: var(--surface-2); }
 .pboard-deps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
 .pboard-deps .chip { max-width: 100%; min-width: 0; }
 .pboard-notes { max-height: 180px; overflow: auto; }
+.pcard-review { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.pcard-review .chip { flex: none; }
+/* The review of a staff branch in the task sheet: a bordered block over the move buttons, every row
+   free to shrink so a long branch name or path never widens the sheet on a phone. */
+.review-panel { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 10px 12px; margin: 0 0 10px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.review-head { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); }
+.review-head .pcard-branch { flex: 0 1 auto; }
+.review-stat { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: var(--fs-13); }
+.review-commits, .review-files, .review-receipts, .review-blockers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-12); min-width: 0; }
+.review-commits li, .review-files li, .review-receipts li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.review-commits li > .truncate, .review-files li > .truncate, .review-receipts li > .truncate { flex: 1; min-width: 0; }
+.review-files li > .num { flex: none; }
+.review-receipts li.ok { color: var(--ok); }
+.review-receipts li.bad, .review-blockers li.bad { color: var(--bad); }
+.review-blockers li.attn { color: var(--warn); }
+.review-blockers li::before { content: "· "; }
+.review-actions { flex-wrap: wrap; margin: 2px 0 0; }
+.review-why { font-size: var(--fs-12); }
+.review-reject { display: flex; flex-direction: column; gap: 4px; }
+.review-reject textarea.field { resize: vertical; font: inherit; }
+.review-diff .diff-view { font-size: var(--fs-mono); }
 @media (min-width: 1024px) {
   .pboard-cols { display: grid; grid-template-columns: repeat(4, minmax(200px, 1fr)) minmax(170px, 0.8fr); gap: 12px; align-items: start; }
   .pboard-col { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; padding: 4px 6px 8px; border-radius: var(--radius-md); }
@@ -2968,3 +2989,8 @@ button.staff-row:hover { background: var(--surface-2); }
 .phone-term-title { font-family: var(--mono); font-size: var(--fs-13); font-weight: 600; }
 .phone-term-line { color: var(--fg-2); font-size: var(--fs-12); }
 .phone-term .term-env { margin-right: 0; }
+
+/* Spend where the work is: a quiet chip under the project's name, a line in each team row, the totals over the journal. */
+.focus-spend { display: flex; width: fit-content; max-width: 100%; margin-top: 4px; }
+.staff-spend { color: var(--fg-2); }
+.journal-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-12); color: var(--fg-2); margin: 0 0 10px; min-width: 0; }

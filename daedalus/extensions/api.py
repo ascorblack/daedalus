@@ -60,6 +60,7 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature, webhook_facts
 from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
 from daedalus.extensions.push import PushRefused, PushService
+from daedalus.extensions.review import ReviewRefused
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.harness.capabilities import CAPABILITIES
@@ -577,6 +578,11 @@ class BoardUpdateBody(BaseModel):
     """A staff member of the task's project; ``""`` takes the task off whoever had it."""
     brief: TaskBrief | None = None
     depends_on: list[str] | None = Field(default=None, max_length=50)
+
+
+class RejectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    note: str = Field(min_length=1, max_length=2000)
 
 
 class ProjectTaskBody(BaseModel):
@@ -3855,6 +3861,43 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except KeyError:
             raise HTTPException(404, "no such task") from None
         except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    def _review():  # type: ignore[no-untyped-def]
+        review = getattr(app.extensions.get("staff"), "review", None)
+        if review is None:
+            raise HTTPException(503, "review and merge need the staff runtime")
+        return review
+
+    @api.get("/api/board/{task_id}/review")
+    async def board_review(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What merging a task's staff branch would bring and what stands in its way; read-only."""
+        try:
+            return await _review().review(task_id)  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except ReviewRefused as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/api/board/{task_id}/merge")
+    async def board_merge(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator merges a task's staff branch as a merge commit; the task is done. 409 with the
+        reason when the folder is not clean, not on the base, or the merge would conflict."""
+        try:
+            return await _review().merge(task_id, by="operator")  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except (ReviewRefused, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/api/board/{task_id}/reject")
+    async def board_reject(task_id: str, body: RejectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator sends a task's work back from review with a note for its staff member."""
+        try:
+            return await _review().reject(task_id, body.note, by="operator")  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except (ReviewRefused, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @api.delete("/api/board/{task_id}")
