@@ -19,7 +19,8 @@ import { EnvPill } from "../terminal/dock";
 import { TerminalView } from "../terminal/view";
 import type { Team } from "../team/team";
 import { errorText } from "../ui";
-import { briefKey, journalKey, staffKey, terminalsKey, useFocus, useProject } from "./data";
+import { briefKey, journalKey, staffKey, terminalsKey, useFocus, useProject, useUsage } from "./data";
+import { spendLine, totalsLine } from "./usage";
 import { AUTONOMIES, type Autonomy } from "./focus";
 
 /** The six sections of a brief, in the host's order (daedalus/stores/projects.py). */
@@ -99,6 +100,8 @@ export const JOURNAL_KINDS = ["note", "decision", "plan", "answer", "reassignmen
 export function JournalPage({ projectId, back, toast }: { projectId: string; back?: string | null; toast: (text: string) => void }) {
   const { project } = useProject(projectId);
   const { team, board } = useFocus(projectId);
+  const usage = useUsage(projectId);
+  const orchestratorSpend = spendLine(usage?.orchestrator);
   const first = `${journalKey(projectId)}?limit=${JOURNAL_PAGE}`;
   const { data, error, refresh } = useQuery<{ entries: JournalEntry[]; next_before: number | null }>(first, { pollMs: 30000, staleMs: 5000 });
   const [older, setOlder] = useState<JournalEntry[]>([]);
@@ -145,6 +148,12 @@ export function JournalPage({ projectId, back, toast }: { projectId: string; bac
     <>
       <PageHeader title={project ? t("focus.journal.title", { name: project.name }) : t("focus.page.journal")} back={back ?? undefined} />
       <div className="screen narrow journal">
+        {usage && (
+          <div className="journal-usage" aria-label={t("pusage.title")}>
+            <span className="num">{totalsLine(usage)}</span>
+            {orchestratorSpend && <span className="sub">{t("pusage.orchestrator", { line: orchestratorSpend })}</span>}
+          </div>
+        )}
         <form className="journal-note" onSubmit={(e) => { e.preventDefault(); void add(); }}>
           <textarea className="field" rows={2} value={note} maxLength={4000} placeholder={t("focus.journal.placeholder")} aria-label={t("focus.journal.placeholder")} onChange={(e) => setNote(e.target.value)} />
           <button className="btn small primary" type="submit" disabled={busy || !note.trim()}>{t("focus.journal.add")}</button>

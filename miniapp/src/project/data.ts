@@ -9,6 +9,7 @@ import { useEvent, useStreamUp } from "../events";
 import { useProjects } from "../projects";
 import { invalidate, useQuery } from "../store";
 import type { Team } from "../team/team";
+import { ProjectUsage, usageKey } from "./usage";
 
 const enc = encodeURIComponent;
 
@@ -80,4 +81,14 @@ export function useAsks(projectId: string | null): Map<string, Ask> {
     for (const ask of data?.asks ?? []) if (!byShort.has(ask.short_id)) byShort.set(ask.short_id, ask);
     return byShort;
   }, [data]);
+}
+
+/** What the project spends. Spend moves with every model call, so it is read again when a run of the
+ *  project ends and otherwise once a minute. */
+export function useUsage(projectId: string) {
+  const { data } = useQuery<ProjectUsage>(usageKey(projectId), { pollMs: 60000, staleMs: 10000 });
+  useEvent(["run.finished", "staff.status"], (event) => {
+    if (event.project_id === projectId) invalidate(usageKey(projectId));
+  }, [projectId]);
+  return data && data.total ? data : null;
 }

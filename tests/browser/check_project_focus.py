@@ -41,6 +41,8 @@ WORDS = {
         "answered": "Answered: Before delivery", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
         "note": "Add a note", "enable": "Switch the orchestrator on", "on": "Switch on", "cost": "fifteen times", "pause": "Pause after the turn", "accepted": "accepted",
         "entry": "orchestrator", "needs": "1 needs you", "autonomy": "autonomy: normal",
+        "spent": "$2.05 today", "levspend": "$1.20 today · 412k tokens", "iraspend": "subscription · window 23 %", "totals": "Today $2.05 · 7 days $10.90 · All $33.80",
+        "orchspend": "Orchestrator: $0.85 today · 96k tokens",
     },
     "ru": {
         "all": "Все проекты", "orchestrator": "Оркестратор", "team": "Команда", "oneoff": "Разовые", "terminals": "Терминалы", "board": "Доска", "brief": "Бриф",
@@ -49,6 +51,8 @@ WORDS = {
         "answered": "Ответ: До доставки", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
         "note": "Добавить заметку", "enable": "Включить оркестратор", "on": "Включить", "cost": "в пятнадцать раз", "pause": "После хода — пауза", "accepted": "принято",
         "entry": "оркестратор", "needs": "1 ждёт вас", "autonomy": "самостоятельность: обычная",
+        "spent": "$2.05 сегодня", "levspend": "$1.20 сегодня · токенов: 412k", "iraspend": "подписка · окно 23 %", "totals": "Сегодня $2.05 · 7 дней $10.90 · Всего $33.80",
+        "orchspend": "Оркестратор: $0.85 сегодня · токенов: 96k",
     },
 }
 
@@ -111,6 +115,8 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(side.locator(".focus-staff", has_text="Naya").locator(".focus-dot")).to_have_class(re.compile(r"\btone-waiting\b"))
     expect(side.locator(".focus-row", has_text="bash · bakery-api")).to_be_visible()
     expect(side.locator(".focus-row.ended", has_text="psql · orders")).to_contain_text("0")
+    # Today's spend of the whole project under its name.
+    expect(side.locator(".focus-spend")).to_have_text(words["spent"])
     for label in ("board", "brief", "wakeups", "journal", "folders"):
         expect(side.locator(".focus-row", has_text=words[label])).to_have_count(1)
     expect(side.locator(".focus-row", has_text=words["wakeups"]).locator(".focus-row-meta")).to_have_text("1")
@@ -175,6 +181,9 @@ def desktop(page: Page, lang: str, width: int) -> None:
     side.locator(".focus-row", has_text=words["journal"]).click()
     page.wait_for_url(f"**/app/project/{PID}/journal")
     expect(page.locator(".journal-entry")).to_have_count(30)
+    # What the project spends, over the journal: the totals and the orchestrator's own share today.
+    expect(page.locator(".journal-usage")).to_contain_text(words["totals"])
+    expect(page.locator(".journal-usage")).to_contain_text(words["orchspend"])
     expect(page.locator(".journal-entry").first.locator(".chip.author")).to_be_visible()
     page.get_by_role("button", name=words["older"]).click()
     expect(page.locator(".journal-entry")).to_have_count(35)
@@ -211,6 +220,11 @@ def phone(page: Page, lang: str) -> None:
     for where in ("journal", "brief", "team", "board"):
         page.goto(f"{BASE}/project/{PID}/{where}?token=t&lang={lang}")
         expect(page.locator(".pagehead .iconbtn[href]").first).to_be_visible()
+        if where == "team":
+            # Each member's spend where the member is: dollars and tokens, or the subscription window used.
+            expect(page.locator(".staff-row", has_text="Lev").locator(".staff-spend")).to_have_text(WORDS[lang]["levspend"])
+            expect(page.locator(".staff-row", has_text="Ira").locator(".staff-spend")).to_have_text(WORDS[lang]["iraspend"])
+            expect(page.locator(".staff-row", has_text="Max").locator(".staff-spend")).to_have_count(0)
         fits(page, f"{lang} phone {where}")
 
 

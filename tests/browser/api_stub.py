@@ -193,6 +193,12 @@ def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
         return 404, "application/json", json.dumps({"detail": "no such notification"})
     if path in GATES:
         return 200, "application/json", json.dumps(GATES[path])
+    parts = path.split("/")
+    if method.upper() == "GET" and len(parts) == 5 and parts[2] == "projects" and parts[4] == "usage":
+        # A project nobody invented spend for spent nothing; a harness with a team answers it itself.
+        nothing = {w: {"usd": 0.0, "tokens": 0, "unpriced": 0} for w in ("today", "week", "all")}
+        line = {**nothing, "subscription": None}
+        return 200, "application/json", json.dumps({"project_id": parts[3], "since": {}, "staff": [], "orchestrator": line, "other": line, "total": line})
     return None
 
 
@@ -300,6 +306,26 @@ class TeamStub:
         self.personas = personas if personas is not None else ["reviewer", "tester"]
         self.hired: list[dict] = []
         self.patched: list[dict] = []
+        self.spend: dict[str, dict] = {}
+        """What each member spent, ``staff_id -> {"today": {...}, "subscription": ...}``; the rest spent nothing."""
+        self.orchestrator_spend: dict | None = None
+
+    @staticmethod
+    def spent(usd: float = 0.0, tokens: int = 0, *, unpriced: int = 0, week: float | None = None, total: float | None = None, subscription: float | None = None) -> dict:
+        """One usage line: today's spend, the week and all-time totals (at least today's), a subscription window."""
+        today = {"usd": usd, "tokens": tokens, "unpriced": unpriced}
+        return {
+            "today": today, "week": {**today, "usd": week if week is not None else usd}, "all": {**today, "usd": total if total is not None else (week if week is not None else usd)},
+            "subscription": {"window_used_pct": subscription, "source": "subscription"} if subscription is not None else None,
+        }
+
+    def usage(self) -> dict:
+        """The answer of ``GET /api/projects/{id}/usage``: every member, the orchestrator, and the sums."""
+        nothing = self.spent()
+        rows = [{"staff_id": m["id"], "name": m["name"], "harness": m["harness"], "archived": bool(m["archived_at"]), **self.spend.get(m["id"], nothing)} for m in self.staff]
+        orchestrator = self.orchestrator_spend or nothing
+        total = {w: {k: round(sum(line[w][k] for line in [*rows, orchestrator]), 4) for k in ("usd", "tokens", "unpriced")} for w in ("today", "week", "all")}
+        return {"project_id": self.project["id"], "since": {}, "staff": rows, "orchestrator": orchestrator, "other": nothing, "total": {**total, "subscription": None}}
 
     @staticmethod
     def member(id_: str, name: str, *, harness: str = "daedalus", status: str = "off", sessions: int = 0, **fields: object) -> dict:
@@ -326,6 +352,8 @@ class TeamStub:
         """``(status, body)`` for a route of the team, or None for anything else."""
         if path == "/api/harnesses/catalog":
             return (200, self.catalog) if self.catalog is not None else (404, {"detail": "Not Found"})
+        if path == f"/api/projects/{self.project['id']}/usage" and method == "GET":
+            return 200, self.usage()
         if path == f"/api/projects/{self.project['id']}/staff":
             if method == "GET":
                 return 200, self.listing("archived=1" in query)
@@ -716,6 +744,8 @@ class FocusStub:
             member["project_id"] = pid
         team = TeamStub({**bakery}, staff=staff)
         team.project["orchestrator"] = True
+        team.spend = {"st-lev": TeamStub.spent(1.2, 412_000, week=6.8, total=21.5), "st-ira": TeamStub.spent(0, 380_000, subscription=23)}
+        team.orchestrator_spend = TeamStub.spent(0.85, 96_000, week=4.1, total=12.3)
 
         ira = BoardStub.assignee("st-ira", "Ira", harness="claude", color="orange", status="working", on_task=True)
         tasks = [

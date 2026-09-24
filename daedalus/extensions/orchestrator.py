@@ -19,7 +19,6 @@ return at once; the answer arrives as an ``ask.answered`` event in a later wake-
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, tzinfo
@@ -29,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from daedalus.extensions import orchestrator_ops, orchestrator_team
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
+from daedalus.extensions.project_usage import ProjectUsage
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
@@ -601,29 +601,14 @@ class Orchestrators:
         return f"[{ask.short_id}] {asker} ({ask.kind}): {_one_line(ask.text, 160)} ({_age(ask.created_at, now)}){suggestion}"
 
     async def _spend_line(self, project_id: str, now: datetime) -> str:
-        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        rows = await self.manager.db.fetchall(
-            "SELECT s.metadata AS metadata, sum(u.cost_usd) AS usd, sum(u.input_tokens + u.output_tokens) AS tokens "
-            "FROM usage_events u JOIN sessions s ON s.id = u.session_id WHERE s.project_id = ? AND u.at >= ? GROUP BY s.id",
-            (project_id, since),
-        )
-        mine = staff = other = 0.0
-        tokens = 0
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata"] or "{}")
-            except (TypeError, ValueError):
-                metadata = {}
-            usd = float(row["usd"] or 0.0)
-            tokens += int(row["tokens"] or 0)
-            if metadata.get("orchestrator_of") or metadata.get("orchestrator_retired_of"):
-                mine += usd
-            elif metadata.get("staff_session_id"):
-                staff += usd
-            else:
-                other += usd
-        extra = f" · other sessions ${other:.2f}" if other else ""
-        return f"Spend today: orchestrator ${mine:.2f} · staff ${staff:.2f}{extra} (tokens: {_tokens(tokens)})"
+        """Today's spend, read by the same summary the app shows, so the orchestrator and the operator
+        never see two different numbers for one project."""
+        usage = await ProjectUsage(self.manager).summary(project_id, now=now)
+        mine, other, total = usage["orchestrator"]["today"], usage["other"]["today"], usage["total"]["today"]
+        staff = sum(member["today"]["usd"] for member in usage["staff"])
+        extra = f" · other sessions ${other['usd']:.2f}" if other["usd"] else ""
+        unpriced = f" · {total['unpriced']} unpriced" if total["unpriced"] else ""
+        return f"Spend today: orchestrator ${mine['usd']:.2f} · staff ${staff:.2f}{extra} (tokens: {_tokens(total['tokens'])}){unpriced}"
 
     def _zone(self) -> tzinfo:
         """The operator's time zone, as their app last reported it: the times in a batch are theirs."""

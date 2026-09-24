@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from daedalus.extensions.project_usage import ProjectUsage
 from daedalus.stores.projects import FolderSpec, Project, ProjectError, ProjectFolder, ProjectSettings
 
 if TYPE_CHECKING:
@@ -416,6 +417,13 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         session_id = orchestrator.session_id if orchestrator.enabled else ""
         text = await orchestrators().project_state(project, session_id=session_id or None)
         return {"project_id": project_id, "session_id": session_id or None, "text": text, "chars": len(text), "max_chars": manager.config.orchestrator.state_max_chars}
+
+    @api.get("/api/projects/{project_id}/usage")
+    async def project_usage(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What the project spends: per staff member, its orchestrator and its other sessions, today, over
+        the last 7 days and in all, with calls nobody priced counted apart."""
+        await existing(project_id)
+        return await ProjectUsage(manager).summary(project_id)
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

@@ -696,6 +696,14 @@ Without a forum (private mode) the same posts come to the private chat under `[p
 reply to one goes to that project's orchestrator rather than to the chat's current session. Without a
 bot, nothing of this exists and the app has it all.
 
+**What a project spends.** `GET /api/projects/{id}/usage` answers `{"staff", "orchestrator", "other",
+"total"}`, each with `today` (the operator's day), `week` (the last 7 days) and `all`, as `{"usd",
+"tokens", "unpriced"}`. A Daedalus member is charged for its sessions and their subagents, counted once;
+a command-line member for the latest usage its CLI reported, with `subscription` holding the share of the
+subscription window used. Calls nobody priced are counted in `unpriced`, never as zero dollars. The team
+rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
+the same numbers.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
