@@ -213,6 +213,10 @@ async def test_a_sessions_agent_reads_a_real_terminal(db: Database, base: Path, 
         # With or without an emulator in the daemon, "screen" answers with what the terminal says.
         screen = await terminal_read().invoke(ctx, {"what": "screen"})
         assert not screen.is_error and "3 failing" in str(screen.content)
+        emulator = str((service.links["container"].info.get("capabilities") or {}).get("emulator") or "")
+        if not emulator.startswith("basic"):
+            # A daemon that keeps the screen answers from it, not from the output.
+            assert "could not be read" not in str(screen.content) and "— screen " in str(screen.content)
         listed = await terminal_read().invoke(ctx, {"what": "list"})
         assert view["id"] in str(listed.content)
     finally:
