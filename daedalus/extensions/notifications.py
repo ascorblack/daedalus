@@ -16,6 +16,9 @@ a permission request, a staff member's turn — into drafts, and resolves a noti
 request is answered anywhere. A request can be answered from the notification itself through
 :meth:`NotificationService.act`: the first answer wins, the second is told what the first one was.
 
+An agent reaches the operator itself through the ``Notify`` tool, which posts through the same
+service (:class:`AgentNotifier`) under a budget of its own; subagents and staff do not have it.
+
 What the router never does: post into a project's Telegram topic (the orchestrator speaks there), put
 a detached session on Telegram at any level, or do anything Telegram-related when no bot is bound.
 """
@@ -26,11 +29,14 @@ import asyncio
 import inspect
 import json
 import logging
+import re
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, get_args
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast, get_args
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
@@ -1041,6 +1047,208 @@ def _policy_resolver(manager: SessionManager) -> Resolver:
     return resolve
 
 
+NOTIFY_TITLE_MAX = 120
+NOTIFY_BODY_MAX = 1_000
+NOTIFY_KEY_MAX = 80
+NOTIFY_LEVELS: tuple[str, ...] = LEVELS
+_NOTIFY_KEY = re.compile(r"^[A-Za-z0-9._:/-]+$")
+
+LEADER_ONLY_METADATA = ("subagent_of", "staff_session_id", "staff_id")
+"""Sessions that reach the operator through someone else: a subagent through its leader, a staff
+member through its orchestrator. The tool is withheld from them; the hook refuses them as well."""
+
+HELD_BACK_REASONS: dict[str, str] = {
+    "present": "the operator has the app open",
+    "quiet hours": "quiet hours",
+    "muted": "the project is muted",
+    "rate limit": "the push limit",
+    "repeat": "a repeat of one not yet seen",
+    "sent to Telegram": "it went to Telegram",
+}
+"""Why a channel stayed silent, for the reasons the agent can learn from, in its words. "off" and
+"no device" are the operator's arrangement, not something the agent should try to work around."""
+
+
+class NotifyRefused(ValueError):
+    """``Notify`` was not sent: the arguments are wrong, the session may not use it, or its budget is spent."""
+
+
+@dataclass(frozen=True)
+class NotifyFacts:
+    """What the ``Notify`` hook needs to know about the calling session."""
+
+    metadata: Mapping[str, Any]
+    project_id: str | None = None
+
+
+def check_notify(title: str, body: str, level: str, link: str, key: str) -> tuple[str, str, Level, str, str]:
+    """Validate the tool's arguments; returns them cleaned, or raises :class:`NotifyRefused` naming what is accepted."""
+    title, body, link, key = title.strip(), body.strip(), link.strip(), key.strip()
+    if not title:
+        raise NotifyRefused("title is required: one line saying what happened")
+    if len(title) > NOTIFY_TITLE_MAX:
+        raise NotifyRefused(f"title is {len(title)} characters; at most {NOTIFY_TITLE_MAX} (put the rest in body)")
+    if len(body) > NOTIFY_BODY_MAX:
+        raise NotifyRefused(f"body is {len(body)} characters; at most {NOTIFY_BODY_MAX} (point to a file for the rest)")
+    if level not in NOTIFY_LEVELS:
+        raise NotifyRefused(f"level {level!r} is not one of: {', '.join(NOTIFY_LEVELS)}")
+    # A link is opened by a click on the operator's device, so it is either a page of the app or a
+    # secure address: never javascript:, a file path, or plain http that a network could rewrite.
+    if (link and not (link.startswith("/app/") or link.startswith("https://"))) or any(c.isspace() for c in link):
+        raise NotifyRefused("link must be empty (this session), an app path starting with /app/, or an https:// URL")
+    if len(key) > NOTIFY_KEY_MAX or (key and not _NOTIFY_KEY.match(key)):
+        raise NotifyRefused(f"key must be at most {NOTIFY_KEY_MAX} characters of letters, digits and . _ : / -")
+    return title, body, cast(Level, level), link, key
+
+
+class NotifyBudget:
+    """How often one session may call ``Notify``: ``per_session`` within ``window``, and ``urgent_per_hour``.
+
+    Kept in memory: a restart gives every session a fresh budget, which costs at most one more burst
+    and saves a table for a limit that exists only against a loop. A call the budget refuses costs
+    nothing, and neither does one that failed to post.
+    """
+
+    def __init__(self, clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+        self._clock = clock
+        self._sent: dict[str, deque[datetime]] = {}
+        self._urgent: dict[str, deque[datetime]] = {}
+
+    @staticmethod
+    def _trim(times: deque[datetime], now: datetime, window: timedelta) -> deque[datetime]:
+        while times and now - times[0] >= window:
+            times.popleft()
+        return times
+
+    def take(self, session_id: str, urgent: bool, prefs: NotificationsConfig) -> tuple[datetime | None, str, bool]:
+        """Spend one call, or return the moment the next is possible, the limit that said no, and
+        whether only the urgent limit did (a normal notification would still go)."""
+        now = self._clock()
+        window = timedelta(minutes=prefs.notify_tool_window_minutes)
+        sent = self._trim(self._sent.setdefault(session_id, deque()), now, window)
+        hour = timedelta(hours=1)
+        urgent_sent = self._trim(self._urgent.setdefault(session_id, deque()), now, hour)
+        if len(sent) >= prefs.notify_tool_per_session:
+            return sent[len(sent) - prefs.notify_tool_per_session] + window, (
+                f"{prefs.notify_tool_per_session} notifications in {prefs.notify_tool_window_minutes} minutes is the limit"
+            ), False
+        if urgent and len(urgent_sent) >= prefs.notify_tool_urgent_per_hour:
+            if prefs.notify_tool_urgent_per_hour == 0:
+                return None, "urgent notifications from agents are switched off", True
+            return urgent_sent[len(urgent_sent) - prefs.notify_tool_urgent_per_hour] + hour, (
+                f"{prefs.notify_tool_urgent_per_hour} urgent notifications an hour is the limit"
+            ), True
+        sent.append(now)
+        if urgent:
+            urgent_sent.append(now)
+        return None, "", False
+
+    def refund(self, session_id: str, urgent: bool) -> None:
+        with suppress(KeyError, IndexError):
+            self._sent[session_id].pop()
+        if urgent:
+            with suppress(KeyError, IndexError):
+                self._urgent[session_id].pop()
+
+
+def _clock_text(moment: datetime, zone: str) -> str:
+    try:
+        tz = ZoneInfo(zone) if zone else ZoneInfo("UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+    local = moment.astimezone(tz)
+    return local.strftime("%H:%M") + ("" if zone else " UTC")
+
+
+def notify_outcome(view: NotificationView | None) -> str:
+    """What happened to a notification, in words the agent that sent it can act on."""
+    if view is None:
+        return "Not recorded: the operator is reading this session right now."
+    delivered = view["delivered"]
+    in_app = str(delivered.get("in_app") or "")
+    if in_app == "seen: attending":
+        return "Recorded: the operator is looking at this session, so nothing was sent; they have seen it."
+    if in_app == "recorded: quiet":
+        return "Recorded quietly in the notifications: no sound, no badge."
+    reached: list[str] = []
+    if in_app == "toast":
+        reached.append("in the app")
+    push = delivered.get("push")
+    if isinstance(push, Mapping) and int(push.get("sent") or 0) > 0:
+        count = int(push["sent"])
+        reached.append(f"to {count} device{'s' if count != 1 else ''}")
+    if delivered.get("desktop") == "sent":
+        reached.append("on the desktop")
+    if delivered.get("telegram") in ("session", "general"):
+        reached.append("to Telegram")
+    verb = "Updated" if view["count"] > 1 else "Sent"
+    if reached:
+        head = f"{verb}: {reached[0] if len(reached) == 1 else ', '.join(reached[:-1]) + ' and ' + reached[-1]}."
+    else:
+        head = f"{verb} in the notifications without a sound."
+    held: dict[str, list[str]] = {}
+    for channel in ("push", "desktop", "telegram"):
+        reason = delivered.get(channel)
+        if isinstance(reason, str) and reason.removeprefix("skipped: ") in HELD_BACK_REASONS:
+            held.setdefault(HELD_BACK_REASONS[reason.removeprefix("skipped: ")], []).append(channel)
+    return head + "".join(f" Not {_listed(channels)}: {why}." for why, channels in held.items())
+
+
+_CHANNEL_WORDS = {"push": "pushed", "desktop": "on the desktop", "telegram": "to Telegram"}
+
+
+def _listed(channels: Sequence[str]) -> str:
+    words = [_CHANNEL_WORDS[c] for c in channels]
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+
+
+class AgentNotifier:
+    """The service behind the ``Notify`` tool: who may call it, how often, and what the call became.
+
+    Everything else — the matrix, quiet hours, presence, Telegram — is the router's, exactly as for
+    any other notification: the tool posts a draft and reports the outcome, it never publishes on its own.
+    """
+
+    def __init__(
+        self,
+        service: NotificationService,
+        facts: Callable[[str], Awaitable[NotifyFacts | None]],
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.service = service
+        self._facts = facts
+        self.budget = NotifyBudget(clock)
+
+    async def notify(self, *, session_id: str, title: str, body: str = "", level: str = "normal", link: str = "", key: str = "") -> str:
+        """Post the agent's notification; returns the outcome in words, or raises :class:`NotifyRefused`."""
+        title, body, checked_level, link, key = check_notify(title, body, level, link, key)
+        facts = await self._facts(session_id)
+        if facts is None:
+            raise NotifyRefused("this session is not running here")
+        if any(facts.metadata.get(name) for name in LEADER_ONLY_METADATA):
+            raise NotifyRefused("Notify is not for this session: your work reaches the operator through the agent that gave it to you")
+        urgent = checked_level == "urgent"
+        prefs = self.service.preferences()
+        next_at, limit, urgent_only = self.budget.take(session_id, urgent, prefs)
+        if limit:
+            zone = self.service.presence.locale()[1] if self.service.presence is not None else ""
+            text = f"Not sent: {limit}" + (f"; the next is possible at {_clock_text(next_at, zone)}." if next_at is not None else ".")
+            raise NotifyRefused(text + (" The same with level 'normal' can go now." if urgent_only else ""))
+        try:
+            view = await self.service.post(Draft(
+                "agent_notify", title, body, kind="agent", level=checked_level, tone="info",
+                session_id=session_id, project_id=facts.project_id,
+                link=link or f"/app/agents/{session_id}",
+                dedupe_key=f"agent:{session_id}:{key}" if key else None,
+                source=f"agent:{session_id}",
+            ))
+        except BaseException:
+            self.budget.refund(session_id, urgent)
+            raise
+        return notify_outcome(view)
+
+
 def format_entries(entries: Iterable[NotificationView]) -> str:
     """The ``/inbox`` digest: one line an entry, newest first."""
     icons = {"ok": "✓", "info": "·", "warning": "⚠️", "error": "❌"}
@@ -1081,6 +1289,15 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         await service.resolve_session(session_id, "withdrawn", via="deleted", prefixes=tuple(service._resolvers))
 
     manager.delete_hooks.append(on_delete)
+
+    async def notify_facts(session_id: str) -> NotifyFacts | None:
+        state = await manager.get_state(session_id)
+        if state is None:
+            return None
+        return NotifyFacts(metadata=state.metadata, project_id=state.project.id if state.project is not None else None)
+
+    notifier = AgentNotifier(service, notify_facts)
+    manager.service_hooks["notify"] = notifier.notify
     tasks = [
         manager.bus.on(EventFilter(types=ROUTED_EVENTS), router.handle, name="notifications"),
         asyncio.create_task(service.keep_holds(), name="notification-holds"),
@@ -1114,6 +1331,8 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
 
 __all__ = [
     "CATEGORIES",
+    "NOTIFY_BODY_MAX",
+    "NOTIFY_TITLE_MAX",
     "LEVELS",
     "TONES",
     "VIEWS",
@@ -1122,6 +1341,7 @@ __all__ = [
     "ActionOutcome",
     "ActionRefused",
     "ActionRequest",
+    "AgentNotifier",
     "Category",
     "Channel",
     "Draft",
@@ -1131,10 +1351,15 @@ __all__ = [
     "NotificationService",
     "NotificationSummary",
     "NotificationView",
+    "NotifyBudget",
+    "NotifyFacts",
+    "NotifyRefused",
     "ProjectNotifyPolicy",
     "Tone",
     "View",
+    "check_notify",
     "format_entries",
     "install",
+    "notify_outcome",
     "split_ref",
 ]

@@ -172,6 +172,9 @@ def build_engine(
         prompts.HISTORY,
         prompts.BOARD,
         prompts.SCHEDULING,
+        # Only where the tool can be called: a subagent or a staff member told how to notify the
+        # operator would try, be refused, and spend a turn learning that its leader speaks for it.
+        prompts.NOTIFY if "Notify" in all_tools and (tool_visibility_policy is None or "Notify" not in tool_visibility_policy.blocked) else "",
         (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
         prompts.environment_section(
             workspace=workspace,

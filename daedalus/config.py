@@ -825,8 +825,12 @@ class NotificationsConfig(BaseModel):
     push_per_hour: int = Field(default=60, ge=1)
     """The ceiling across every session, against a loop that has gone wrong."""
     notify_tool_per_session: int = Field(default=5, ge=1)
+    """How many times one session may call ``Notify`` within ``notify_tool_window_minutes``. Stricter
+    than the push budget, because an agent that decides to talk to the operator outside its chat is
+    the one producer that can decide to do it in a loop."""
     notify_tool_window_minutes: int = Field(default=10, ge=1)
     notify_tool_urgent_per_hour: int = Field(default=2, ge=0)
+    """Urgent breaks through quiet hours, so one session gets few of them; 0 takes urgent away from agents."""
     orchestrator_hold_seconds: int = Field(default=60, ge=0)
     """How long a staff member's question waits for its orchestrator before it reaches the operator."""
 
@@ -1034,14 +1038,22 @@ STAFF_BLOCKED_TOOLS = [
     "SelfRebuild",
     "SelfRollback",
     "SelfWorkspace",
+    "Notify",
 ]
 """What a staff member of a project may not call. It asks the orchestrator, not the operator
-(``AskOrchestrator``), works on the task it was given rather than starting agents, schedules, loops
-or intents of its own, and never changes the installation. Enforced by the host beside the voice rule,
+(``AskOrchestrator``), reports to the orchestrator rather than notifying the operator itself, works
+on the task it was given rather than starting agents, schedules, loops or intents of its own, and
+never changes the installation. Enforced by the host beside the voice rule,
 not through a mode, so editing a mode cannot hand a staff member any of them."""
 
 STAFF_ONLY_TOOLS = ["Report", "AskOrchestrator"]
 """The tools that exist for staff alone; every other session is blocked from them."""
+
+SUBAGENT_BLOCKED_TOOLS = ["Notify"]
+"""What a subagent may not call, whoever its leader is. Its work reaches the operator through the
+agent that started it, which decides what is worth the operator's attention; a subagent that could
+notify on its own would put a dozen workers' progress on the operator's phone. Enforced by the host
+beside the staff rule, so no mode or leader can hand it back."""
 
 
 class WebhookConfig(BaseModel):
@@ -1710,4 +1722,5 @@ __all__ = [
     "VOICE_ONLY_TOOLS",
     "STAFF_BLOCKED_TOOLS",
     "STAFF_ONLY_TOOLS",
+    "SUBAGENT_BLOCKED_TOOLS",
 ]

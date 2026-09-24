@@ -48,6 +48,7 @@ from daedalus.config import (
     REASONING_EFFORTS,
     STAFF_BLOCKED_TOOLS,
     STAFF_ONLY_TOOLS,
+    SUBAGENT_BLOCKED_TOOLS,
     VOICE_ONLY_TOOLS,
     VOICE_TOOLS,
     NoModelConfigured,
@@ -3685,6 +3686,10 @@ class SessionManager:
         # than starting agents, schedules or loops; its two reporting tools are its alone. Beside the
         # voice rule and for the same reason: no mode edit can hand either side the other's tools.
         blocked |= (known & set(STAFF_BLOCKED_TOOLS)) if self.is_staff(state) else (known & set(STAFF_ONLY_TOOLS))
+        # A subagent reaches the operator through its leader, never past it. Its descendants inherit
+        # this through the parent chain below, and a staff member's subagents through both rules.
+        if state.metadata.get("subagent_of"):
+            blocked |= known & set(SUBAGENT_BLOCKED_TOOLS)
         mode = self.mode_for(state)
         if mode is not None:
             if mode.tools_only:
