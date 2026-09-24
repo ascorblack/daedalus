@@ -20,6 +20,7 @@ from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
 
+from daedalus.extensions.notifications import Draft
 from daedalus.host.prompts import split_headline, without_turn_context
 from daedalus.host.session_runner import TENANT, transcript_for_summary
 
@@ -229,9 +230,8 @@ class Learning:
         data = await self.report(every)
         if data["runs"] == 0:
             return False  # a quiet week does not arm the gate; the first busy week gets its digest
-        inbox = self.app.extensions.get("inbox")
-        if inbox is not None:
-            await inbox.post("learning_digest", f"Digest: {data['runs']} runs, {len(data['candidates'])} improvement candidate(s)", self.render(data), severity="notice" if data["candidates"] else "info")
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft("system", f"Digest: {data['runs']} runs, {len(data['candidates'])} improvement candidate(s)", self.render(data), kind="learning_digest", level="quiet", source="learning"))
         await self.app.db.kv_set("learning_last_digest", datetime.now(UTC).isoformat())  # after the post, so a restart in between cannot lose a week
         return True
 

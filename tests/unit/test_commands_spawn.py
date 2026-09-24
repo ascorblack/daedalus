@@ -11,7 +11,7 @@ from protocore.contracts.tools import ToolContext
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions import commands as slash
 from daedalus.extensions.board import Board
-from daedalus.extensions.inbox import Inbox
+from daedalus.extensions.notifications import NotificationService
 from daedalus.extensions.peers import Peers
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
@@ -54,7 +54,7 @@ async def test_commands_run_without_the_chat_front(settings: Settings, db: Datab
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, db, manager, config)
-    app.extensions["inbox"] = Inbox(app)
+    app.notifications = NotificationService(db, manager.bus)
     state = await manager.create_session("s")
     sid = state.session.id
 

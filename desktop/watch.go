@@ -63,8 +63,10 @@ func firstLine(out string) string {
 
 // stackStatus is the part of the app's own status the launcher reads.
 type stackStatus struct {
-	InboxUnread int `json:"inbox_unread"`
-	Sessions    []struct {
+	Notifications struct {
+		Unseen int `json:"unseen"`
+	} `json:"notifications"`
+	Sessions []struct {
 		ID     string `json:"id"`
 		Title  string `json:"title"`
 		Status string `json:"status"`
@@ -124,15 +126,15 @@ func fetchStatus(ctx context.Context, client *http.Client, base, token string) (
 // waiting and started again.
 func changes(status stackStatus, unread *int, waiting map[string]bool, base string) []Notification {
 	var out []Notification
-	if *unread >= 0 && status.InboxUnread > *unread {
+	if *unread >= 0 && status.Notifications.Unseen > *unread {
 		out = append(out, Notification{
 			Title: "Daedalus",
-			Body:  inboxLine(status.InboxUnread - *unread),
+			Body:  inboxLine(status.Notifications.Unseen - *unread),
 			Link:  base + "/app/inbox",
 		})
 	}
 	seeding := *unread < 0
-	*unread = status.InboxUnread
+	*unread = status.Notifications.Unseen
 	present := map[string]bool{}
 	for _, session := range status.Sessions {
 		if session.Status != "waiting" {

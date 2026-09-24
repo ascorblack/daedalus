@@ -9,10 +9,10 @@ import pytest
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.board import Board
-from daedalus.extensions.inbox import Inbox
 from daedalus.extensions.peers import Peers
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.notifications import RecordingNotifications
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ async def app(settings: Settings, db: Database) -> Any:
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = RecordingNotifications()
     yield app
     await manager.close()
 
@@ -136,8 +136,8 @@ async def test_board_hands_back_quiet_tasks(app: Any) -> None:
     await app.db.execute("UPDATE board_tasks SET heartbeat_at = '2020-01-01T00:00:00+00:00', updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (t["id"],))
     assert await board.recover_stale() == [t["id"]]
     assert (await board.get(t["id"]))["status"] == "todo"
-    entries = await app.extensions["inbox"].list()
-    assert entries and entries[0]["kind"] == "board_stale"
+    [draft] = app.notifications.drafts
+    assert (draft.kind, draft.level) == ("board_stale", "quiet")
 
 
 async def test_peers_register_ask_and_depth(app: Any) -> None:
