@@ -229,9 +229,16 @@ export type TerminalView = {
   } | null;
   last_command?: { command: string; exit_code: number | null; at: string } | null;
   preview?: TerminalRun[][];
+  /** Who made it: "operator", or "agent:<actor>" for one an agent opened. */
+  created_by?: string;
   /** Filled by other parts of the app (a staff member's status, a pending permission); null otherwise. */
-  activity?: unknown;
+  activity?: TerminalActivity | null;
 };
+
+/** What another part of the app says a terminal is doing: a line for its card and, when something
+ *  waits on the operator, the button that answers it ("Answer" on a permission). Both are optional:
+ *  the Terminals screen falls back to its own status line and to Open. */
+export type TerminalActivity = { label?: string; level?: "ok" | "warn" | "bad"; action?: { label: string; path: string } };
 
 export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
 

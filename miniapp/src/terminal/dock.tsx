@@ -9,12 +9,13 @@
 
 import { CSSProperties, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, ApiError, TerminalCreate, TerminalEnv, TerminalEnvName, TerminalList, TerminalView as TerminalRow } from "../api";
+import { api, TerminalCreate, TerminalEnv, TerminalEnvName, TerminalList, TerminalView as TerminalRow } from "../api";
 import { confirmDialog, MenuItem, OverflowMenu, Sheet } from "../dialogs";
 import { plural, t } from "../i18n";
 import { Icon } from "../icons";
 import { useQuery } from "../store";
 import { errorText } from "../ui";
+import { createTerminalConfirmed, endTerminal } from "./actions";
 import { clampHeight, closeTab, DockState, loadDock, loadSandboxChoice, openTab, prune, replaceTab, sandboxOffer, sandboxToggle, saveDock, saveSandboxChoice, setSplit, splitCandidate, toggleDock } from "./dockstate";
 import type { TerminalState } from "./instance";
 import { instanceFor, setTerminalEnvs, terminals } from "./terminals";
@@ -125,29 +126,15 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
         }
         body.sandbox = true;
       }
-      let row: TerminalRow;
+      let row: TerminalRow | null;
       try {
-        row = await api.createTerminal(body);
+        // The machine-wide cap is a question for the operator, not a refusal (`actions.ts`).
+        row = await createTerminalConfirmed(body);
       } catch (error) {
-        // The machine-wide cap is a question for the operator, not a refusal: a human choice is
-        // never blocked, it is only confirmed.
-        if (!(error instanceof ApiError && error.status === 409 && error.data.code === "over_cap")) {
-          toast(errorText(error));
-          return;
-        }
-        const ok = await confirmDialog({
-          title: t("term.cap.title"),
-          body: t("term.cap.body", { running: Number(error.data.running ?? 0), cap: Number(error.data.cap ?? 0) }),
-          action: t("term.cap.action"),
-        });
-        if (!ok) return;
-        try {
-          row = await api.createTerminal({ ...body, confirm: true });
-        } catch (again) {
-          toast(errorText(again));
-          return;
-        }
+        toast(errorText(error));
+        return;
       }
+      if (!row) return;
       fresh.current.add(row.id);
       if (row.sandbox_skipped?.length) toast(skippedText(row.sandbox_skipped));
       setState((s) => (place === "split" && s.active ? setSplit({ ...s, open: true }, row.id) : openTab(s, row.id)));
@@ -196,21 +183,7 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
 
   const end = useCallback(
     async (id: string) => {
-      let row: TerminalRow | null = null;
-      try {
-        row = await api.terminal(id);
-      } catch (error) {
-        toast(errorText(error));
-        return;
-      }
-      if (row.status !== "running") return;
-      const title = states[id]?.title || row.title || t("term.untitled");
-      if (row.live?.busy && !(await confirmDialog({ title: t("term.end.title"), body: t("term.end.confirm", { command: title }), action: t("term.end"), danger: true }))) return;
-      try {
-        await api.killTerminal(id);
-      } catch (error) {
-        toast(errorText(error));
-      }
+      await endTerminal(id, states[id]?.title, toast);
       void terms.refresh();
     },
     [states, terms, toast],
