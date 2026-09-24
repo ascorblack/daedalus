@@ -573,6 +573,14 @@ session. What staff ask — a question, or a call the policy refused — is a re
 six-character short form) answers one; the first answer wins, and a second gets 409 naming who was
 first. A request the orchestrator leaves unanswered for ten minutes comes to you.
 
+A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
+launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
+cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
+shows as an error with that screen, its terminal left open for you. A working CLI that goes quiet has
+its screen read: an idle prompt seen twice ends the turn, anything less shows as silence, never as
+a failure. Its team tools post to the terminal service's hook listener and are answered there. The
+CLIs keep running when the host restarts, and the host takes them up again where they were.
+
 ## Layout
 
 ```

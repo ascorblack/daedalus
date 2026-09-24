@@ -189,8 +189,14 @@ class LaunchSpec:
     effort: str = ""
     agent: str = ""
     permission_mode: str = ""
+    permission_level: Literal["ask", "edits", "all"] = "ask"
+    """What the project's autonomy lets through without asking, for the adapter to map onto the
+    CLI's own mode when the member has no ``permission_mode`` of its own."""
     team_url: str = ""
     team_token: str = ""
+    """Left empty by the runtime: the team tools post to the launch's hook listener, which a CLI
+    reaches from either environment, while the host's own team route is loopback of the host's
+    container and unreachable from the terminals container."""
     session_ref: str = ""
     """The CLI session to resume; empty for a new one."""
 
@@ -229,6 +235,37 @@ class Launch:
     harness_version: str
     started_at: str
     ended_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HookPost:
+    """One post to the launch's hook listener, as the adapter's ``events`` reads it.
+
+    ``name`` is the last part of the hook's path (a Claude event name, ``grok``, ``pi``); ``reply_id``
+    is set when the post is held for an answer, which ``TerminalPort.reply`` gives. The team tools'
+    posts (``name == "team"``) never reach an adapter: the runtime answers those itself.
+    """
+
+    name: str
+    body: Any
+    at: str = ""
+    reply_id: str | None = None
+    hold_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReadyStep:
+    """What the readiness gate does about the screen it just read, as the adapter judges it.
+
+    ``wait``: nothing recognised yet, or the CLI is still drawing. ``keys``: a dialog the launch
+    answers (the folder-trust question), with the keys that answer it — only after the adapter has
+    checked that the highlighted row is the one those keys choose. ``fail``: the CLI will not get
+    ready by itself (a sign-in screen), and ``reason`` says why in the operator's words.
+    """
+
+    action: Literal["wait", "keys", "fail"] = "wait"
+    keys: tuple[str, ...] = ()
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +348,15 @@ class TerminalPort(Protocol):
 
     async def wait_for(self, *, regex: str | None = None, idle_ms: int | None = None, timeout: float) -> bool: ...
 
+    def hooks(self) -> AsyncIterator[HookPost]:
+        """The launch's hook posts in the daemon's order, ending when the launch ends. One reader:
+        the adapter's ``events``."""
+        ...
+
+    async def reply(self, reply_id: str, body: Any) -> bool:
+        """Answer a held post; false when nothing waits any more (the hold expired, the CLI went)."""
+        ...
+
 
 class EnvironmentPort(Protocol):
     """The environment a CLI lives in, through the daemon's allowlisted side channels."""
@@ -362,9 +408,15 @@ class HarnessAdapter(Protocol):
 
     def resume_plan(self, spec: LaunchSpec, ref: str) -> LaunchPlan: ...
 
+    def readiness(self, screen: str) -> ReadyStep:
+        """The readiness gate's judgement of one screen. The runtime runs the gate: it reads the
+        screen until the CLI's ready signal arrives through ``events``, types what this answers for a
+        dialog, and gives up with this reason or after its timeout."""
+        ...
+
     async def after_spawn(self, term: TerminalPort, launch: Launch, plan: LaunchPlan) -> None:
-        """The readiness gate: answer the folder-trust and onboarding dialogs, then hand over the
-        first prompt when it goes by channel. Nothing is typed before the CLI proved it is ready."""
+        """Called once the gate saw the CLI ready: hand over the first prompt when it goes by
+        channel. Nothing is typed before the CLI proved it is ready."""
         ...
 
     async def attach(self, term: TerminalPort, launch: Launch) -> None:
@@ -414,12 +466,14 @@ __all__ = [
     "EventKind",
     "ExecResult",
     "HarnessAdapter",
+    "HookPost",
     "HookSpec",
     "InstallInfo",
     "Launch",
     "LaunchPlan",
     "LaunchSpec",
     "LoginState",
+    "ReadyStep",
     "ScreenClass",
     "SendMode",
     "StaffEvent",
