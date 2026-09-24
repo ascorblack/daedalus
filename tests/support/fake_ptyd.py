@@ -12,6 +12,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import os
 import secrets
 import struct
 from dataclasses import dataclass, field
@@ -107,6 +108,8 @@ class FakePtyd:
         self.exec_results: dict[str, dict[str, Any]] = {}
         """Program basename → the exec.run result it gives; unknown ones exit 0 with no output."""
         self.roots: list[str] = []
+        self.made: list[str] = []
+        """Every folder ``fs.mkdir`` was asked for."""
         self.launches: dict[str, dict[str, Any]] = {}
         self.pending_replies: dict[str, str] = {}
         """reply_id → launch_id of a held post that waits."""
@@ -417,6 +420,17 @@ class FakePtyd:
             raise _RpcFail(1004, f"{path} is not under an allowed root")
         return real
 
+    def _as_root(self, path: str) -> Path:
+        """The daemon's rule for a folder about to become a root: absolute, and neither the
+        filesystem's root nor a folder that holds the home directory."""
+        target = Path(path)
+        if not target.is_absolute():
+            raise _RpcFail(-32602, "the path must be absolute")
+        real = target.resolve()
+        if real == Path("/") or real == Path(self.home) or real in Path(self.home).parents:
+            raise _RpcFail(1004, f"{path} cannot be a folder of a project")
+        return real
+
     def _side(self, method: str, params: dict[str, Any]) -> Any:
         if method == "exec.run":
             name = Path(params["argv"][0]).name
@@ -427,6 +441,19 @@ class FakePtyd:
         if method == "fs.set_roots":
             self.roots = [r for r in params.get("roots") or [] if r != "/"]
             return {"roots": self.roots, "accepted": self.roots, "refused": [{"root": "/", "reason": "is the root of the filesystem"}] if "/" in (params.get("roots") or []) else []}
+        if method == "fs.stat" and params.get("as_root"):
+            real = self._as_root(params["path"])
+            if not real.exists():
+                return {"exists": False, "size": 0}
+            return {"exists": True, "type": "dir" if real.is_dir() else "file", "size": 0, "mtime": stamp(), "mode": "0755", "writable": os.access(real, os.W_OK)}
+        if method == "fs.mkdir":
+            real = self._as_root(params["path"])
+            if real.exists() and not real.is_dir():
+                raise _RpcFail(-32602, f"{params['path']} exists and is not a directory")
+            created = not real.exists()
+            real.mkdir(parents=True, exist_ok=True)
+            self.made.append(str(real))
+            return {"exists": True, "type": "dir", "size": 0, "mtime": stamp(), "mode": "0755", "writable": True, "created": created}
         if method == "fs.stat":
             real = self._under_root(params["path"])
             if not real.exists():

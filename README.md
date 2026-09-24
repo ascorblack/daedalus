@@ -392,6 +392,35 @@ agent. What survives what:
   for `Exec`'s sandbox. Without them the toggle shows as unavailable, with the reason, and terminals
   open unsandboxed.
 
+### The host terminal (optional)
+
+A shell on the server itself, as you, opened from the app like any other terminal. It is `ptyd` again,
+the same binary as the container's, installed as a **systemd user unit of yours**:
+`bash deploy/setup.sh` asks at its last step, and `bash deploy/host-terminal.sh install` does it on its
+own. It copies the daemon out of the image the stack was built from into `~/.local/lib/daedalus/`,
+writes `~/.config/systemd/user/daedalus-ptyd.service`, turns on lingering (so it survives your logout;
+where that needs polkit, it prints the one `sudo loginctl enable-linger` to run) and starts it.
+
+- **What it can do.** Everything you can do on the server: it is your shell, in your home, with your
+  own logins — the `terminals-home` logins of the container terminals do not apply there. CLI staff and
+  project folders on the host go through it as well (Docker installs only), and so do the git
+  operations of staff worktrees in those folders.
+- **What is recorded.** Every attach and detach, with how the browser signed in and how many bytes it
+  typed, and every write an agent makes. **What you type is never recorded**: it would hold every
+  password typed at a `sudo` prompt.
+- **How the container reaches it.** Its socket and token live in `../daedalus-host-terminals`, beside the
+  checkout (`DAEDALUS_HOST_TERMINALS_DIR` moves it), which compose mounts into the agent's container
+  whether or not the unit is installed. An empty directory reads as "not installed", so installing or
+  removing it needs no recreate. The directory is sealed from the agent's own commands. It needs
+  Docker running as root: with rootless Docker or userns-remap, root in the container cannot open your
+  `0700` directory, and the app says "permission denied".
+- **What survives what.** `docker restart`, a rebuild and recreating the containers leave it running.
+  `systemctl --user restart daedalus-ptyd`, a reboot, and re-running the installer (which updates the
+  daemon to the image's) end every host terminal; setup asks before it does.
+- **Removing it:** `systemctl --user disable --now daedalus-ptyd`, or `bash deploy/host-terminal.sh
+  remove`, which also deletes the unit and the binary. `bash deploy/host-terminal.sh status` says where
+  it stands, and `daedalus doctor` names the fix for each way it can be down.
+
 ### The install ends in the app: add a model
 
 **Whichever way you installed it.** A provider key is an address, not a choice of model, so nothing

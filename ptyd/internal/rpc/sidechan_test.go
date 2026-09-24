@@ -203,6 +203,41 @@ func TestExecAndFilesOverTheSocket(t *testing.T) {
 	}
 }
 
+func TestAFolderIsCheckedAndMadeOverTheSocket(t *testing.T) {
+	f, _ := startSide(t)
+	folder := filepath.Join(f.dir, "elsewhere", "site")
+	if we := f.callErr("fs.stat", map[string]any{"path": folder}); we == nil || we.Code != wire.CodeForbidden {
+		t.Fatalf("a plain stat outside the roots: %v", we)
+	}
+	var st struct {
+		Exists   bool   `json:"exists"`
+		Type     string `json:"type"`
+		Writable *bool  `json:"writable"`
+		Created  bool   `json:"created"`
+	}
+	f.call(t, "fs.stat", map[string]any{"path": folder, "as_root": true}, &st)
+	if st.Exists {
+		t.Fatalf("%+v", st)
+	}
+	f.call(t, "fs.mkdir", map[string]any{"path": folder}, &st)
+	if !st.Exists || !st.Created || st.Type != "dir" || st.Writable == nil || !*st.Writable {
+		t.Fatalf("%+v", st)
+	}
+	st.Created = false
+	f.call(t, "fs.mkdir", map[string]any{"path": folder}, &st)
+	if st.Created {
+		t.Fatalf("made twice: %+v", st)
+	}
+	for _, p := range []string{filepath.Join(f.dir, "home"), filepath.Join(f.dir, "state", "x"), "/"} {
+		if we := f.callErr("fs.mkdir", map[string]any{"path": p}); we == nil || we.Code != wire.CodeForbidden {
+			t.Fatalf("%s: %v", p, we)
+		}
+	}
+	if we := f.callErr("fs.mkdir", map[string]any{"path": "relative"}); we == nil || we.Code != wire.CodeInvalidParams {
+		t.Fatalf("relative: %v", we)
+	}
+}
+
 // echoServer answers every connection by echoing what it reads, until the listener closes.
 func echoServer(t *testing.T, ln net.Listener) {
 	t.Helper()

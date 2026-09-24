@@ -66,6 +66,13 @@ Fill `.env` (secrets do NOT go here; it is mounted into the agent container):
 Fill `../daedalus-secrets/keyproxy.env` with the provider keys (`DEEPSEEK_API_KEY=…`, `OPENROUTER_API_KEY=…`,
 `OPENCODE_API_KEY=…`; a self-hosted endpoint is `VLLM_BASE_URL`/`VLLM_API_KEY` in `.env`).
 
+Before starting, create the host terminal's directory as the operator — compose mounts it whether or not
+the host terminal is installed, and Docker would create a missing one as root:
+
+```bash
+bash deploy/host-terminal.sh prepare-dir        # ../daedalus-host-terminals, 0700, the operator's
+```
+
 Start:
 
 ```bash
@@ -299,6 +306,7 @@ whether this installation is finished. The lines worth reading back to the opera
 | `browser tools` | whether this image carries a headless Chromium. "not installed in this image" is correct for `:latest` |
 | `isolation` | on a server, nothing: the agent is in a container. It appears only on a native desktop installation, where it says there is no container boundary |
 | `terminals (container)` | the terminal daemon answers, its version and how many terminals run. "not installed" on a stack started before the service existed: run `docker compose … up -d --build`. `terminals update (container)` means the image holds a newer daemon than the one running |
+| `terminals (host)` | the host terminal (optional). "not installed" is information, not a fault: install it only if the operator asked for a shell on the server, with `bash deploy/host-terminal.sh install` run **as the operator, not with sudo**, after the stack is built. "permission denied" means Docker is rootless or uses userns-remap, where it cannot work |
 | `container image`, `image rebuild channel`, `published ports` | the container-only checks. On a native installation each says "not applicable (native)" rather than being left out |
 
 ## 8. What to report back

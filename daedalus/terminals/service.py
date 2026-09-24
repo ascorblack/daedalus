@@ -366,6 +366,16 @@ class Terminals(SideChannels):
 
     # -- environments ---------------------------------------------------------------------------
 
+    def configured(self, env: str) -> bool:
+        """Whether this installation has a daemon for ``env`` at all (a run directory it was told of)."""
+        link = self.links.get(env)
+        return link is not None and link.run_dir is not None
+
+    def available(self, env: str) -> bool:
+        """Whether ``env``'s daemon answers now: connected, not merely installed."""
+        link = self.links.get(env)
+        return link is not None and link.available
+
     def environments(self, running: dict[str, int] | None = None) -> list[EnvStatus]:
         cfg = self.config()
         out = []

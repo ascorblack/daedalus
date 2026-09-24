@@ -46,3 +46,10 @@ func fileID(st os.FileInfo) string {
 	}
 	return ""
 }
+
+// writable reports whether this user may write to p, as the kernel decides it (access(2) with
+// W_OK): the owner and mode alone would be wrong for a read-only mount or an ACL.
+func writable(p string) *bool {
+	ok := syscall.Access(p, 2) == nil
+	return &ok
+}

@@ -63,7 +63,7 @@ class EnvStatus:
     available: bool
     reason: str = ""
     """A code: ``not_configured``, ``connecting``, ``not_installed``, ``not_running``, ``refused``,
-    ``unreachable``, ``protocol_mismatch``; empty when available."""
+    ``unreachable``, ``permission_denied``, ``protocol_mismatch``; empty when available."""
     detail: str = ""
     version: str = ""
     sandbox: str = ""

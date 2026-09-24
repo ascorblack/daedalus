@@ -87,7 +87,7 @@ async def test_a_host_folder_needs_the_host_bridge(running: Any, tmp_path: Path,
     project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(site)}]})).json()
     assert (await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"default_env": "host"})).status_code == 400
 
-    monkeypatch.setattr(api_projects, "host_bridge", lambda _settings: True)
+    monkeypatch.setattr(api_projects, "host_bridge", lambda *_: True)
     assert (await client.get("/api/project-environments", headers=HEADERS)).json()["available"] == ["container", "host"]
     added = await client.post(f"/api/projects/{project['id']}/folders", headers=HEADERS, json={"path": "/somewhere/on/the/host", "env": "host"})
     assert added.status_code == 200, added.text
