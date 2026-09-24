@@ -255,6 +255,26 @@ export type TerminalLoad = {
   thresholds: { warn: number; bad: number };
 };
 
+/** One cell of the notification matrix: always, only for urgent notifications, or never. */
+export type NotifyCell = "on" | "urgent" | "off";
+export type NotifyChannel = "in_app" | "push" | "desktop" | "telegram";
+export type NotifyCells = Record<NotifyChannel, NotifyCell>;
+
+/** The `[notifications]` section as `GET /api/notifications/preferences` returns it. */
+export type NotificationPreferences = {
+  matrix: Record<string, NotifyCells>;
+  finished_min_seconds: number;
+  /** `HH:MM-HH:MM` in the operator's zone, or "" for none. */
+  quiet_hours: string;
+  /** Project id → the moment the mute ends, or "" for until it is lifted. */
+  muted_projects: Record<string, string>;
+  quick_actions: boolean;
+  telegram_covers_push: boolean;
+  [rest: string]: unknown;
+};
+
+export type NotificationPreferencesView = { preferences: NotificationPreferences; revision: string; categories: string[]; zone: string };
+
 export type WebSearchConf = {
   backend: string;
   fallback: string[];
@@ -692,6 +712,7 @@ export type Settings = {
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
   compaction: { auto_ratio: number; keep_recent_messages: number; max_words: number; chunk_tokens: number; min_messages: number; core_trigger_ratio: number };
+  terminals?: { running_cap: number };
   telegram: {
     mode: "topics" | "private" | null;
     forum_chat_id: number;

@@ -254,6 +254,23 @@ class TeamIngress(Protocol):
     async def usage(self, live: LiveSession, snapshot: UsageSnapshot) -> None:
         """What the session has spent so far, after each turn."""
 
+    async def signal(self, live: LiveSession) -> None:
+        """A sign of life from the executor that changes no status. Written at most every few
+        seconds; the team's clock shows a session silent when these stop coming."""
+
+    async def resolved(self, live: LiveSession, request_ref: str, *, by: str = "operator", via: str = "terminal") -> bool:
+        """A request settled where the team did not see it: answered in the executor's own screen
+        (``operator`` via ``terminal``), or withdrawn with the turn that asked it (``system`` via
+        ``withdrawn``). True when this closed it; false when it was already answered."""
+
+    async def located(self, live: LiveSession, *, cli_session_id: str | None = None, transcript_ref: str | None = None) -> None:
+        """Where the executor keeps the session, once it says so: a command-line agent names its
+        session and its transcript only after it has started."""
+
+    async def ended(self, live: LiveSession, reason: str) -> None:
+        """The executor ended on its own — the command-line agent exited — rather than being stopped.
+        The session ends with that reason and its open requests are withdrawn."""
+
 
 @dataclass
 class FakeStaffRuntime:

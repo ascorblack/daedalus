@@ -94,9 +94,9 @@ def the_list(browser, problems: list[str]) -> None:  # type: ignore[no-untyped-d
         print("load bar:", words, "| level", bar.get_attribute("data-level"))
         if bar.get_attribute("data-level") != "ok":
             problems.append(f"the load bar is {bar.get_attribute('data-level')!r} on a machine at 44 %")
-        if "5 running use 1.4 GB now" not in words or "20 sessions ≈ 8.7 GB of 62 GB" not in words or "44% of memory" not in words:
+        if "Now 5 sessions use 1.4 GB" not in words or "20 sessions ≈ 8.7 GB of 62 GB" not in words or "44 % of memory" not in words:
             problems.append(f"the load bar does not say what runs now and what the cap would cost: {words!r}")
-        if "terminal service itself: 60 MB" not in words:
+        if "60 MB of the terminal daemon itself" not in words:
             problems.append("the load bar does not count the terminal service's own memory")
         colour = page.eval_on_selector(".loadbar-now", "(e) => getComputedStyle(e).backgroundColor")
         ok = page.evaluate("() => { const d = document.createElement('i'); d.style.color = 'var(--ok)'; document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; }")

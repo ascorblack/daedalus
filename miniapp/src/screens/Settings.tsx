@@ -21,7 +21,8 @@ import { t } from "../i18n";
 import { LangPicker } from "../components";
 import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
-import { PushCard } from "../pushui";
+import { NotificationSettings } from "./NotificationSettings";
+import { TerminalCap } from "./TerminalCap";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"];
 /** Self-hosted endpoints: temperature is a sampling pin, not a vendor default. */
@@ -938,12 +939,13 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
+type Section = "models" | "rules" | "limits" | "terminals" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
 /** The sections, in the order they are listed; the words come from the table, not from here. */
 const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "models", icon: "model" },
   { id: "rules", icon: "pen" },
   { id: "limits", icon: "chart" },
+  { id: "terminals", icon: "terminal" },
   { id: "tools", icon: "wrench" },
   { id: "voice", icon: "mic" },
   { id: "components", icon: "plug" },
@@ -1180,6 +1182,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
             <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ balance: { ...s.balance, poll_seconds: v } }); }} />
           </div>
         );
+      case "terminals":
+        return <TerminalCap s={s} save={save} />;
       case "tools":
         return <ToolsTab s={s} save={save} />;
       case "voice":
@@ -1249,7 +1253,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
           </div>
         );
       case "notifications":
-        return <PushCard toast={toast} />;
+        return <NotificationSettings toast={toast} />;
       case "security":
         return <SecurityTab toast={toast} />;
       case "heartbeat":

@@ -97,19 +97,16 @@ func openWindow(p Paths, title, url string) (*Window, error) {
 	if err := view.Bind("__daedalusGeometry", w.record); err != nil {
 		return nil, err
 	}
-	// What the app itself may raise. The web views do not all carry the Web Notifications API, and
-	// the two that do would ask for a permission the operator has already given by installing this,
-	// so the page is given a function instead of an API to ask for.
-	if err := view.Bind("__daedalusNotify", func(title, body, link string) { _ = Notify(Notification{Title: title, Body: body, Link: link}) }); err != nil {
-		return nil, err
-	}
+	// The page is given no way to raise a desktop notification. The launcher listens to the app's
+	// event stream itself (watch.go) and shows what the app's router marks for the desktop, which
+	// covers the window being minimised as well as closed; a second path from the page would show
+	// the same thing twice.
 	// Choosing a folder on the machine, for a page that wants to name one — a project's root. A
 	// browser cannot do it and the launcher can; see folder.go for what the page has to check.
 	if err := view.Bind("__daedalusPickFolder", PickFolder); err != nil {
 		return nil, err
 	}
 	view.Init(`window.daedalus = Object.assign(window.daedalus || {}, {
-  notify: (title, body, link) => window.__daedalusNotify(String(title || ""), String(body || ""), String(link || "")),
   pickFolder: () => window.__daedalusPickFolder(),
   window: true,
 });`)

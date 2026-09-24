@@ -61,6 +61,22 @@ def test_settings_validation_and_save_use_one_revision(tmp_path) -> None:
         assert stale.status_code == 409 and app.config.limits.max_iterations == 9
 
 
+def test_the_terminal_cap_is_set_from_settings_with_no_upper_bound(tmp_path) -> None:
+    # The cap on running terminals is raised from Settings. A value past what the machine carries is
+    # the operator's call (the page warns), so only a cap below one is refused.
+    app = FakeApp(tmp_path, native=True)
+    with TestClient(build_app(app, "tok")) as client:
+        view = client.get("/api/settings", headers=HEAD).json()
+        assert view["terminals"]["running_cap"] == 20
+        saved = client.put("/api/settings", headers=HEAD, json={"base_revision": view["revision"], "terminals": {"running_cap": 500}})
+        assert saved.status_code == 200 and saved.json()["terminals"]["running_cap"] == 500
+        assert app.config.terminals.running_cap == 500
+        # The rest of the section is kept: a patch of one field is not a reset of the others.
+        assert app.config.terminals.ring_bytes == 8 << 20
+        refused = client.put("/api/settings", headers=HEAD, json={"base_revision": saved.json()["revision"], "terminals": {"running_cap": 0}})
+        assert refused.status_code == 400 and app.config.terminals.running_cap == 500
+
+
 @pytest.mark.asyncio
 async def test_failed_manager_reload_restores_the_last_working_file(tmp_path) -> None:
     settings = settings_for(tmp_path, native=True)
