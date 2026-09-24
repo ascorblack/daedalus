@@ -216,6 +216,18 @@ def is_dispatcher(metadata: dict[str, Any] | None) -> bool:
     return bool((metadata or {}).get("dispatcher"))
 
 
+def is_quiet(metadata: dict[str, Any] | None) -> bool:
+    """Whether a session is heard in its topic but never speaks there itself: a project's orchestrator.
+
+    Its topic is the project's, and what appears there is chosen — its reports, its notifications and
+    the questions it puts to the operator, posted by the project topic poster — not the stream of its
+    turns, which stay in the app. The operator's messages in the topic still reach it through the topic
+    binding. A retired orchestrator keeps the mark, so a sweep never opens a topic of its own for it.
+    """
+    metadata = metadata or {}
+    return bool(metadata.get("telegram_quiet") or metadata.get("orchestrator_of") or metadata.get("orchestrator_retired_of"))
+
+
 def _telegram_media(source: Path | str) -> FSInputFile | str:
     """Telegram fetches a link itself. A workspace file is still uploaded."""
     return source if isinstance(source, str) else FSInputFile(source)
@@ -586,13 +598,6 @@ class TelegramFront:
         msg = await tg_call(self.bot.send_message, outbox.chat_id, outbox.attributed(text), message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
         return int(msg.message_id)
 
-    async def edit_post(self, chat_id: int, message_id: int, text: str) -> None:
-        """Replace a posted message's text and take its buttons away; a message already gone is not an error."""
-        try:
-            await tg_call(self.bot.edit_message_text, text, chat_id=chat_id, message_id=message_id, reply_markup=None, attempts=2, flood_chat=chat_id)
-        except TelegramAPIError as exc:
-            logger.debug("could not edit message %s: %s", message_id, exc)
-
     async def send_force_reply(self, chat_id: int, thread_id: int | None, text: str) -> int:
         """Ask for a one-message free-text reply (the client opens the reply box); returns its message id."""
         msg = await tg_call(self.bot.send_message, chat_id, text, message_thread_id=thread_id, reply_markup=ForceReply(selective=True), flood_chat=chat_id)
@@ -618,6 +623,67 @@ class TelegramFront:
             state.metadata.pop("telegram_detached", None)
             await self.manager.sessions.update_metadata(session_id, state.session.metadata)
         return TopicBinding(chat_id, thread_id, session_id, title)
+
+    # -- a project's topic --------------------------------------------------------------------
+
+    async def open_quiet_topic(self, session_id: str, title: str) -> TopicBinding | None:
+        """A topic for a session that listens there and does not stream into it: a project's orchestrator.
+
+        The mark goes on before the topic is bound, because binding lifts ``telegram_detached`` and a
+        turn running at that moment would otherwise start streaming into the new topic. Returns None
+        without a forum (private mode, or no group bound); raises :class:`TelegramBusy` or
+        :class:`TelegramRefused` as :meth:`ensure_topic` does.
+        """
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        if not state.metadata.get("telegram_quiet"):
+            state.metadata["telegram_quiet"] = True
+            state.session.metadata["telegram_quiet"] = True
+            await self.manager.sessions.update_metadata(session_id, state.session.metadata)
+        if self.private_mode() or not self.config.telegram.forum_chat_id:
+            return None
+        return await self.ensure_topic(session_id, title)
+
+    async def repoint_topic(self, binding: TopicBinding, session_id: str) -> TopicBinding:
+        """The same topic, now bound to another session: a replaced orchestrator's successor inherits it,
+        so the operator's thread with the project goes on where it was."""
+        await self.manager.db.execute("UPDATE topics SET session_id = ? WHERE chat_id = ? AND thread_id = ?", (session_id, binding.chat_id, binding.thread_id))
+        return TopicBinding(binding.chat_id, binding.thread_id, session_id, binding.title)
+
+    async def close_topic(self, binding: TopicBinding) -> None:
+        """Close a topic and end its binding; the history in Telegram stays."""
+        try:
+            await self._close_topic(binding)
+        except TelegramAPIError as exc:
+            logger.warning("could not close topic %s: %s", binding.thread_id, exc)
+
+    async def rename_topic(self, binding: TopicBinding, title: str) -> None:
+        """Rename a topic and remember the name; a refusal is logged, the binding stays as it was."""
+        try:
+            await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=title[:128], attempts=2, flood_chat=binding.chat_id)
+        except TelegramAPIError as exc:
+            logger.warning("could not rename topic %s: %s", binding.thread_id, exc)
+            return
+        await self.manager.db.execute("UPDATE topics SET title = ? WHERE chat_id = ? AND thread_id = ?", (title, binding.chat_id, binding.thread_id))
+
+    def outbox(self, chat_id: int, thread_id: int | None, *, header: Callable[[], str] | None = None) -> TelegramOutbox:
+        """An outbox for a chat and thread chosen by the caller (a project's topic, or the private chat)."""
+        return TelegramOutbox(self.bot, chat_id, thread_id, header=header)
+
+    async def post(self, outbox: TelegramOutbox, text: str, rows: list[list[tuple[str, str]]] | None = None) -> int:
+        """Plain text, with inline buttons when ``rows`` has any; returns the message id."""
+        if rows:
+            return await self.send_choice(outbox, text, rows)
+        msg = await tg_call(self.bot.send_message, outbox.chat_id, outbox.attributed(text), message_thread_id=outbox.thread_id, parse_mode=None, flood_chat=outbox.chat_id)
+        return int(msg.message_id)
+
+    async def edit_post(self, chat_id: int, message_id: int, text: str) -> None:
+        """Replace a posted message's text and take its buttons away; a message already gone is not an error."""
+        try:
+            await tg_call(self.bot.edit_message_text, text, chat_id=chat_id, message_id=message_id, reply_markup=None, attempts=2, flood_chat=chat_id)
+        except TelegramAPIError as exc:
+            logger.debug("could not edit message %s: %s", message_id, exc)
 
     async def detach_session(self, session_id: str) -> bool:
         """Make a topic-bound session web-only without removing its history or workspace."""
@@ -672,7 +738,7 @@ class TelegramFront:
         state = await self.manager.get_state(session_id)
         # Detachment is a per-session delivery veto, not merely the absence of a topic.
         # It must win over the global private-chat mode or background output leaks into DMs.
-        if state is not None and (state.metadata.get("telegram_detached") or is_subagent(state.metadata)):
+        if state is not None and (state.metadata.get("telegram_detached") or is_subagent(state.metadata) or is_quiet(state.metadata)):
             return None
         if state is not None and is_dispatcher(state.metadata):
             return self._main_outbox(session_id)
@@ -749,7 +815,7 @@ class TelegramFront:
         for session in await self.manager.list_sessions():
             # A session started on the site has no topic on purpose. Binding the group must
             # not pull it into the forum: that is the leak the flag exists to stop.
-            if (session.get("metadata") or {}).get("telegram_detached") or is_subagent(session.get("metadata")) or is_dispatcher(session.get("metadata")):
+            if (session.get("metadata") or {}).get("telegram_detached") or is_subagent(session.get("metadata")) or is_quiet(session.get("metadata")) or is_dispatcher(session.get("metadata")):
                 continue
             if await self.binding_for_session(session["id"]) is not None:
                 continue

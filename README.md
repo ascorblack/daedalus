@@ -623,11 +623,24 @@ live status; `needs_you` is the project's open requests routed to the operator, 
 requests themselves each time, so an answer from anywhere ends one. `POST` to the same address adds a
 task with `{"title", "brief", "assignee_staff_id", "depends_on", "priority"}`; `PUT /api/board/{id}`
 also takes `assignee_staff_id` (`""` unassigns), `brief` (the parts sent) and `depends_on`; `POST
-/api/board/{id}/accept` moves a task from review to done (**409** when it is not in review, or its
-staff branch is not merged); `GET /api/board?project=<id>` is one project's tasks. A project's staff
+/api/board/{id}/accept` moves a task from review to done, and on a task with a staff branch it is the
+merge below (**409** when it is not in review, or the merge is refused); `GET /api/board?project=<id>`
+is one project's tasks. A project's staff
 and orchestrator see its whole board, move only their own tasks and never to done; an ordinary agent
 keeps its own board, without the team's tasks. Each change is a `task.created`, `task.moved`,
 `task.assigned` or `task.accepted` event naming its `actor`.
+
+**Reviewing and merging a staff branch.** The orchestrator proposes, you merge. `GET
+/api/board/{id}/review` reads, without changing anything, what merging the task's branch into its
+folder's current branch would bring: `commits` (at most 50), `files` with their added and removed
+lines, a bounded `patch`, the dry run's `conflicts` (`git merge-tree`), whether the folder is clean and
+still on the branch the work was cut from, the staff member's verification `receipts`, and `blockers`,
+each a `code` and a sentence, when Merge cannot be pressed. `POST /api/board/{id}/merge` merges it as a
+merge commit, finishes the task and publishes `task.accepted`; the staff worktree is removed when its
+member has nothing else to do in that folder, and the branch is deleted only once it is merged. A
+conflict is never left in the folder: the merge is aborted, the task is marked `conflict` and
+`task.merge_failed` wakes the orchestrator. `POST /api/board/{id}/reject` with `{"note"}` sends the work
+back to its member. Nothing is pushed.
 
 **A project's team at work.** `POST /api/staff/{id}/assign` with `{"task_id"}` gives a staff member a
 task from its project's board; the task needs all four parts of its brief (objective, deliverable,
@@ -670,7 +683,6 @@ strongest preset; the model chip in its chat changes the project's choice. In `G
 such a project carries `orchestrator: {"enabled", "session_id", "staff", "working", "needs_you"}`
 (null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
 project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
-
 It sets its own alarms with `WakeMe` (in some minutes, at a moment, or on a cron at most every ten
 minutes) and is woken with the note, even mid-turn; you can leave it one too. `GET|POST
 /api/projects/{id}/wakeups` (`{"note", "in_minutes" | "at" | "cron"}`) and `DELETE …/wakeups/{id}` are
@@ -688,6 +700,26 @@ fires in an hour; nothing the orchestrator does itself fires one. `GET|POST
 (`{"enabled", "note", "cooldown_minutes"}`) and `DELETE …/{id}`. Every accepted webhook is published
 as `webhook.received`; a provider with `deliver = "events"` in its `[webhooks.<name>]` section starts no
 run of its own and is there only for the watches.
+
+**A project in Telegram.** With a bot bound, a project whose orchestrator is on gets a forum topic under
+the project's name. You write there and the orchestrator receives it; its own turns do not stream into
+the topic and its replies stay in the app. The topic shows only the orchestrator's reports and
+notifications and every request of the project that waits on you — its questions, the folders it asks
+for, the staff requests it escalated — with buttons that answer them (the first answer wins, wherever it
+was given; a late tap is told who was first) and a reply that answers in words. A request to act on the
+host is answered in the app only. Staff, subagents and the notification router never post there.
+Replacing the orchestrator keeps the topic, switching it off closes it, renaming the project renames it.
+Without a forum (private mode) the same posts come to the private chat under `[project name]`, and a
+reply to one goes to that project's orchestrator rather than to the chat's current session. Without a
+bot, nothing of this exists and the app has it all.
+
+**What a project spends.** `GET /api/projects/{id}/usage` answers `{"staff", "orchestrator", "other",
+"total"}`, each with `today` (the operator's day), `week` (the last 7 days) and `all`, as `{"usd",
+"tokens", "unpriced"}`. A Daedalus member is charged for its sessions and their subagents, counted once;
+a command-line member for the latest usage its CLI reported, with `subscription` holding the share of the
+subscription window used. Calls nobody priced are counted in `unpriced`, never as zero dollars. The team
+rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
+the same numbers.
 
 **The main orchestrator.** One chat, pinned first in the app, where you say "in Bakery, add a
 gluten-free menu": it hands the work to that project's orchestrator as a *dispatch* and follows it. It
@@ -725,6 +757,18 @@ shows as an error with that screen, its terminal left open for you. A working CL
 its screen read: an idle prompt seen twice ends the turn, anything less shows as silence, never as
 a failure. Its team tools post to the terminal service's hook listener and are answered there. The
 CLIs keep running when the host restarts, and the host takes them up again where they were.
+
+Claude Code is the first CLI that works as staff. Each launch gets its own settings overlay (hooks
+through the terminal service, the team tools allowed), a short statement of how to talk to the team
+in its system prompt, and a `daedalus-team` skill, all in the launch's directory and never in your
+own configuration or the project. Its permission requests and questions go to the orchestrator or to
+you as requests, answered through the held hook while Claude's own dialog stays on screen for you to
+answer there too. Messages go one at a time, only when the CLI can take them and never into a dialog,
+and each shows how far it got (`GET /api/staff/{id}/messages`); a turn that ends without a report is
+passed on with its last words. `GET /api/staff/{id}/session`, `…/transcript`, `…/events` and
+`…/changes` are what the staff view reads, and `POST /api/staff/{id}/messages` and `…/seen` its
+composer and its "read". The self-check after an update runs one short session, with one tiny prompt
+on the cheapest model.
 
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the

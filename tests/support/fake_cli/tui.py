@@ -35,6 +35,9 @@ points at). Steps are separated by ``;``:
     call the team tools ``Report`` / ``AskOrchestrator`` through the launch's MCP server (or the pi
     bridge), where the CLI has one.
 
+The harness manager's self-check prompt ("… Call the Report tool with kind checkpoint and note
+self-check …") is understood as ``report:checkpoint:self-check;echo:ready``.
+
 Anything else is answered with ``ok: <the first words>``.
 
 Time: every delay is multiplied by ``FAKE_CLI_TIME_SCALE`` (default 1), so a test can run the
@@ -215,6 +218,16 @@ class Args:
                 arity = flags[name]
                 if arity == 0:
                     self.values.setdefault(name, []).append("")
+                elif arity < 0:
+                    # Variadic, as ``--add-dir <directories...>``: every following word that is not a
+                    # flag is taken, the prompt included — the reason a launch puts ``--`` before it.
+                    taken = [inline] if eq else []
+                    while i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                        taken.append(argv[i + 1])
+                        i += 1
+                    if not taken:
+                        usage_error(cli, f"option '{name}' argument missing")
+                    self.values.setdefault(name, []).extend(taken)
                 elif eq:
                     self.values.setdefault(name, []).append(inline)
                 else:
@@ -246,6 +259,7 @@ def usage_error(cli: str, message: str) -> None:
 # -- the scripted model ------------------------------------------------------------------------------
 
 _DIRECTIVE = re.compile(r"(?:^|\s)(echo|perm|ask|fail|slow|report|askorch):(.*)$|(?:^|\s)(silent)\s*$", re.S)
+SELF_CHECK = "Call the Report tool with kind checkpoint and note self-check"
 _POINTER = re.compile(r"Read the message in (\S+?)(?: and act on it)?\.?(?:\s|$)")
 
 
@@ -262,6 +276,10 @@ def script_of(prompt: str) -> list[Step]:
     if pointer:
         with contextlib.suppress(OSError):
             prompt = Path(pointer.group(1)).read_text(encoding="utf-8")
+    if SELF_CHECK in " ".join(prompt.split()):
+        # The harness manager's self-check prompt is plain words for a real model; the fake model
+        # understands this one sentence the way a real one does.
+        return [Step("report", "checkpoint:self-check"), Step("echo", "ready")]
     steps: list[Step] = []
     for segment in prompt.split(";"):
         found = _DIRECTIVE.search(segment.strip())
@@ -403,6 +421,8 @@ class Dialog:
     on_choose: Callable[[int], Any] | None = None
     on_escape: Callable[[], Any] | None = None
     digits: bool = True
+    numbered: bool = True
+    """Rows drawn as ``❯ 1. Yes``; Claude's trust and bypass questions draw ``❯ Yes`` and take no digit."""
     footer: str = "Enter to confirm · Esc to cancel"
     data: dict[str, Any] = field(default_factory=dict)
     opened_at: float = field(default_factory=time.monotonic)
@@ -412,9 +432,14 @@ class Dialog:
 class PastePart:
     number: int
     text: str
+    style: str = "lines"
 
     @property
     def marker(self) -> str:
+        if self.style == "claude":
+            # As Claude Code draws it (measured): the count is of line breaks, and a single line has none.
+            breaks = self.text.count("\n")
+            return f"[Pasted text #{self.number} +{breaks} lines]" if breaks else f"[Pasted text #{self.number}]"
         lines = self.text.count("\n") + 1
         return f"[Pasted text #{self.number} +{lines} lines]"
 
@@ -435,6 +460,8 @@ class Look:
     collapse_lines: int = 0
     """A paste over this many lines collapses as well (0: only the length counts)."""
     burst_guard_ms: int = 0
+    marker_style: str = "lines"
+    """How a collapsed paste is shown: ``lines`` (``+L lines``) or ``claude`` (see ``PastePart``)."""
 
 
 class Tui:
@@ -558,7 +585,7 @@ class Tui:
             bottom.extend(d.body)
             for index, option in enumerate(d.options):
                 mark = "❯" if index == d.selected else " "
-                bottom.append(f"{mark} {index + 1}. {option}")
+                bottom.append(f"{mark} {index + 1}. {option}" if d.numbered else f"{mark} {option}")
             bottom.append(d.footer)
         elif not self.ready:
             # No composer before the CLI is ready, as in the real TUIs: a harness (or a test) that
@@ -690,7 +717,7 @@ class Tui:
         collapse = len(text) > self.look.collapse_chars or (self.look.collapse_lines and lines > self.look.collapse_lines)
         if collapse:
             self.pastes += 1
-            self.parts.append(PastePart(self.pastes, text))
+            self.parts.append(PastePart(self.pastes, text, self.look.marker_style))
         else:
             self.parts.append(text)
             self._merge()

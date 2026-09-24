@@ -19,7 +19,6 @@ return at once; the answer arrives as an ``ask.answered`` event in a later wake-
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, tzinfo
@@ -29,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from daedalus.extensions import orchestrator_ops, orchestrator_team, wakeups
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
+from daedalus.extensions.project_usage import ProjectUsage
 from daedalus.extensions.watches import describe as describe_watch
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
@@ -49,6 +49,7 @@ CURSOR_KEY = "orchestrator_cursor:{project_id}"
 WAKE_TYPES = (
     "staff.status",
     "staff.report",
+    "staff.channel",
     "ask.pending",
     "ask.answered",
     "permission.pending",
@@ -605,29 +606,14 @@ class Orchestrators:
         return f"[{ask.short_id}] {asker} ({ask.kind}): {_one_line(ask.text, 160)} ({_age(ask.created_at, now)}){suggestion}"
 
     async def _spend_line(self, project_id: str, now: datetime) -> str:
-        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        rows = await self.manager.db.fetchall(
-            "SELECT s.metadata AS metadata, sum(u.cost_usd) AS usd, sum(u.input_tokens + u.output_tokens) AS tokens "
-            "FROM usage_events u JOIN sessions s ON s.id = u.session_id WHERE s.project_id = ? AND u.at >= ? GROUP BY s.id",
-            (project_id, since),
-        )
-        mine = staff = other = 0.0
-        tokens = 0
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata"] or "{}")
-            except (TypeError, ValueError):
-                metadata = {}
-            usd = float(row["usd"] or 0.0)
-            tokens += int(row["tokens"] or 0)
-            if metadata.get("orchestrator_of") or metadata.get("orchestrator_retired_of"):
-                mine += usd
-            elif metadata.get("staff_session_id"):
-                staff += usd
-            else:
-                other += usd
-        extra = f" · other sessions ${other:.2f}" if other else ""
-        return f"Spend today: orchestrator ${mine:.2f} · staff ${staff:.2f}{extra} (tokens: {_tokens(tokens)})"
+        """Today's spend, read by the same summary the app shows, so the orchestrator and the operator
+        never see two different numbers for one project."""
+        usage = await ProjectUsage(self.manager).summary(project_id, now=now)
+        mine, other, total = usage["orchestrator"]["today"], usage["other"]["today"], usage["total"]["today"]
+        staff = sum(member["today"]["usd"] for member in usage["staff"])
+        extra = f" · other sessions ${other['usd']:.2f}" if other["usd"] else ""
+        unpriced = f" · {total['unpriced']} unpriced" if total["unpriced"] else ""
+        return f"Spend today: orchestrator ${mine['usd']:.2f} · staff ${staff:.2f}{extra} (tokens: {_tokens(total['tokens'])}){unpriced}"
 
     def _zone(self) -> tzinfo:
         """The operator's time zone, as their app last reported it: the times in a batch are theirs."""
@@ -730,7 +716,13 @@ class Orchestrators:
                 return None
             return Wake(f"staff:{event.staff_id}", urgent=status == "error")
         if kind == "staff.report":
+            if p.get("implicit") and event.staff_id:
+                # Made from a turn that ended with no report: it is that turn's end, and replaces the
+                # plain "finished a turn" line rather than following it.
+                return Wake(f"staff:{event.staff_id}", urgent=p.get("kind") in URGENT_REPORTS)
             return Wake(f"report:{event.seq}", urgent=p.get("kind") in URGENT_REPORTS)
+        if kind == "staff.channel":
+            return Wake(f"channel:{event.staff_id or event.seq}", urgent=False) if event.staff_id else None
         if kind in ("ask.pending", "permission.pending"):
             if not event.staff_id:
                 return None
@@ -820,7 +812,15 @@ class Orchestrators:
                 return f"{who(member)}'s session ended{': ' + detail if detail else ''}"
             return f"{who(member)} has gone silent{await self._on_task(member)}{': ' + detail if detail else ''} (silent is not failed)"
         if kind == "staff.report":
+            if p.get("implicit"):
+                name = member.name if member else ""
+                ending = "ended a turn with a question and no report" if p.get("kind") == "needs_input" else "finished a turn without a report"
+                return f"{who(member)} {ending}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\" — ReadStaff(\"{name}\") for the whole turn"
             return f"{who(member)} reported {p.get('kind')}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\""
+        if kind == "staff.channel":
+            if p.get("team_tools") == "missing":
+                return f"{who(member)}'s team tools are not connected: {_one_line(str(p.get('detail') or ''), 200)}. They keep working, but will not Report or AskOrchestrator; Tell and ReadStaff still work"
+            return f"{who(member)}'s team tools are connected now"
         if kind in ("ask.pending", "permission.pending"):
             ask = await self._ask_for_event(p)
             short = f" [{ask.short_id}]" if ask is not None else ""

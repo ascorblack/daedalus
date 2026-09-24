@@ -44,6 +44,7 @@ func (d *Daemon) registerSide(srv *server.Server) {
 	srv.Handle("hooks.register_launch", d.registerLaunch)
 	srv.Handle("hooks.unregister_launch", d.unregisterLaunch)
 	srv.Handle("hooks.reply", d.hookReply)
+	srv.Handle("hooks.put_file", d.putFile)
 }
 
 // hooksInfo and sideInfo are the side channels' part of daemon.info.
@@ -394,6 +395,22 @@ func (d *Daemon) registerLaunch(ctx context.Context, c *server.Conn, params json
 		return nil, sideError(err)
 	}
 	return r, nil
+}
+
+func (d *Daemon) putFile(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {
+	var p struct {
+		LaunchID string `json:"launch_id"`
+		Name     string `json:"name"`
+		Data     []byte `json:"data"`
+	}
+	if err := decode(params, &p); err != nil {
+		return nil, err
+	}
+	path, err := d.Side.Launches.PutFile(p.LaunchID, p.Name, p.Data)
+	if err != nil {
+		return nil, sideError(err)
+	}
+	return map[string]any{"path": path}, nil
 }
 
 func (d *Daemon) unregisterLaunch(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {

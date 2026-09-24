@@ -1,0 +1,412 @@
+// A project on a phone: four tabs at the bottom instead of the app's own (the orchestrator, the team,
+// the board, the terminals), a header with the project and how its work goes, and a banner with the
+// request that has waited longest for the operator, answered with one tap and no need to open a
+// conversation or a terminal. `phoneTab` in focus.ts decides where the bar shows; App.tsx draws it.
+//
+// Everything here is sized for a thumb: rows and answers take the touch row height, and a field is
+// 16 px so Safari does not zoom into it.
+
+import { FormEvent, ReactNode, useMemo, useState } from "react";
+import { api, ApiError, type Ask, type TerminalEnvName, type TerminalView as TerminalRow } from "../api";
+import { Skeleton } from "../components";
+import { MenuItem, OverflowMenu, toast } from "../dialogs";
+import { useEvent, useStreamUp } from "../events";
+import { relTime } from "../format";
+import { plural, t } from "../i18n";
+import { Icon, type IconName } from "../icons";
+import { go, PageHeader } from "../shell";
+import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath } from "../router";
+import { invalidate, useQuery } from "../store";
+import { PhoneTerminal, type PhoneTerminalProps } from "../terminal/mobile";
+import { HarnessBadge, StaffAvatar } from "../team/parts";
+import { StaffSheet } from "../team/StaffSheet";
+import type { Staff, Team } from "../team/team";
+import type { ProjectBoardData } from "../board/board";
+import { errorText } from "../ui";
+import { boardKey, staffKey, terminalsKey, useProject } from "./data";
+import { firstWait, oldestOpen, PHONE_TABS, type PhoneTab, splitTeam, staffTone, teamCounts, waitKey } from "./focus";
+import { useMember } from "./staff";
+
+const enc = encodeURIComponent;
+const operatorAsksKey = (projectId: string) => `/api/asks?project=${enc(projectId)}&routed_to=operator`;
+
+/** The team and the board under the keys focus mode reads them by, so the caches are shared. Only
+ *  these two: a phone's project page has no column to fill with the terminals and the wake-ups. */
+function useTeamAndBoard(projectId: string): { team: Team | null; board: ProjectBoardData | null } {
+  const live = useStreamUp();
+  const team = useQuery<Team>(staffKey(projectId), { pollMs: live ? 60000 : 15000, staleMs: 5000 });
+  const board = useQuery<ProjectBoardData>(boardKey(projectId), { pollMs: live ? 60000 : 15000, staleMs: 3000 });
+  return {
+    team: team.data && Array.isArray(team.data.staff) ? team.data : null,
+    board: board.data && Array.isArray(board.data.tasks) ? board.data : null,
+  };
+}
+
+const TAB_ICONS: Record<PhoneTab, IconName> = { orchestrator: "conductor", team: "bots", board: "board", terminals: "terminal" };
+
+function tabPath(projectId: string, tab: PhoneTab): string {
+  return tab === "orchestrator" ? projectHome(projectId) : projectPagePath(projectId, tab);
+}
+
+/** The operator's open requests in a project, kept current by their events. */
+export function useOperatorAsks(projectId: string) {
+  const live = useStreamUp();
+  const query = useQuery<{ asks: Ask[] }>(operatorAsksKey(projectId), { pollMs: live ? 60000 : 10000, staleMs: 2000 });
+  useEvent(["ask.", "permission.", "staff.status"], (event) => {
+    if (!event.project_id || event.project_id === projectId) invalidate(`/api/asks?project=${enc(projectId)}`);
+  }, [projectId]);
+  const asks = Array.isArray(query.data?.asks) ? query.data!.asks : [];
+  return useMemo(() => oldestOpen(asks), [asks]);
+}
+
+// ── the tab bar ──────────────────────────────────────────────────────────────────────────────
+
+/** The project's tabs, in the place of the app's. The team's tab carries how many requests wait. */
+export function ProjectTabs({ projectId, current }: { projectId: string; current: PhoneTab | null }) {
+  const { waiting } = useOperatorAsks(projectId);
+  return (
+    <nav className="tabbar project-tabs" aria-label={t("phone.tabs")}>
+      {PHONE_TABS.map((tab) => {
+        const href = tabPath(projectId, tab);
+        return (
+          <a key={tab} href={href} data-tab={tab} className={current === tab ? "active" : ""} aria-current={current === tab ? "page" : undefined} onClick={(e) => go(e, href)}>
+            <span className="glyph">
+              <Icon name={TAB_ICONS[tab]} size={22} />
+              {tab === "team" && waiting > 0 && <span className="tab-badge">{waiting}</span>}
+            </span>
+            {t(`phone.tab.${tab}`)}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+// ── the header ───────────────────────────────────────────────────────────────────────────────
+
+/** The project's header on a phone: back to all projects, its name and how the work goes, the
+ *  environment it runs in, and its other pages behind a menu. */
+export function ProjectPhoneHead({ projectId, title, subtitle, actions, extra }: { projectId: string; title?: string; subtitle?: string; actions?: ReactNode; extra?: MenuItem[] }) {
+  const { project } = useProject(projectId);
+  const { team, board } = useTeamAndBoard(projectId);
+  const counts = teamCounts(team?.staff ?? [], board?.tasks ?? []);
+  const env: TerminalEnvName = project?.settings.default_env ?? project?.folders[0]?.env ?? "container";
+  const line = [plural("phone.working", counts.working), counts.review ? plural("phone.review", counts.review) : ""].filter(Boolean).join(" · ");
+  const pages: MenuItem[] = [
+    ...(extra ?? []),
+    ...(extra?.length ? ["-" as const] : []),
+    { label: t("focus.page.brief"), icon: "pen", onSelect: () => navigate(projectPagePath(projectId, "brief")) },
+    { label: t("focus.page.journal"), icon: "journal", onSelect: () => navigate(projectPagePath(projectId, "journal")) },
+    { label: t("focus.page.wakeups"), icon: "clock", onSelect: () => navigate(projectPagePath(projectId, "wakeups")) },
+    { label: t("focus.page.folders"), icon: "folder", onSelect: () => navigate(projectPagePath(projectId, "folders")) },
+  ];
+  return (
+    <PageHeader
+      title={title ?? project?.name ?? "…"}
+      subtitle={subtitle ?? (team ? line : undefined)}
+      back={pathFor("agents")}
+      actions={
+        <>
+          {actions}
+          {project && <span className={`chip tiny env-chip ${env}`} title={t(`team.env.${env}`)}>{t(`term.env.short.${env}`)}</span>}
+          <OverflowMenu items={pages} label={t("phone.pages")} />
+        </>
+      }
+    />
+  );
+}
+
+// ── the banner ───────────────────────────────────────────────────────────────────────────────
+
+/** Who is asking, in words: the member by name, or the orchestrator. */
+function askerLine(ask: Ask, names: Map<string, string>): string {
+  const name = ask.staff_id ? names.get(ask.staff_id) : undefined;
+  if (!name) return t(ask.kind === "permission" ? "phone.ask.orchestrator.permission" : "phone.ask.orchestrator");
+  return t(ask.kind === "permission" ? "phone.ask.permission" : ask.kind === "folder" ? "phone.ask.folder" : "phone.ask.question", { name });
+}
+
+/**
+ * The answers to one request, each a thumb-sized button: its options, or allow and deny, and
+ * "Answer…" for words of the operator's own. The first answer to reach the host wins; one that lost
+ * to an answer given elsewhere (Telegram, the desktop) says so, and the request leaves either way.
+ */
+export function AskAnswers({ ask, projectId, toast }: { ask: Ask; projectId: string; toast: (text: string) => void }) {
+  const [writing, setWriting] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const options = Array.isArray(ask.detail?.options) ? ask.detail.options.filter((o): o is string => typeof o === "string") : [];
+  async function send(body: { selected?: string[]; text?: string; allow?: boolean }) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/asks/${enc(ask.id)}/answer`, body);
+      toast(t("focus.ask.sent"));
+    } catch (e) {
+      toast(e instanceof ApiError && e.status === 409 ? t("focus.ask.conflict") : errorText(e));
+    } finally {
+      setBusy(false);
+      setWriting(false);
+      setText("");
+      invalidate(`/api/asks?project=${enc(projectId)}`);
+      invalidate(`/api/projects/${enc(projectId)}/board`);
+      invalidate(`/api/projects/${enc(projectId)}/staff`);
+    }
+  }
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const words = text.trim();
+    if (ask.kind === "permission") void send({ allow: false, text: words });
+    else if (words) void send({ text: words });
+  };
+  const permission = ask.kind === "permission" || ask.kind === "folder";
+  return (
+    <div className="ask-answers">
+      {!writing && (
+        <div className="ask-answers-row">
+          {permission ? (
+            <>
+              <button className="btn primary" disabled={busy} onClick={() => void send({ allow: true })}>{t(ask.kind === "folder" ? "focus.ask.yes" : "phone.ask.allow")}</button>
+              <button className="btn" disabled={busy} onClick={() => void send({ allow: false })}>{t(ask.kind === "folder" ? "focus.ask.no" : "phone.ask.deny")}</button>
+            </>
+          ) : (
+            options.map((option, i) => (
+              <button key={option} className={`btn ${i === 0 ? "primary" : ""}`} disabled={busy} onClick={() => void send({ selected: [option] })}>{option}</button>
+            ))
+          )}
+          {ask.kind !== "folder" && (
+            <button className="btn ghost" disabled={busy} onClick={() => setWriting(true)}>{t(ask.kind === "permission" ? "phone.ask.denyWhy" : "phone.ask.write")}</button>
+          )}
+        </div>
+      )}
+      {writing && (
+        <form className="ask-answers-own" onSubmit={submit}>
+          <input
+            className="field"
+            autoFocus
+            value={text}
+            maxLength={4000}
+            placeholder={t(ask.kind === "permission" ? "phone.ask.why" : "focus.ask.placeholder")}
+            aria-label={t(ask.kind === "permission" ? "phone.ask.why" : "focus.ask.placeholder")}
+            enterKeyHint="send"
+            onChange={(e) => setText(e.target.value)}
+          />
+          <button className="btn primary" type="submit" disabled={busy || (ask.kind !== "permission" && !text.trim())}>{t("focus.ask.send")}</button>
+          <button className="iconbtn" type="button" onClick={() => setWriting(false)} aria-label={t("common.cancel")} title={t("common.cancel")}><Icon name="close" /></button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/** The request that has waited longest for the operator, at the top of a tab, answered in place. */
+export function NeedsYouBanner({ projectId, toast }: { projectId: string; toast: (text: string) => void }) {
+  const { ask, waiting } = useOperatorAsks(projectId);
+  const { data: team } = useQuery<{ staff: Staff[] }>(staffKey(projectId), { staleMs: 5000 });
+  if (!ask) return null;
+  const names = new Map((team?.staff ?? []).map((m) => [m.id, m.name]));
+  return (
+    <section className="needs-banner" data-ask={ask.short_id} aria-label={t("phone.needs")}>
+      <div className="needs-banner-head">
+        <Icon name="alert" size={14} />
+        <span className="grow">{t("phone.needs")}</span>
+        {waiting > 1 && <span className="needs-banner-more">{t("phone.needs.more", { n: waiting - 1 })}</span>}
+        <span className="needs-banner-when">{relTime(ask.created_at)}</span>
+      </div>
+      <div className="needs-banner-text"><b>{askerLine(ask, names)}</b> {ask.text}</div>
+      <AskAnswers key={ask.id} ask={ask} projectId={projectId} toast={toast} />
+    </section>
+  );
+}
+
+// ── the team ─────────────────────────────────────────────────────────────────────────────────
+
+/** Where a member leads on a phone: into its conversation, its terminal, or its card to edit. */
+function memberPath(projectId: string, member: Staff): string | null {
+  if (member.live?.session_id) return projectSessionPath(projectId, member.live.session_id);
+  if (member.live?.terminal_id) return pathFor("terminals", member.live.terminal_id);
+  return null;
+}
+
+export function PhoneTeam({ projectId, toast }: { projectId: string; toast: (text: string) => void }) {
+  const { team, board } = useTeamAndBoard(projectId);
+  const [hiring, setHiring] = useState(false);
+  const [editing, setEditing] = useState<Staff | null>(null);
+  const { team: members, oneOff } = splitTeam(team?.staff ?? []);
+  const tasks = new Map((board?.tasks ?? []).map((task) => [task.id, task.title]));
+  const open = (member: Staff) => {
+    const path = memberPath(projectId, member);
+    if (path) navigate(path);
+    else setEditing(member);
+  };
+  const reload = () => invalidate(`/api/projects/${enc(projectId)}/staff`);
+  const row = (member: Staff) => <PhoneStaffRow key={member.id} member={member} task={member.live?.task_id ? tasks.get(member.live.task_id) : undefined} onOpen={() => open(member)} onEdit={() => setEditing(member)} />;
+  return (
+    <>
+      <ProjectPhoneHead
+        projectId={projectId}
+        actions={team && !team.project.ephemeral ? <button className="iconbtn" onClick={() => setHiring(true)} aria-label={t("team.hire")} title={t("team.hire")}><Icon name="plus" /></button> : undefined}
+      />
+      <div className="screen phone-project">
+        <NeedsYouBanner projectId={projectId} toast={toast} />
+        {!team && <Skeleton rows={4} />}
+        {team && members.length === 0 && oneOff.length === 0 && (
+          <div className="empty">
+            <b>{t("team.empty")}</b>
+            <div>{t("team.empty.sub")}</div>
+          </div>
+        )}
+        {members.length > 0 && <div className="phone-staff" role="list">{members.map(row)}</div>}
+        {oneOff.length > 0 && (
+          <>
+            <div className="section-title">{t("focus.oneoff")} <span className="n">{oneOff.length}</span></div>
+            <div className="phone-staff" role="list">{oneOff.map(row)}</div>
+          </>
+        )}
+      </div>
+      {hiring && team && <StaffSheet team={team} onClose={() => setHiring(false)} onDone={reload} toast={toast} />}
+      {editing && team && <StaffSheet team={team} member={editing} onClose={() => setEditing(null)} onDone={reload} toast={toast} />}
+    </>
+  );
+}
+
+/** A member as M8 draws it: who, what runs them and where, what they are on, and a dot for how it goes. */
+function PhoneStaffRow({ member, task, onOpen, onEdit }: { member: Staff; task?: string; onOpen: () => void; onEdit: () => void }) {
+  const tone = staffTone(member);
+  const wait = firstWait(member);
+  const line = wait
+    ? t("focus.wait.line", { reason: t(waitKey(wait.reason)), n: wait.position })
+    : [task, member.live?.waiting_for || t(`focus.tone.${tone}`)].filter(Boolean).join(" · ");
+  // The row opens the member's work; editing the member is the small button beside it, so the
+  // common tap goes where the work is and the rare one is still a thumb away.
+  return (
+    <div className="phone-staff-item" role="listitem" data-staff={member.id}>
+    <button className="phone-staff-row" onClick={onOpen} title={wait?.detail || undefined}>
+      <StaffAvatar name={member.name} color={member.color} />
+      <span className="phone-staff-main">
+        <span className="phone-staff-name">
+          <span className="truncate">{member.name}</span>
+          {!member.one_off && member.role && <span className="phone-staff-role truncate">{member.role}</span>}
+          <HarnessBadge harness={member.harness} />
+          {member.env === "host" && <span className="focus-host">{t("team.env.host")}</span>}
+        </span>
+        <span className={`phone-staff-line truncate ${wait || tone === "waiting" ? "waits" : ""}`}>{line}</span>
+      </span>
+      <span className={`focus-dot tone-${tone}`} aria-label={t(`focus.tone.${tone}`)} role="img" />
+    </button>
+    <button className="iconbtn phone-staff-edit" onClick={onEdit} aria-label={t("team.edit.for", { name: member.name })} title={t("team.edit.for", { name: member.name })}>
+      <Icon name="more" />
+    </button>
+    </div>
+  );
+}
+
+// ── the board ────────────────────────────────────────────────────────────────────────────────
+
+export function PhoneBoard({ projectId, toast, board }: { projectId: string; toast: (text: string) => void; board: ReactNode }) {
+  const { project } = useProject(projectId);
+  // The board's own bar under the header carries its counts and its "+": the header only names it.
+  return (
+    <>
+      <ProjectPhoneHead projectId={projectId} title={project ? t("pboard.title.of", { name: project.name }) : t("focus.page.board")} subtitle="" />
+      <div className="phone-project phone-board">
+        <NeedsYouBanner projectId={projectId} toast={toast} />
+        {board}
+      </div>
+    </>
+  );
+}
+
+// ── the terminals ────────────────────────────────────────────────────────────────────────────
+
+/** A terminal's line on a phone: running, how long ago it spoke, or how it ended. */
+function terminalLine(row: TerminalRow): string {
+  if (row.status !== "running") return row.exit_signal ? t("term.state.exitedSignal", { signal: row.exit_signal }) : t("focus.terminal.code", { code: row.exit_code ?? "?" });
+  return row.last_output_at ? t("phone.term.spoke", { when: relTime(row.last_output_at) }) : t("term.running");
+}
+
+export function PhoneTerminals({ projectId, toast }: { projectId: string; toast: (text: string) => void }) {
+  const { project } = useProject(projectId);
+  const { data } = useQuery<{ terminals: TerminalRow[] }>(terminalsKey(projectId), { pollMs: 10000, staleMs: 3000 });
+  const rows = Array.isArray(data?.terminals) ? data!.terminals : [];
+  const [making, setMaking] = useState(false);
+  // A new terminal opens in the project's first folder of its default environment; the Terminals
+  // screen, one menu away, is where any other folder is chosen.
+  const env: TerminalEnvName = project?.settings.default_env ?? project?.folders[0]?.env ?? "container";
+  const folder = project?.folders.find((f) => f.env === env && !f.readonly) ?? project?.folders.find((f) => f.env === env);
+  async function make() {
+    setMaking(true);
+    try {
+      const { openFreeTerminal } = await import("../screens/Terminals");
+      await openFreeTerminal(env, folder?.path, projectId, toast);
+      invalidate(terminalsKey(projectId));
+    } finally {
+      setMaking(false);
+    }
+  }
+  return (
+    <>
+      <ProjectPhoneHead
+        projectId={projectId}
+        title={t("focus.page.terminals")}
+        subtitle={project?.name}
+        actions={<button className="iconbtn" disabled={making || !project} onClick={() => void make()} aria-label={t("term.new")} title={t("term.new")}><Icon name="plus" /></button>}
+      />
+      <div className="screen phone-project">
+        <NeedsYouBanner projectId={projectId} toast={toast} />
+        {!data && <Skeleton rows={2} />}
+        {data && rows.length === 0 && <div className="empty calm">{t("focus.terminals.empty")}</div>}
+        <div className="phone-terms" role="list">
+          {rows.map((row) => (
+            <a key={row.id} role="listitem" className={`phone-term ${row.status === "running" ? "" : "ended"} ${row.env}`} href={pathFor("terminals", row.id)} onClick={(e) => go(e, pathFor("terminals", row.id))} data-terminal={row.id}>
+              <Icon name={row.env === "host" ? "lock" : "terminal"} size={18} />
+              <span className="phone-term-main">
+                <span className="phone-term-title truncate">{row.title || t("term.untitled")}</span>
+                <span className="phone-term-line truncate">{[row.owner.label, terminalLine(row)].filter(Boolean).join(" · ")}</span>
+              </span>
+              <span className={`term-env ${row.env}`}>{t(`term.env.short.${row.env}`)}</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── a staff member's terminal ────────────────────────────────────────────────────────────────
+
+/**
+ * A command-line member's terminal on a phone (M3): what the operator writes goes to the member as a
+ * message through the team's delivery, with a receipt, instead of being typed into its program; and
+ * the member's open request is answered from the buttons above the keys.
+ */
+export function StaffPhoneTerminal({ staffId, projectId, ...props }: PhoneTerminalProps & { staffId: string; projectId: string | null }) {
+  const { data: member } = useMember(staffId);
+  const pid = projectId ?? member?.project_id ?? "";
+  const { data } = useQuery<{ asks: Ask[] }>(pid ? operatorAsksKey(pid) : null, { pollMs: 10000, staleMs: 2000 });
+  useEvent(["ask.", "permission."], (event) => {
+    if (pid && event.project_id === pid) invalidate(`/api/asks?project=${enc(pid)}`);
+  }, [pid]);
+  const mine = oldestOpen((data?.asks ?? []).filter((a) => a.staff_id === staffId)).ask;
+  const name = member?.name ?? "";
+  const compose = {
+    placeholder: name ? t("term.phone.compose.staff", { name }) : t("term.phone.compose"),
+    onSend: async (text: string) => {
+      try {
+        await api.post(`/api/staff/${enc(staffId)}/tell`, { text, mode: "queue" });
+        toast(t("phone.told", { name: name || t("focus.team") }));
+        invalidate(`/api/staff/${enc(staffId)}/messages`);
+        return true;
+      } catch (e) {
+        toast(errorText(e));
+        return false;
+      }
+    },
+  };
+  const actions = mine && pid ? (
+    <div className="term-phone-ask" data-ask={mine.short_id}>
+      <div className="term-phone-ask-text truncate">{mine.text}</div>
+      <AskAnswers key={mine.id} ask={mine} projectId={pid} toast={toast} />
+    </div>
+  ) : null;
+  return <PhoneTerminal {...props} compose={compose} actions={actions} />;
+}

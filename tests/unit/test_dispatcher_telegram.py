@@ -167,3 +167,27 @@ async def test_a_request_that_acts_on_the_host_is_posted_without_buttons(front: 
 async def _flushed(front: TelegramFront) -> None:
     """The inbound buffer waits a moment before it submits; let it."""
     await asyncio.sleep(0.05)
+
+
+async def test_a_mirrored_request_is_not_posted_again_in_the_projects_topic(front: TelegramFront, settings: Settings, tmp_path: Any) -> None:  # noqa: F811
+    from daedalus.extensions.project_topics import ProjectTopics  # Lazy: only this test drives the topic poster
+
+    _forum(front)
+    main, dispatches, team = await _main(front, settings)
+    await main.ensure()
+    team.app.extensions["dispatcher_telegram"] = DispatcherTelegram(team.app, front, main)
+    (tmp_path / "bakery").mkdir()
+    project = await project_with(front.manager, tmp_path / "bakery", orchestrator=False)
+    orchestrator = await front.manager.create_session("Orchestrator · Bakery", project_id=project.id)
+    await front.manager.projects.update_orchestrator(project.id, enabled=True)
+    await front.manager.projects.set_orchestrator(project.id, expect="", value=orchestrator.session.id)
+    project = await front.manager.projects.get(project.id)
+    dispatch = await dispatches.create(project, text="Choose a database")
+    await front.manager.asks.open(project.id, origin="orchestrator", kind="question", text="Postgres or SQLite?", routed_to="operator", detail={"options": ["Postgres"]}, dispatch_id=dispatch.id)
+    await front.manager.asks.open(project.id, origin="orchestrator", kind="question", text="New logo?", routed_to="operator", detail={"options": []})
+    topics = ProjectTopics(team.app, front)
+    assert await topics.ensure(project) is not None
+    assert await topics.post_requests(project) == 1
+    bot: RecordingBot = front.bot  # type: ignore[assignment]
+    assert not any("Postgres or SQLite?" in m["text"] for m in bot.sent), "the main orchestrator's window posts it, once"
+    assert any("New logo?" in m["text"] for m in bot.sent)

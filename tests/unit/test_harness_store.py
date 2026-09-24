@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import daedalus.harness.claude  # noqa: F401 — registers the one adapter there is, whichever test ran first
 from daedalus.harness.catalog import HarnessCatalog
 from daedalus.harness.contract import (
     AgentEntry,
@@ -160,7 +161,8 @@ async def test_the_catalog_lists_every_harness_with_what_is_derived_from_the_cod
     assert (claude["installed"], claude["tested"], claude["supported"], claude["label"], claude["steer"]) == (True, True, True, "Claude Code", "tui_queue")
     assert (entries["opencode"]["tested"], entries["opencode"]["supported"]) == (False, False)
     assert (entries["codex"]["installed"], entries["codex"]["tested"], entries["codex"]["logged_in"]) == (False, False, "unknown")
-    # No adapter is registered yet, and the listing says so rather than offering a harness nothing can run.
-    assert not any(e["adapter"] for e in entries.values())
+    # Only Claude Code has an adapter so far, and the listing says which can run rather than offering a
+    # harness nothing can run.
+    assert [name for name, e in entries.items() if e["adapter"]] == ["claude"]
     assert all(not e["installed"] for e in await catalog.harnesses("host"))
     assert catalog.capabilities("grok").steer == "cancel_and_send"

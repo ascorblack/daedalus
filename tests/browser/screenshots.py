@@ -1442,6 +1442,97 @@ def run_focus() -> int:
     return UNHANDLED.report()
 
 
+IRA_SCREEN = (
+    f"{ESC}1m⏺{ESC}0m Update(src/lib/cart.ts)\r\n"
+    f"  {ESC}2m⎿{ESC}0m  Updated with {ESC}32m6 additions{ESC}0m\r\n\r\n"
+    f"{ESC}1m⏺{ESC}0m Bash(npm install @stripe/stripe-js)\r\n"
+    f"{ESC}2m╭──────────────────────────────────────╮{ESC}0m\r\n"
+    f"{ESC}2m│{ESC}0m {ESC}1mBash command{ESC}0m                         {ESC}2m│{ESC}0m\r\n"
+    f"{ESC}2m│{ESC}0m   npm install @stripe/stripe-js      {ESC}2m│{ESC}0m\r\n"
+    f"{ESC}2m│{ESC}0m Do you want to proceed?              {ESC}2m│{ESC}0m\r\n"
+    f"{ESC}2m│{ESC}0m {ESC}36m❯ 1. Yes{ESC}0m                             {ESC}2m│{ESC}0m\r\n"
+    f"{ESC}2m│{ESC}0m   2. No, and tell Claude what to do  {ESC}2m│{ESC}0m\r\n"
+    f"{ESC}2m╰──────────────────────────────────────╯{ESC}0m\r\n"
+)
+
+
+def phone_terminal_shots(context) -> None:  # type: ignore[no-untyped-def]
+    """The phone's terminal (M3, M3б): a shell with the soft keyboard up and Ctrl armed, and a staff
+    member's terminal whose request is answered above the keys."""
+    from terminal_stub import TerminalStub
+
+    term = TerminalStub(S1)
+    term.add("d1tests00000", title="bash · bakery-api", cwd="/home/operator/work/bakery-api")
+    term.emit("d1tests00000", "".join(
+        f"{line}\r\n" for line in [
+            f"{ESC}32mbakery-api{ESC}0m $ docker compose ps", "NAME        STATUS          PORTS", f"api         {ESC}32mUp 2 hours{ESC}0m      8000/tcp",
+            f"worker      {ESC}32mUp 2 hours{ESC}0m", f"db          {ESC}32mUp 2 hours{ESC}0m      5432/tcp", f"{ESC}32mbakery-api{ESC}0m $ tail -f logs/orders.log",
+            f"{ESC}2m14:23:58{ESC}0m order {ESC}1m#1042{ESC}0m created", f"{ESC}2m14:23:58{ESC}0m notify → baker {ESC}32mok{ESC}0m",
+            f"{ESC}2m14:24:05{ESC}0m order {ESC}1m#1043{ESC}0m created", f"{ESC}2m14:24:05{ESC}0m notify → baker {ESC}32mok{ESC}0m",
+        ]))
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    term.install(page)
+    page.add_init_script("try { localStorage.setItem('daedalus.term.renderer', 'dom'); } catch (e) {}")
+    page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+    page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
+    page.locator(".chat-head .term-button").click()
+    page.locator(".term-sheet .term-sheet-row").first.click()
+    page.wait_for_selector(".term-phone .term-view[data-state='live']", timeout=15000)
+    # The soft keyboard takes the lower 336 px: the picture is what stays visible above it.
+    page.locator(".term-phone .term-screen").tap()
+    page.set_viewport_size({"width": PHONE["width"], "height": PHONE["height"] - 336})
+    page.locator(".term-keys .term-key[data-key='ctrl']").tap()
+    page.wait_for_timeout(1000)
+    page.screenshot(path=str(OUT / "phone-terminal-keyboard.png"))
+    print("wrote phone-terminal-keyboard")
+    page.set_viewport_size(PHONE)
+    page.close()
+
+    focus = FocusStub.bakery(LANG)
+    focus.ask_from_ira(LANG)
+    staff_term = TerminalStub(S1)
+    staff_term.add("tm-ira", title="claude · Ira", owner_kind="staff", owner_id="st-ira", project_id=focus.projects[0]["id"], owner_label="Ira", cwd="/home/operator/work/bakery-site")
+    staff_term.emit("tm-ira", IRA_SCREEN)
+    page = context.new_page()
+    page.route("**/api/**", focus_stub(focus))
+    staff_term.install(page)
+    page.add_init_script("try { localStorage.setItem('daedalus.term.renderer', 'dom'); } catch (e) {}")
+    page.goto(f"{BASE}/terminals/tm-ira?token=t&scheme=dark&lang={LANG}")
+    page.wait_for_selector(".term-phone-actions .ask-answers-row .btn", timeout=15000)
+    page.wait_for_selector(".term-phone .term-view[data-state='live']", timeout=15000)
+    page.wait_for_timeout(1000)
+    page.screenshot(path=str(OUT / "phone-staff-terminal.png"))
+    print("wrote phone-staff-terminal")
+    page.close()
+
+
+def phone_project_shots(context) -> None:  # type: ignore[no-untyped-def]
+    """A project on the phone (M8, M8б): the team under the request that waits longest, and the board."""
+    focus = FocusStub.bakery(LANG)
+    focus.ask_from_ira(LANG)
+    page = context.new_page()
+    page.route("**/api/**", focus_stub(focus))
+    pid = focus.projects[0]["id"]
+    shot(page, "phone-project", f"project/{pid}/team", wait=".needs-banner .ask-answers-row .btn", settle=700)
+    shot(page, "phone-board", f"project/{pid}/board", wait=".pboard-list .pcard", settle=700)
+    shot(page, "phone-orchestrator", f"project/{pid}", wait=".chat.in-project .event-card", settle=900)
+    page.close()
+
+
+def run_phone() -> int:
+    """The phone's terminal and a project on the phone (``ONLY=phone``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        phone_terminal_shots(phone)
+        phone_project_shots(phone)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1507,7 +1598,7 @@ def run() -> int:
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
-        shot(page, "phone-team", f"project/{P1}/team", wait=".staff-row")
+        shot(page, "phone-team", f"project/{P1}/team", wait=".phone-staff-row")
         shot(page, "phone-settings-notifications", "settings/notifications", wait=".nrows .nrow", before=open_first_kind, settle=500)
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
@@ -1517,11 +1608,12 @@ def run() -> int:
     # The notification centre needs a stream of its own for the toasts, and focus mode an installation
     # with an orchestrated project; each reports what went unanswered.
     notifications = run_notifications()
-    return run_focus() or notifications
+    phone = run_phone()
+    return run_focus() or notifications or phone
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

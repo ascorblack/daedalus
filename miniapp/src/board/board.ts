@@ -161,3 +161,48 @@ export const NEXT: Record<TaskStatus, TaskStatus[]> = {
 };
 
 export const emptyBrief = (): Brief => ({ objective: "", deliverable: "", boundaries: "", done_when: "" });
+
+/** Why Merge cannot be pressed, as the host names it; the app words each code, and `text` is the host's own sentence. */
+export type ReviewBlocker = { code: "status" | "branch" | "merged" | "dirty" | "moved" | "unknown" | "conflicts" | "checklist" | string; text: string };
+
+/** What merging a staff branch would bring, from `GET /api/board/{task}/review`. */
+export type Review = {
+  task_id: string;
+  title: string;
+  status: TaskStatus;
+  merge_state: ProjectTask["merge_state"];
+  branch: string;
+  base: string;
+  current: string;
+  folder: { id: string; path: string; label: string; env: string };
+  exists: boolean;
+  on_base: boolean;
+  folder_clean: boolean;
+  merged: boolean;
+  commits: { sha: string; author: string; at: string; subject: string }[];
+  more_commits: boolean;
+  files: { path: string; added: number | null; removed: number | null }[];
+  added: number;
+  removed: number;
+  patch: string;
+  patch_complete: boolean;
+  conflicts: string[] | null;
+  receipts: { criterion: string; command: string; exit_code: number; passed: boolean; at: string }[];
+  can_merge: boolean;
+  blockers: ReviewBlocker[];
+};
+
+/** The blocker codes the app has words for; any other is shown in the host's words. */
+export const BLOCKER_CODES = ["status", "branch", "merged", "dirty", "moved", "unknown", "conflicts", "checklist"] as const;
+
+/** The first reason Merge is disabled, the one the button's hint names; null when it may be pressed. */
+export function mergeBlock(review: Pick<Review, "can_merge" | "blockers">): ReviewBlocker | null {
+  if (review.can_merge) return null;
+  // Conflicts first: they are the orchestrator's to sort out, and the rest the operator fixes in the folder.
+  return review.blockers.find((b) => b.code === "conflicts") ?? review.blockers[0] ?? { code: "unknown", text: "" };
+}
+
+/** A task whose Accept is really Merge: its work is on a staff branch not merged yet. */
+export function mergesOnAccept(task: Pick<ProjectTask, "branch" | "merge_state">): boolean {
+  return Boolean(task.branch) && task.merge_state !== "merged";
+}

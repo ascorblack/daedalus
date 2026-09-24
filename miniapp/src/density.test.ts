@@ -266,6 +266,17 @@ describe("rows and controls", () => {
     expect(decl(".term-dock")).not.toContain("--chat-w");
   });
 
+  it("give a phone's terminal and project the thumb's sizes from the tokens, and the visible height", () => {
+    // The keys row is a row of controls, and a banner's answers and a project's rows are touch rows:
+    // on a phone the tokens make them 40 and 44 px, so nothing here states a size of its own. The
+    // terminal is as tall as what the phone shows, which is what keeps its keys above the keyboard.
+    expect(decl(".term-key")).toContain("height: var(--ctl-h)");
+    expect(decl(".term-phone")).toContain("height: var(--vh, 100dvh)");
+    expect(decl(".ask-answers-row .btn")).toContain("min-height: var(--row-h-touch)");
+    expect(decl(".phone-staff-row")).toContain("min-height: calc(var(--row-h-touch)");
+    expect(decl(".tabbar.project-tabs")).toContain("position: static");
+  });
+
   it("fold a step of the run into 28 px", () => {
     expect(decl(".act")).toContain("min-height: 28px");
   });

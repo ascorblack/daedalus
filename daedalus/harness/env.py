@@ -24,6 +24,9 @@ from daedalus.harness.capabilities import Capabilities
 
 STRIP = ("CLAUDE*", "TMUX*")
 KEEP = frozenset({"CLAUDE_CONFIG_DIR"})
+DAEMON_STRIP = ("TMUX*",)
+"""What a terminal specification asks the daemon to strip beyond its own list, which already holds
+``CLAUDE*`` with ``CLAUDE_CONFIG_DIR`` kept."""
 FIXED = {"TERM": "xterm-256color", "COLORTERM": "truecolor"}
 UTF8_FALLBACK = "C.UTF-8"
 
@@ -70,16 +73,17 @@ class TerminalEnvironment:
 def terminal_environment(extra: Mapping[str, str], *, capabilities: Capabilities | None = None) -> TerminalEnvironment:
     """The rule in the form a terminal specification carries it.
 
-    The daemon strips every ``CLAUDE*`` on its own already, ``CLAUDE_CONFIG_DIR`` included, and a
-    host process cannot put back a value it never saw; keeping that one variable is the daemon's to
-    do. Until it does, a host Claude with a non-default configuration directory needs it named in
-    the launch's ``extra``. The terminal settings and the locale are the daemon's as well.
+    The daemon strips every ``CLAUDE*`` and ``TMUX*`` on its own, keeping ``CLAUDE_CONFIG_DIR``,
+    so ``CLAUDE*`` is not passed on: a caller's strip pattern knows no exception, and passing it
+    removed ``CLAUDE_CONFIG_DIR`` again — a host Claude with its configuration elsewhere then
+    started as if never signed in (found against the real Claude Code). The terminal settings and
+    the locale are the daemon's as well.
     """
     values: dict[str, str] = {}
     if capabilities is not None:
         values.update(dict(capabilities.autoupdate_off))
     values.update(extra)
-    return TerminalEnvironment(strip=STRIP, set=values)
+    return TerminalEnvironment(strip=DAEMON_STRIP, set=values)
 
 
-__all__ = ["FIXED", "KEEP", "STRIP", "UTF8_FALLBACK", "TerminalEnvironment", "launch_environment", "terminal_environment"]
+__all__ = ["DAEMON_STRIP", "FIXED", "KEEP", "STRIP", "UTF8_FALLBACK", "TerminalEnvironment", "launch_environment", "terminal_environment"]

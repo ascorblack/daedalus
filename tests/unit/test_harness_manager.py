@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+import daedalus.harness.claude  # noqa: F401 — registers the one adapter there is, whichever test ran first
 from daedalus.config import HarnessConfig
 from daedalus.harness.contract import CheckResult, CheckStep, EnvironmentPort
 from daedalus.harness.manager import NODE, HarnessManager, HarnessRefused
@@ -182,8 +183,8 @@ async def test_a_check_finds_each_cli_with_its_version_sign_in_agents_and_models
         assert claude["models"] == ["fable", "opus", "sonnet", "haiku"] and "acceptEdits" in claude["modes"]
         assert (claude["tested"], claude["supported"], claude["update_available"], claude["operation"]) == (True, True, False, None)
         assert claude["binary_path"] == str(b.rig.bin / "claude")
-        # No adapter can run any of them as staff yet, and the listing says so instead of pretending.
-        assert claude["unavailable"] == "Daedalus cannot run Claude Code as staff yet"
+        # Claude Code has an adapter; installed and signed in, nothing holds it back.
+        assert claude["unavailable"] == "", claude["unavailable"]
 
         assert (rows["codex"]["logged_in"], rows["codex"]["models"]) == ("no", ["gpt-5-codex", "gpt-5"])
         assert rows["codex"]["unavailable"] == "Codex is not signed in in the container environment"

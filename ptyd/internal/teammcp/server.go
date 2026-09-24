@@ -13,12 +13,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
@@ -62,7 +65,7 @@ const (
 // CLI shows a server's stderr in its MCP diagnostics). Calls still waiting when the client goes are
 // abandoned, which releases their held posts at the listener.
 func Serve(ctx context.Context, env func(string) string, in io.Reader, out io.Writer, logw io.Writer) error {
-	s := &server{out: out, logw: logw, calls: map[string]context.CancelFunc{}}
+	s := &server{out: out, logw: logw, calls: map[string]context.CancelFunc{}, callPrefix: callPrefix(env("DAEDALUS_LAUNCH_ID"))}
 	s.askHold = holdFrom(env, "DAEDALUS_ASK_HOLD_MS", DefaultAskHold, s.logf)
 	s.reportHold = holdFrom(env, "DAEDALUS_REPORT_HOLD_MS", DefaultReportHold, s.logf)
 	route, err := routeFrom(env)
@@ -116,6 +119,22 @@ type server struct {
 	mu    sync.Mutex
 	calls map[string]context.CancelFunc
 	wg    sync.WaitGroup
+
+	// callPrefix and seq make every call's id: the launch, this process, and the call's number. The
+	// host dedupes on it, so a post it sees twice — replayed after a restart of the host — makes one
+	// report and one question, not two. The process part keeps ids apart when the CLI restarts this
+	// server within the same launch.
+	callPrefix string
+	seq        atomic.Int64
+}
+
+func callPrefix(launch string) string {
+	nonce := make([]byte, 4)
+	_, _ = rand.Read(nonce)
+	if launch == "" {
+		launch = "nolaunch"
+	}
+	return launch + ":" + hex.EncodeToString(nonce)
 }
 
 type message struct {
@@ -152,11 +171,14 @@ func (s *server) handle(ctx context.Context, line []byte) {
 	}
 	switch m.Method {
 	case "initialize":
-		s.reply(m.ID, s.initialize(m.Params), nil)
+		result, client := s.initialize(m.Params)
+		s.reply(m.ID, result, nil)
+		s.announce(ctx, "initialize", client)
 	case "ping":
 		s.reply(m.ID, struct{}{}, nil)
 	case "tools/list":
 		s.reply(m.ID, map[string]any{"tools": toolList(s.askHold)}, nil)
+		s.announce(ctx, "tools/list", nil)
 	case "tools/call":
 		s.startCall(ctx, m)
 	default:
@@ -164,7 +186,24 @@ func (s *server) handle(ctx context.Context, line []byte) {
 	}
 }
 
-func (s *server) initialize(params json.RawMessage) map[string]any {
+// announce posts that the CLI reached a stage of loading the tools, in the background: the CLI's
+// handshake never waits on the host.
+func (s *server) announce(ctx context.Context, stage string, client map[string]any) {
+	if s.route == nil {
+		return
+	}
+	fields := map[string]any{"stage": stage}
+	if client != nil {
+		fields["client"] = client
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.route.hello(ctx, fields)
+	}()
+}
+
+func (s *server) initialize(params json.RawMessage) (map[string]any, map[string]any) {
 	var p struct {
 		ProtocolVersion string `json:"protocolVersion"`
 		ClientInfo      struct {
@@ -179,13 +218,14 @@ func (s *server) initialize(params json.RawMessage) map[string]any {
 	} else {
 		s.logf("client %s %s proposed protocol %q; answering %s", p.ClientInfo.Name, p.ClientInfo.Version, p.ProtocolVersion, answer)
 	}
+	client := map[string]any{"name": p.ClientInfo.Name, "version": p.ClientInfo.Version, "protocol": p.ProtocolVersion}
 	return map[string]any{
 		"protocolVersion": answer,
 		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 		"serverInfo":      map[string]any{"name": ServerName, "version": version.Version},
 		"instructions": "Report tells your project's orchestrator how your task stands; AskOrchestrator asks it " +
 			"something you cannot decide yourself.",
-	}
+	}, client
 }
 
 // startCall runs a tools/call on its own, because AskOrchestrator waits minutes and the client may
@@ -212,6 +252,7 @@ func (s *server) startCall(ctx context.Context, m message) {
 		s.reply(m.ID, toolResult("the team is not available: "+s.routeErr.Error(), true), nil)
 		return
 	}
+	req.fields["call_id"] = s.callPrefix + ":" + strconv.FormatInt(s.seq.Add(1), 10)
 	key := string(m.ID)
 	callCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()

@@ -21,8 +21,8 @@ daemon that actually hosts a CLI:
 - The side channels: ``exec.run`` (a program of the allowlist, not in a terminal, killed as a group
   on timeout), ``fs.set_roots``/``stat``/``list``/``read``/``tail`` over real files under the roots
   and never on the deny list, ``net.allow``/``net.dial`` to a unix socket in the launch's dial
-  directory or a registered loopback port, relayed over a channel, and ``hooks.register_launch``/
-  ``unregister_launch``/``reply`` with a real hook listener on ``127.0.0.1:0``: token checked,
+  directory or a registered loopback port, relayed over a channel, and ``hooks.register_launch``
+  (file names of a few plain parts)/``put_file``/``unregister_launch``/``reply`` with a real hook listener on ``127.0.0.1:0``: token checked,
   unknown launch 410, a post held for ``wait_ms`` (or ``daedalus_hold_ms`` in the body) until the
   host replies or the hold expires with an empty 204, published as a ``hook`` event in the one
   event order.
@@ -763,6 +763,15 @@ class LivePtyd(FakePtyd):
         st = real.stat()
         return {"exists": True, "type": "dir" if real.is_dir() else "file", "size": st.st_size, "mtime": stamp_of(st.st_mtime), "mode": oct(st.st_mode & 0o777), "file_id": f"{st.st_dev}:{st.st_ino}"}
 
+    async def _m_fs_mkdir(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = Path(str(params["path"]))
+        if not path.is_absolute() or str(path) == "/":
+            raise _RpcFail(-32602, "a folder to make is an absolute path below the root")
+        created = not path.exists()
+        path.mkdir(parents=True, exist_ok=True)
+        st = path.stat()
+        return {"exists": True, "type": "dir", "size": st.st_size, "mtime": stamp_of(st.st_mtime), "writable": True, "created": created}
+
     async def _m_fs_list(self, params: dict[str, Any]) -> dict[str, Any]:
         real = self._allowed_path(str(params["path"]))
         if not real.is_dir():
@@ -839,9 +848,13 @@ class LivePtyd(FakePtyd):
         dial.mkdir(mode=0o700, parents=True)
         names = []
         for name, data in (params.get("files") or {}).items():
-            if "/" in name or name in ("", ".", ".."):
-                raise _RpcFail(-32602, f"a file name may not be a path: {name!r}")
-            path = directory / name
+            # A few plain parts joined by '/', as the daemon allows (a skill has to sit at a fixed
+            # place under a directory the CLI is given); never a way out of the launch directory.
+            parts = name.split("/")
+            if len(parts) > 6 or any(part in ("", ".", "..") for part in parts):
+                raise _RpcFail(-32602, f"a file name is plain parts inside the launch directory: {name!r}")
+            path = directory.joinpath(*parts)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             path.write_bytes(base64.b64decode(data))
             path.chmod(0o600)
             names.append(name)
@@ -850,6 +863,22 @@ class LivePtyd(FakePtyd):
         self.launches[launch_id] = launch
         env = self._launch_env(launch)
         return {"launch_id": launch_id, "hook_url": env["DAEDALUS_HOOK_URL"], "hook_token": launch.token, "dir": str(directory), "dial_dir": str(dial), "env": env, "files": sorted(names)}
+
+    async def _m_hooks_put_file(self, params: dict[str, Any]) -> dict[str, Any]:
+        launch = self.launches.get(str(params["launch_id"]))
+        if launch is None:
+            raise _RpcFail(1008, "no such launch")
+        name = str(params["name"])
+        if "/" in name or name in ("", ".", ".."):
+            raise _RpcFail(-32602, f"a file added later is one plain name: {name!r}")
+        path = launch.dir / name
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            raise _RpcFail(-32602, f"file {name} exists") from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(base64.b64decode(params.get("data") or ""))
+        return {"path": str(path)}
 
     async def _m_hooks_unregister_launch(self, params: dict[str, Any]) -> dict[str, Any]:
         launch_id = str(params["launch_id"])

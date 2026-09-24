@@ -19,6 +19,7 @@ import { createTerminalConfirmed, endTerminal } from "./actions";
 import { clampHeight, closeTab, DockState, loadDock, loadSandboxChoice, openTab, prune, replaceTab, sandboxOffer, sandboxToggle, saveDock, saveSandboxChoice, setSplit, splitCandidate, toggleDock } from "./dockstate";
 import type { TerminalState } from "./instance";
 import { instanceFor, setTerminalEnvs, terminals } from "./terminals";
+import { PhoneTerminal } from "./mobile";
 import { CopyOutputButton, TerminalView } from "./view";
 
 /** How often the session's terminals are listed while its screen is open. */
@@ -543,6 +544,23 @@ export function TerminalFull({ dock, phone, workspace, fileOpener }: { dock: Doc
   if (!id) return null;
   const row = dock.rowOf(id);
   const st = dock.states[id];
+  // A phone gets the terminal with its keys row, compose line and touch (mobile.tsx).
+  if (phone) {
+    return (
+      <PhoneTerminal
+        id={id}
+        row={row}
+        onBack={dock.restore}
+        onEnd={() => void dock.end(id)}
+        onRestart={() => void dock.restart(id)}
+        onRemove={() => void dock.remove(id)}
+        workspace={workspace}
+        fileOpener={fileOpener}
+        focusToken={dock.focusToken}
+        onState={dock.onState}
+      />
+    );
+  }
   return createPortal(
     <div className="term-full" role="dialog" aria-label={tabTitle(row, st)} data-full={id}>
       <div className="term-full-head">

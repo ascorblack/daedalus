@@ -187,10 +187,25 @@ class StaffStatus(TypedDict):
 
 
 class StaffReport(TypedDict):
-    kind: Literal["checkpoint", "needs_input", "stuck", "done"]
+    kind: Literal["checkpoint", "needs_input", "stuck", "done", "turn_done"]
+    """``turn_done`` is only ever implicit: a command-line member's turn that ended with no report."""
     text: str
     refs: NotRequired[list[str]]
     actor: NotRequired[str]
+    call_id: NotRequired[str]
+    """The command-line member's call it came from; a replay of the same call is not reported again."""
+    implicit: NotRequired[bool]
+    """Made by the host from the turn's last message because the member did not report; ``needs_input``
+    when that message ends by asking something."""
+
+
+class StaffChannel(TypedDict):
+    """Whether a command-line member's team tools are connected: its CLI started ``ptyd team-mcp``
+    and read the tools. ``missing`` after the wait means its reports and questions cannot arrive,
+    though hooks, the screen and messages still work."""
+
+    team_tools: Literal["connected", "missing"]
+    detail: NotRequired[str]
 
 
 class StaffMessage(TypedDict):
@@ -387,6 +402,7 @@ REGISTRY: dict[str, EventSpec] = {
     "staff.status": EventSpec(StaffStatus),
     "staff.report": EventSpec(StaffReport),
     "staff.message": EventSpec(StaffMessage),
+    "staff.channel": EventSpec(StaffChannel),
     "task.created": EventSpec(TaskChange),
     "task.moved": EventSpec(TaskChange),
     "task.assigned": EventSpec(TaskChange),

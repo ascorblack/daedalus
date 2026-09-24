@@ -69,6 +69,8 @@ BASIS_MIN = 12
 OPEN_TASK = ("todo", "blocked")
 FINISHED_TASK = ("done", "dropped")
 ABNORMAL = ("error", "no_signal")
+SENT_BACK = "sent back by the "
+"""How a rejection from review is written into a task's notes (see ``review.py``)."""
 
 
 class AlreadyAnswered(StaffError):
@@ -118,7 +120,18 @@ def _task(row: Any) -> BoardTask:
         assignee_staff_id=row["assignee_staff_id"],
         branch=row["branch"],
         depends_on=depends,
+        sent_back=_sent_back(row),
     )
+
+
+def _sent_back(row: Any) -> str:
+    """The latest "sent back" note of a task the operator rejected from review, else nothing."""
+    if row["merge_state"] != "rejected":
+        return ""
+    for line in reversed(str(row["notes"] or "").splitlines()):
+        if SENT_BACK in line:
+            return line.split(SENT_BACK, 1)[1].partition(": ")[2].strip()
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +171,8 @@ class Team:
             on_failure=self._launch_failed,
         )
         self._pause_commits: set[asyncio.Task[None]] = set()
+        self.review: Any = None
+        """Review and merge of staff branches (``review.py``), set at install."""
         self.own_requests: Any = None
         """The orchestrators, once installed: a request the orchestrator itself made (a question to the
         operator, a folder it wants) has no staff session to deliver the answer to, so they take it."""
@@ -477,6 +492,8 @@ class Team:
                 f"\n\nThis task was worked on before, in session {predecessor.id}, which ended: {why}. "
                 "Look at what is already there before you start over."
             )
+        if task.sent_back:
+            before += f"\n\nThe operator sent this work back from review: {task.sent_back}\nChange it on the same branch, commit, and report done again."
         return prompts.STAFF_TASK.format(
             task_id=task.id,
             by="orchestrator" if by == "orchestrator" else "operator",
@@ -718,8 +735,24 @@ class Team:
         except Exception as exc:  # noqa: BLE001 — the answer is recorded; the failure to deliver it is reported beside it
             logger.warning("could not deliver the answer to %s: %s", ask.short_id, exc)
             return False, str(exc)[:500]
-        await self.ingress.status(live, "working")
+        await self._after_answer(live)
         return True, ""
+
+    async def _after_answer(self, live: LiveSession) -> None:
+        """The status once a request is answered: working again, unless another request of the
+        session is still open — then it waits on that one, a permission before a question, since a
+        permission holds the process itself."""
+        remaining = await self._open_asks(live.id)
+        current = await self.live(live.id) or live
+        if not remaining:
+            await self.ingress.status(current, "working")
+            return
+        ask = next((a for a in remaining if a.kind == "permission"), remaining[0])
+        if ask.kind == "permission":
+            words = f"permission [{ask.short_id}]: {ask.detail.get('tool') or ask.text}"
+        else:
+            words = f"question [{ask.short_id}]: {ask.text}"
+        await self.ingress.status(current, ask.kind, words)
 
     async def _announce_resolved(self, ask: Ask, *, allow: bool | None, by: str, via: str) -> None:
         """The pending events of a command-line member's request are this module's, so their answers are too,
@@ -829,7 +862,7 @@ class Team:
         if ask is None:
             return None
         if ask.open and await self.manager.asks.resolve(ask.id, "operator", {"via": via, "in_session": True}):
-            await self.ingress.status(live, "working")
+            await self._after_answer(live)
             return None
         current = await self.manager.asks.get(ask.id)
         return f"this question was already answered by the {current.resolved_by if current else 'someone else'}"
@@ -906,7 +939,7 @@ class Team:
                     "SELECT id FROM asks WHERE staff_session_id = ? AND request_ref = ? AND kind = 'permission' AND resolved_at IS NULL", (live.id, str(event.payload.get("request_id") or ""))
                 )
                 if row is not None and await self.manager.asks.resolve(row["id"], "operator", {"allow": event.payload.get("decision") == "allow", "via": event.payload.get("via"), "in_session": True}):
-                    await self.ingress.status(live, "working")
+                    await self._after_answer(live)
         elif event.type == "presence":
             for session_id in (event.payload.get("newly_attended") or {}).get("sessions") or ():
                 live = await self.live_for_session(str(session_id))
@@ -1063,8 +1096,21 @@ class Ingress:
         if actor:
             payload["actor"] = actor
         await self.team.publish("staff.status", payload, member=live.staff, session_id=live.session_id)
+        if status == "turn_done_unseen" and session.pause_requested and session.kind == "cli":
+            # A command-line member's turn ends here, not in a run of this host: this is where a
+            # pause asked for during the turn takes effect (a Daedalus member's in on_run_finished).
+            await self.team._settle_pause(LiveSession(live.staff, session))
 
     async def _open(self, live: LiveSession, kind: str, request_ref: str, text: str, detail: dict[str, Any], event_ref: str | None) -> Ask:
+        if request_ref:
+            # The same request seen again — a hook the daemon replayed after the host restarted — is
+            # the request already open, not a second one for the orchestrator to answer twice.
+            row = await self.manager.db.fetchone(
+                "SELECT id FROM asks WHERE staff_session_id = ? AND request_ref = ? AND kind = ? AND resolved_at IS NULL LIMIT 1", (live.id, request_ref, kind)
+            )
+            existing = await self.manager.asks.get(row["id"]) if row is not None else None
+            if existing is not None:
+                return existing
         project = await self.team.project(live.staff.project_id)
         routed = self.team.route(project, kind)
         ask = await self.manager.asks.open(
@@ -1116,7 +1162,9 @@ class Ingress:
             payload["error"] = after.error[:500]
         await self.team.publish("staff.message", payload, member=member)
 
-    async def report(self, live: LiveSession, kind: str, note: str, artifacts: list[str] | None = None, remember: str | None = None) -> str:
+    async def report(self, live: LiveSession, kind: str, note: str, artifacts: list[str] | None = None, remember: str | None = None, *, call_id: str | None = None) -> str:
+        if call_id and await self._reported(live, call_id):
+            return f"reported {kind}"
         if kind not in ("checkpoint", "needs_input", "stuck", "done"):
             raise ValueError("kind is checkpoint, needs_input, stuck or done")
         note = (note or "").strip()
@@ -1145,8 +1193,36 @@ class Ingress:
             payload["refs"] = refs
         if task is not None:
             payload["task_id"] = task.id
+        if call_id:
+            payload["call_id"] = call_id
         await self.team.publish("staff.report", payload, member=live.staff, session_id=live.session_id)
         return told
+
+    async def _reported(self, live: LiveSession, call_id: str) -> bool:
+        """Whether a report with this call id was already published: the host restarted after acting
+        on the post and before the daemon heard it was taken, and the daemon replayed it."""
+        row = await self.manager.db.fetchone(
+            "SELECT 1 FROM app_events WHERE project_id = ? AND type = 'staff.report' AND staff_id = ? AND json_extract(payload_json, '$.call_id') = ? LIMIT 1",
+            (live.staff.project_id, live.staff.id, call_id),
+        )
+        return row is not None
+
+    async def implicit_report(self, live: LiveSession, kind: str, text: str) -> None:
+        task = await self.team.task(live.session.task_id) if live.session.task_id else None
+        payload: dict[str, Any] = {"kind": kind, "text": text[:NOTE_MAX], "actor": "system", "implicit": True}
+        if task is not None:
+            payload["task_id"] = task.id
+        await self.team.publish("staff.report", payload, member=live.staff, session_id=live.session_id)
+
+    async def channel(self, live: LiveSession, team_tools: str, detail: str = "") -> None:
+        payload: dict[str, Any] = {"team_tools": team_tools}
+        if detail:
+            payload["detail"] = detail[:500]
+        await self.team.publish("staff.channel", payload, member=live.staff, session_id=live.session_id)
+
+    async def messages_of(self, live: LiveSession) -> list[Any]:
+        messages = await self.manager.staff.messages(live.staff.id, limit=500)
+        return [m for m in reversed(list(messages)) if m.staff_session_id == live.id]
 
     async def ask(self, live: LiveSession, question: str, options: list[str] | None = None, context: str = "") -> str:
         text = question.strip() + (f"\n\nContext: {context.strip()}" if context.strip() else "")
@@ -1181,7 +1257,10 @@ class Ingress:
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
+    from daedalus.extensions.review import Review  # Lazy: review.py imports this module for its names
+
     team = Team(app)
+    team.review = Review(app, team)
     app.extensions["staff"] = team
     handler = team.attach()
     await team.rebuild()

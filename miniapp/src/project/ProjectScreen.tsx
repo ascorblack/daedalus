@@ -5,11 +5,12 @@
 import { lazy, Suspense } from "react";
 import { Skeleton } from "../components";
 import { t } from "../i18n";
-import { navigate, pathFor, projectHome, useRoute } from "../router";
+import { back as goBack, navigate, pathFor, projectHome, projectPagePath, useRoute } from "../router";
 import { useProject } from "./data";
 import { focusView } from "./focus";
 import { BriefPage, EnableOrchestrator, FoldersPage, JournalPage, TerminalsPage, WakeupsPage } from "./pages";
 import { SetupLine } from "../main/cards";
+import { NeedsYouBanner, PhoneBoard, PhoneTeam, PhoneTerminals } from "./phone";
 
 const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 const TeamPage = lazy(() => import("../team/TeamPage").then((m) => ({ default: m.TeamPage })));
@@ -34,13 +35,28 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
         focus={{ projectId, kind: "orchestrator" }}
         onBack={() => navigate(pathFor("agents"))}
         toast={toast}
-        banner={project.setup_by === "dispatcher" ? <SetupLine projectId={projectId} name={project.name} toast={toast} /> : undefined}
+        // On a phone the request waiting longest sits under the chat's header: the orchestrator's
+        // chat is the tab a project opens on, and a question there should not wait for a scroll. A
+        // project the main orchestrator is setting up says so, with the button that ends the setup.
+        banner={
+          <>
+            {project.setup_by === "dispatcher" && <SetupLine projectId={projectId} name={project.name} toast={toast} />}
+            {!wide && <NeedsYouBanner projectId={projectId} toast={toast} />}
+          </>
+        }
       />
     ) : (
       <EnableOrchestrator project={project} toast={toast} />
     );
   } else if (view.kind === "session") {
-    body = <SessionScreen key={view.id} id={view.id} focus={{ projectId, kind: "member" }} onBack={() => navigate(home)} toast={toast} />;
+    // A member's conversation is reached from the team on a phone, and goes back there.
+    body = <SessionScreen key={view.id} id={view.id} focus={{ projectId, kind: "member" }} onBack={() => (wide ? navigate(home) : goBack(projectPagePath(projectId, "team")))} toast={toast} />;
+  } else if (!wide && view.page === "team") {
+    body = <PhoneTeam projectId={projectId} toast={toast} />;
+  } else if (!wide && view.page === "board") {
+    body = <PhoneBoard projectId={projectId} toast={toast} board={<ProjectBoard projectId={projectId} toast={toast} embedded />} />;
+  } else if (!wide && view.page === "terminals") {
+    body = <PhoneTerminals projectId={projectId} toast={toast} />;
   } else if (view.page === "team") {
     body = <TeamPage projectId={projectId} toast={toast} back={back} />;
   } else if (view.page === "board") {

@@ -69,11 +69,16 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
 
     page.route("**/api/**", stub)
     page.goto(f"{BASE}/project/{PID}/team?token=t&lang={lang}")
-    expect(page.get_by_role("heading", name=words["title"])).to_be_visible()
-    cleo = page.locator(".staff-row", has_text="Cleo")
+    # On a phone the team is a tab of the project (project/phone.tsx): the header names the project,
+    # a row opens the member's work and the button beside it edits the member, under the same name.
+    phone = width < 1024
+    row = ".phone-staff-item" if phone else ".staff-row"
+    expect(page.get_by_role("heading", name="Bakery" if phone else words["title"], exact=True)).to_be_visible()
+    cleo = page.locator(row, has_text="Cleo")
     expect(cleo).to_contain_text(words["working"])
     expect(cleo.locator(".harness-badge")).to_have_text("CC")
-    expect(cleo).to_contain_text("Claude Code · opus · acceptEdits")
+    if not phone:
+        expect(cleo).to_contain_text("Claude Code · opus · acceptEdits")
     fits(page, f"{lang} {width} list")
 
     # Hire a Daedalus member. The executors that cannot run here are there, disabled, saying why.
@@ -97,7 +102,7 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
     expect(sheet).to_have_count(0)
     hired = team.hired[-1]
     assert (hired["name"], hired["harness"], hired["agent"], hired["isolation"], hired["role"]) == ("Ada Lovelace", "daedalus", "reviewer", "worktree", "Writes the menu page"), hired
-    ada = page.locator(".staff-row", has_text="Ada Lovelace")
+    ada = page.locator(row, has_text="Ada Lovelace")
     expect(ada).to_be_visible()
     expect(ada.locator(".harness-badge")).to_have_text("D")
 
@@ -114,7 +119,7 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
     expect(sheet).to_have_count(0)
     rex = team.hired[-1]
     assert (rex["harness"], rex["agent"], rex["model"], rex["permission_mode"], rex["env"]) == ("claude", "code-reviewer", "opus", "acceptEdits", ""), rex
-    expect(page.locator(".staff-row", has_text="Rex").locator(".harness-badge")).to_have_text("CC")
+    expect(page.locator(row, has_text="Rex").locator(".harness-badge")).to_have_text("CC")
 
     # Edit it.
     page.get_by_role("button", name=words["edit"].format(name="Ada Lovelace")).click()
@@ -130,7 +135,7 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
     page.get_by_role("button", name=words["edit"].format(name="Ada Lovelace")).click()
     sheet.get_by_role("button", name=words["dismiss"]).click()
     page.locator(".dialog").get_by_role("button", name=words["dismiss"]).click()
-    expect(page.locator(".staff-row", has_text="Ada Lovelace")).to_have_count(0)
+    expect(page.locator(row, has_text="Ada Lovelace")).to_have_count(0)
 
     # A member at work cannot be dismissed; the refusal is shown as the host words it.
     page.get_by_role("button", name=words["edit"].format(name="Cleo")).click()

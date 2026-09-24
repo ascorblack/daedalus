@@ -31,6 +31,7 @@ EXTENSIONS = (
     "daedalus.extensions.subagents",
     "daedalus.extensions.staff",
     "daedalus.extensions.orchestrator",
+    "daedalus.extensions.project_topics",
     "daedalus.extensions.dispatches",
     "daedalus.extensions.dispatcher",
     "daedalus.extensions.dispatcher_projects",

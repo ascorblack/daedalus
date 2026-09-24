@@ -96,6 +96,9 @@ type DebugHook = {
   viewportY(id: string): number;
   marks(id: string): { n: number; line: number; result: string }[];
   webglContexts(): number;
+  /** Hand xterm.js a chunk as a phone's keyboard would, so it reaches the input filters. */
+  feed(id: string, data: string): void;
+  fontSize(id: string): number;
 };
 
 try {
@@ -118,6 +121,8 @@ try {
       viewportY: (id) => instanceFor(id)?.terminal?.buffer.active.viewportY ?? 0,
       marks: (id) => instanceFor(id)?.commandMarks?.describe() ?? [],
       webglContexts: () => [...live].filter((i) => i.rendererKind === "webgl").length,
+      feed: (id, data) => instanceFor(id)?.terminal?.input(data, true),
+      fontSize: (id) => instanceFor(id)?.terminal?.options.fontSize ?? 0,
     };
     (window as unknown as { __terminals: DebugHook }).__terminals = hook;
   }
