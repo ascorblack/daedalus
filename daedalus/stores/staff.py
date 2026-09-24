@@ -14,6 +14,7 @@ action, the orchestrator — learns who was first.
 
 from __future__ import annotations
 
+import builtins
 import json
 import re
 import secrets
@@ -478,6 +479,26 @@ class StaffStore:
             (project_id,),
         )
         return {r["staff_id"]: _session(r) for r in rows}
+
+    async def live_by_harness(self, harness: str) -> builtins.list[dict[str, Any]]:
+        """Every member running on ``harness`` who has a live session, across all projects, with the
+        environment the CLI runs in: the member's own, else the project's default, else this
+        process's. The harness manager refuses to update a CLI under anyone listed here."""
+        rows = await self._db.fetchall(
+            "SELECT m.id, m.name, m.env, m.project_id, p.name AS project_name, p.settings, s.id AS staff_session_id, s.status "
+            "FROM staff_sessions s JOIN staff m ON m.id = s.staff_id JOIN projects p ON p.id = m.project_id "
+            "WHERE m.harness = ? AND s.ended_at IS NULL ORDER BY p.name, m.name",
+            (harness,),
+        )
+        out = []
+        for row in rows:
+            default = str(_json(row["settings"]).get("default_env") or "")
+            env = row["env"] or (default if default in ENVIRONMENTS else "") or self.local_env
+            out.append({
+                "staff_id": row["id"], "name": row["name"], "project_id": row["project_id"], "project": row["project_name"],
+                "env": env, "staff_session_id": row["staff_session_id"], "status": row["status"],
+            })
+        return out
 
     async def session_counts(self, project_id: str) -> dict[str, int]:
         rows = await self._db.fetchall(

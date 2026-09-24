@@ -411,6 +411,12 @@ class ProjectStore:
         folders = await self._db.fetchall("SELECT * FROM project_folders WHERE project_id = ? ORDER BY position, created_at", (project_id,))
         return self._project(row, [self._folder(f) for f in folders])
 
+    async def folder_by_id(self, folder_id: str) -> ProjectFolder | None:
+        """A folder by its own id, whichever project holds it: what a form that names only the folder
+        (the hiring form asking which agents a CLI offers there) needs."""
+        row = await self._db.fetchone("SELECT * FROM project_folders WHERE id = ?", (folder_id,))
+        return self._folder(row) if row is not None else None
+
     async def for_path(self, path: Path) -> Project | None:
         """The project one of whose folders is exactly this path."""
         target = Path(os.path.normpath(path.expanduser()))

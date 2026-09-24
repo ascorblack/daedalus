@@ -105,10 +105,15 @@ class UpdateResult:
 @dataclass(frozen=True, slots=True)
 class CheckStep:
     name: str
-    """``launch``, ``hook``, ``ready``, ``deliver``, ``reply``, ``exit``."""
+    """``version``, ``supported``, ``signin`` (the manager's own), then the adapter's: ``launch``,
+    ``hook``, ``ready``, ``deliver``, ``reply``, ``exit``."""
     ok: bool
     detail: str = ""
     duration_ms: int = 0
+    skipped: bool = False
+    """The step could not be run here (no adapter for the CLI yet, the model turn switched off). A
+    skipped step is not a passed one: the screen says which were skipped, so a check that proved
+    less than it could is never shown as a full pass."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +294,18 @@ class ExecResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    path: str = ""
+    """The program ``PATH`` resolved ``argv[0]`` to, where the environment says: how a CLI was
+    installed is read from where it lives."""
+
+
+class ProgramNotFound(LookupError):
+    """``EnvironmentPort.run`` found no program of that name: the CLI is not installed there."""
+
+
+class EnvironmentUnavailable(RuntimeError):
+    """The environment cannot be reached at all (its terminal daemon is down or not installed), which
+    says nothing about whether a CLI is installed in it."""
 
 
 class TerminalPort(Protocol):
@@ -313,10 +330,20 @@ class TerminalPort(Protocol):
 
 
 class EnvironmentPort(Protocol):
-    """The environment a CLI lives in, through the daemon's allowlisted side channels."""
+    """The environment a CLI lives in, through the daemon's allowlisted side channels.
+
+    ``run`` raises ``ProgramNotFound`` when there is no such program and ``EnvironmentUnavailable``
+    when the environment cannot be reached; a program that runs and fails is a result, not an error.
+    """
 
     @property
     def name(self) -> Environment: ...
+
+    @property
+    def home(self) -> str:
+        """The home directory programs in this environment run with, where each CLI keeps its user
+        configuration; empty when the environment did not say."""
+        ...
 
     async def run(self, argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float = 30.0) -> ExecResult: ...
 
@@ -411,6 +438,7 @@ __all__ = [
     "DeliveryState",
     "Environment",
     "EnvironmentPort",
+    "EnvironmentUnavailable",
     "EventKind",
     "ExecResult",
     "HarnessAdapter",
@@ -420,6 +448,7 @@ __all__ = [
     "LaunchPlan",
     "LaunchSpec",
     "LoginState",
+    "ProgramNotFound",
     "ScreenClass",
     "SendMode",
     "StaffEvent",

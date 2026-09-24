@@ -199,6 +199,7 @@ class SideChannels:
             truncated=bool(result.get("truncated")),
             timed_out=bool(result.get("timed_out")),
             duration_ms=int(result.get("duration_ms") or 0),
+            path=str(result.get("path") or ""),
         )
         await self.audit("", env, actor, "exec", {**detail, "exit_code": out.exit_code, "signal": out.signal, "timed_out": out.timed_out, "duration_ms": out.duration_ms})
         return out

@@ -203,6 +203,10 @@ stale_hours = 6            # a 'doing' task whose session went quiet this long i
 # pointer_threshold_bytes = 16384  # longer messages go as a file with a one-line pointer
 # allow_untested = true            # launch a CLI version outside the tested range once its self-check passed
 # self_check_model_turn = true     # the check after an update sends one tiny prompt on the cheapest model
+# catalog_ttl_s = 21600            # how often each environment is checked for installed CLIs, sign-in, agents and models
+# latest_ttl_s = 21600             # how long a known latest version is trusted
+# update_timeout_s = 600
+# install_timeout_s = 900
 # opencode_port_range = "18300-18399"
 
 [ops]
