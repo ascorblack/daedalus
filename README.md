@@ -684,6 +684,18 @@ such a project carries `orchestrator: {"enabled", "session_id", "staff", "workin
 (null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
 project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
 
+**A project in Telegram.** With a bot bound, a project whose orchestrator is on gets a forum topic under
+the project's name. You write there and the orchestrator receives it; its own turns do not stream into
+the topic and its replies stay in the app. The topic shows only the orchestrator's reports and
+notifications and every request of the project that waits on you — its questions, the folders it asks
+for, the staff requests it escalated — with buttons that answer them (the first answer wins, wherever it
+was given; a late tap is told who was first) and a reply that answers in words. A request to act on the
+host is answered in the app only. Staff, subagents and the notification router never post there.
+Replacing the orchestrator keeps the topic, switching it off closes it, renaming the project renames it.
+Without a forum (private mode) the same posts come to the private chat under `[project name]`, and a
+reply to one goes to that project's orchestrator rather than to the chat's current session. Without a
+bot, nothing of this exists and the app has it all.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
