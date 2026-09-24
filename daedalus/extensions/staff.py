@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, cast
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
-from daedalus.extensions.notifications import ActionConflict, ActionOutcome, ActionRefused, Draft, ProjectNotifyPolicy
+from daedalus.extensions.notifications import ActionConflict, ActionOutcome, ActionRefused, Draft
 from daedalus.host import prompts
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.launch_queue import Admission, Entry, LaunchQueue, MachineCapacity, TerminalsCapacity
@@ -158,6 +158,9 @@ class Team:
             on_failure=self._launch_failed,
         )
         self._pause_commits: set[asyncio.Task[None]] = set()
+        self.own_requests: Any = None
+        """The orchestrators, once installed: a request the orchestrator itself made (a question to the
+        operator, a folder it wants) has no staff session to deliver the answer to, so they take it."""
 
     # -- lookups -----------------------------------------------------------------------------------
 
@@ -669,6 +672,11 @@ class Team:
         return None
 
     async def _deliver(self, ask: Ask, *, allow: bool | None, text: str | None, selected: list[str] | None, by: str) -> tuple[bool, str]:
+        if ask.origin == "orchestrator":
+            if self.own_requests is None:
+                return False, "no orchestrator is installed to take the answer"
+            delivered: tuple[bool, str] = await self.own_requests.deliver_own(ask, allow=allow, text=text, selected=selected)
+            return delivered
         live = await self.live(ask.staff_session_id) if ask.staff_session_id else None
         if live is None:
             return False, "the session that asked has ended"
@@ -682,11 +690,14 @@ class Team:
         return True, ""
 
     async def _announce_resolved(self, ask: Ask, *, allow: bool | None, by: str, via: str) -> None:
-        """The pending events of a command-line member's request are this module's, so their answers are too.
-        A Daedalus member's are the session's own, published when the session is answered or granted.
-        The notification router closes the operator's copy from these events."""
+        """The pending events of a command-line member's request are this module's, so their answers are too,
+        and so are those of the orchestrator's own requests. A Daedalus member's are the session's own,
+        published when the session is answered or granted. The notification router closes the operator's
+        copy from these events, and the orchestrator is woken by the answer to what it asked."""
         ref = str(ask.detail.get("event_ref") or "")
-        if ref.startswith("staff:"):
+        if ref.startswith("orchestrator:"):
+            await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": via, "by": by}, project_id=ask.project_id)
+        elif ref.startswith("staff:"):
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
             if ask.kind == "permission":
                 await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": "allow" if allow else "deny", "via": via, "by": by}, member=member, project_id=ask.project_id)
@@ -702,16 +713,6 @@ class Team:
                 await resolve(ref, "withdrawn", via="system")
             except Exception:  # noqa: BLE001
                 logger.warning("could not close the notification of %s", ask.short_id, exc_info=True)
-
-    async def notification_policy(self, project_id: str) -> ProjectNotifyPolicy:
-        """What the notification router holds for this project: a staff member's request waits for the
-        orchestrator a little before the operator hears of it — not at all when the operator decides."""
-        project = await self.manager.projects.get(project_id)
-        if project is None or not project.settings.orchestrator.enabled:
-            return ProjectNotifyPolicy()
-        orchestrator = project.settings.orchestrator
-        hold = 0 if orchestrator.autonomy == "ask" else self.manager.config.notifications.orchestrator_hold_seconds
-        return ProjectNotifyPolicy(orchestrated=True, hold_seconds=hold, orchestrator_session_id=orchestrator.session_id or None)
 
     async def resolve_action(self, req: Any) -> ActionOutcome:
         """An answer to a command-line member's request taken from a notification (``staff:<session>:<ask>``)."""
@@ -977,7 +978,6 @@ class Team:
         notifications = self.app.notifications
         if notifications is not None and hasattr(notifications, "register_resolver"):
             notifications.register_resolver("staff", self.resolve_action)
-            notifications.set_project_policy(self.notification_policy)
         return manager.bus.on(
             EventFilter(types=("permission.pending", "permission.resolved", "presence", "task.moved", "staff.status", "terminal.exited")),
             self.on_bus,

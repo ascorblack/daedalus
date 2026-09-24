@@ -637,6 +637,8 @@ class SettingsBody(BaseModel):
     webhooks: dict[str, Any] | None = None
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
+    orchestrator: dict[str, Any] | None = None
+    """The project orchestrator's defaults: its model preset, its wake-up batching and its limits."""
     answer_language: str | None = None
 
 
@@ -3454,6 +3456,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def terminals_screen(terminal_id: str, format: Literal["text", "vt", "runs"] = "text", scrollback: int = Query(default=0, ge=0, le=10_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return await terminal_service().read_screen(terminal_id, format=format, scrollback=scrollback)
 
+    @api.get("/api/terminals/{terminal_id}/commands")
+    async def terminals_commands(terminal_id: str, last: int = Query(default=20, ge=1, le=500), output: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The commands the terminal's shell reported, for "copy last output" and the marks."""
+        return {"commands": await terminal_service().commands(terminal_id, last=last, with_output=output)}
+
     @api.get("/api/terminals/{terminal_id}/audit")
     async def terminals_audit(terminal_id: str, limit: int = Query(default=200, ge=1, le=1000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         # The audit outlives the row on purpose, so a removed terminal's history is still answered.
@@ -3986,6 +3993,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        orchestrators = app.extensions.get("orchestrator")
+        if orchestrators is not None and (body.get("preset") or body.get("clear")):
+            # The chip on an orchestrator's chat chooses the project's orchestrator model: the next
+            # orchestrator of the project, after a replacement, runs the same one.
+            await orchestrators.model_chosen(session_id, body.get("preset") or None, clear=bool(body.get("clear")))
         return {"ok": True, "model": await session_model_label(state), **(await session_thinking(state))}
 
     # -- MCP per session --------------------------------------------------------------
@@ -4915,6 +4927,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         data["usd_per_day"] = settings.usd_per_day
         data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
         data["search_backends"] = websearch.catalogue()
+        # What an empty orchestrator preset means, so the setting can show it preselected.
+        data["orchestrator"]["strongest"] = app.config.strongest_preset() or ""
         return mask_provider_keys(data)
 
     def _keyproxy_origin() -> str:
@@ -5239,7 +5253,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         raw["model"]["chain"] = [c for c in raw["model"].get("chain", []) if c != preset_id]
         # Removing the last model is allowed: an installation with none is a state the app knows —
         # it asks for one — and refusing would leave a wrong entry no one can take out.
-        for section in ("model", "vision", "voice"):
+        for section in ("model", "vision", "voice", "orchestrator"):
             if raw[section].get("preset") == preset_id:
                 raw[section]["preset"] = ""
         return await _save_provider_config(type(app.config).model_validate(raw))
