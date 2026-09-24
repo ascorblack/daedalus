@@ -985,7 +985,7 @@ class ModeConfig(BaseModel):
     description: str = ""
 
 
-PLAN_MODE_TOOLS_ONLY = ["Read", "Find", "Search", "WebFetch", "WebSearch", "HistorySearch", "HistoryExpand", "Recall", "Remember", "Skill", "ImageView", "BoardList", "BoardGet", "ScheduleList", "LoopStatus", "JobOutput", "JobList", "ServiceList", "ServiceLogs", "McpList", "PeerList", "SubAgentList", "IntentList", "LearningReport", "AskUser", "StaySilent"]
+PLAN_MODE_TOOLS_ONLY = ["Read", "Find", "Search", "WebFetch", "WebSearch", "HistorySearch", "HistoryExpand", "Recall", "Remember", "Skill", "ImageView", "BoardList", "BoardGet", "ScheduleList", "LoopStatus", "JobOutput", "JobList", "ServiceList", "ServiceLogs", "TerminalRead", "McpList", "PeerList", "SubAgentList", "IntentList", "LearningReport", "AskUser", "StaySilent"]
 """What a plan may do: read, search, look, remember and ask. Everything else — files, commands, Verify, sending,
 starting, peers, MCP tools — is off until the operator switches the mode."""
 
@@ -1257,6 +1257,10 @@ class TerminalsConfig(BaseModel):
     """How often the Terminals screen refreshes its previews while it is visible."""
     agent_launch_wait_seconds: float = Field(default=600.0, ge=0)
     """How long an agent's launch waits in line for a free place under the cap before it gives up."""
+    agent_reads_host: bool = False
+    """Whether a session's agent may read the host terminals of its own session. Off by default: a
+    host terminal is the operator's own machine, where a screen can hold what was never meant for a
+    model — a password prompt's surroundings, another project's secrets."""
 
 
 class HeartbeatConfig(BaseModel):

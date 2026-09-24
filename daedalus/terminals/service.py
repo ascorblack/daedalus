@@ -835,6 +835,16 @@ class Terminals(SideChannels):
         await self._publish("terminal.exited", payload, row)
         return True
 
+    async def publish_event(self, terminal_id: str, event_type: str, payload: dict[str, Any]) -> bool:
+        """Publish an event about a terminal with the ids its row names: the project, and the session
+        or staff member that owns it. False when the host has no row for it — a terminal it neither
+        created nor adopted is nobody's, and an event without an owner would reach no filter."""
+        row = await self.db.fetchone("SELECT id, project_id, owner_kind, owner_id FROM terminals WHERE id = ?", (terminal_id,))
+        if row is None:
+            return False
+        await self._publish(event_type, payload, dict(row))
+        return True
+
     async def _publish(self, event_type: str, payload: dict[str, Any], row: dict[str, Any]) -> None:
         if self.bus is None:
             return
@@ -1169,25 +1179,69 @@ class Terminals(SideChannels):
             raise rpc_failure(exc, "attaching") from None
         return Attachment(terminal_id=terminal_id, env=row["env"], client_id=str(result.get("client_id") or ""), channel=client.channel(int(result["channel"])), client=client)
 
+    async def commands(self, terminal_id: str, *, last: int = 20, with_output: bool = False) -> builtins.list[dict[str, Any]]:
+        """The commands a shell reported running, newest last; ``Unsupported`` until the daemon keeps them."""
+        row = await self._row(terminal_id)
+        result = await self._call(row["env"], "terminal.commands", {"id": terminal_id, "last": max(1, min(last, 500)), "with_output": with_output}, what="listing the commands")
+        return [c for c in result.get("commands") or [] if isinstance(c, dict)]
+
     async def agent_service(self, op: str, **kwargs: Any) -> Any:
         """What a session's own agent may ask of its terminals: read them, never write them.
 
-        Only terminals the session owns, and never a host terminal: what is on the operator's own
-        machine is not the agent's to read unless a later setting says so.
+        Only terminals the session owns. A host terminal is the operator's own machine, so it is left
+        out unless ``terminals.agent_reads_host`` says otherwise; a terminal that is not readable is
+        answered exactly like one that does not exist, so its id says nothing either.
+
+        Operations: ``list``; ``resolve`` (``terminal`` = an id, a title, or empty for the only one);
+        ``screen``, ``output`` and ``commands`` (``terminal_id``).
         """
         session_id = str(kwargs.pop("session_id"))
         owner = Owner("session", session_id)
+        host_too = self.config().agent_reads_host
         if op == "list":
-            return [v for v in await self.list(owner=owner) if v["env"] != "host"]
+            return [v for v in await self.list(owner=owner) if host_too or v["env"] != "host"]
+        if op == "resolve":
+            return await self._agent_terminal(owner, str(kwargs.get("terminal") or "").strip(), host_too=host_too)
         terminal_id = str(kwargs.pop("terminal_id", "") or "")
-        row = await self._row(terminal_id)
-        if (row["owner_kind"], row["owner_id"]) != ("session", session_id) or row["env"] == "host":
+        row = await self.db.fetchone("SELECT owner_kind, owner_id, env FROM terminals WHERE id = ?", (terminal_id,))
+        if row is None or (row["owner_kind"], row["owner_id"]) != ("session", session_id) or (row["env"] == "host" and not host_too):
             raise NotFound(f"no terminal {terminal_id} of this session")
         if op == "output":
             return await self.read_output(terminal_id, since_seq=int(kwargs.get("since_seq") or 0), max_bytes=int(kwargs.get("max_bytes") or 65536))
         if op == "screen":
             return await self.read_screen(terminal_id, scrollback=int(kwargs.get("scrollback") or 0))
+        if op == "commands":
+            return await self.commands(terminal_id, last=int(kwargs.get("last") or 20))
         raise InvalidRequest(f"unknown terminal operation {op!r}")
+
+    async def _agent_terminal(self, owner: Owner, ref: str, *, host_too: bool) -> TerminalView:
+        """The session's terminal an agent means: by id, by title (case aside), or the only one."""
+        views = [v for v in await self.list(owner=owner) if host_too or v["env"] != "host"]
+        if not views:
+            raise NotFound("this session has no terminals")
+        if ref:
+            for view in views:
+                if view["id"] == ref:
+                    return view
+            named = [v for v in views if str(v["title"]).casefold() == ref.casefold()]
+            if not named:
+                named = [v for v in views if ref.casefold() in str(v["title"]).casefold()]
+            # Two terminals may share a title ("bash · app"); the running one is the one meant, and
+            # the list is running-first.
+            running = [v for v in named if v["status"] == "running"]
+            if len(running) == 1 or (not running and len(named) == 1):
+                return (running or named)[0]
+            if not named:
+                raise NotFound(f"no terminal {ref!r} in this session; it has {self._names(views)}")
+            raise InvalidRequest(f"{ref!r} names more than one terminal: {self._names(named)}; give the id")
+        running = [v for v in views if v["status"] == "running"]
+        if len(views) == 1 or len(running) == 1:
+            return (running or views)[0]
+        raise InvalidRequest(f"this session has {len(views)} terminals; name one: {self._names(views)}")
+
+    @staticmethod
+    def _names(views: Iterable[TerminalView]) -> str:
+        return ", ".join(f"{v['id']} ({v['title']}, {v['status']})" for v in views)
 
 
 __all__ = ["Attachment", "Terminals", "TerminalView", "Waiter", "iso", "now_iso"]

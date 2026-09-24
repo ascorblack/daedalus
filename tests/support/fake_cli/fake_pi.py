@@ -249,7 +249,7 @@ class FakePi(FakeAgent):
             hold = int(os.environ.get("DAEDALUS_ASK_HOLD_MS") or 300_000)
             status, body = await post_json(f"{self.hook_url}/team", {"tool": "ask", **arguments, "daedalus_hold_ms": hold}, {"Authorization": f"Bearer {self.token}"}, hold / 1000 + 30)
             if status == 200 and body:
-                result = str(body.get("answer")) if isinstance(body, dict) and "answer" in body else json.dumps(body) if not isinstance(body, str) else body
+                result = str(body.get("text")) if isinstance(body, dict) and "text" in body else json.dumps(body) if not isinstance(body, str) else body
             else:
                 result = "No answer yet. Continue with what the brief allows, or call Report with kind needs_input and stop."
         await self.on_tool_end(name, arguments, tool_id, result, True)
