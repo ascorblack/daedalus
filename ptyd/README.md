@@ -12,6 +12,7 @@ export PKG_CONFIG_PATH="$(libghostty/build.sh)"   # the screen emulator, once (s
 go build ./cmd/ptyd
 ./ptyd serve --env container --run-dir /tmp/ptyd-run --state-dir /tmp/ptyd-state
 ./ptyd version
+./ptyd hook-post Stop < body.json   # inside a launch: what a CLI's hook runs
 ```
 
 The protocol, the run directory, the events and the guarantees about the output are specified in
@@ -34,6 +35,8 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `internal/ptyproc` | PTY start, resize, signals, ending a process tree |
 | `internal/procstat` | the process table and the machine's memory and CPU, from `/proc` |
 | `internal/events` | the ordered event log and its per-terminal rate limits |
+| `internal/sidechan` | `exec.run` and its program list, `fs.*` with its roots and deny list, `net.dial` |
+| `internal/hooks` | launches (token, overlay files, dial directory, ports), the loopback hook listener with held replies, `hook-post` |
 | `internal/wire` | frame codecs; `testdata/frames.json` is shared byte for byte with the app |
 | `internal/logx` | the log and the journal of agent writes |
 
