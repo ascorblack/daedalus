@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folder  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, folder, fulfil_shared  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -103,8 +103,8 @@ def scenario(page: Page, lang: str, unhandled: Unhandled, name: str) -> None:
             return answer(route, {"presets": {}, "model": {}})
         if path == "/api/project-directories":
             return answer(route, {"roots": [{"name": "work", "path": "/work", "readable": True, "writable": True, "project_id": None}], "docker": True})
-        if path in GATES:
-            return answer(route, GATES[path])
+        if fulfil_shared(route):
+            return None
         unhandled.record(path)
         answer(route, [])
 
