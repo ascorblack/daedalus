@@ -23,6 +23,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/sidechan"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
@@ -95,6 +96,9 @@ func startSideWith(t *testing.T, box *sandbox.Prober) (*fixture, *rpc.Side) {
 	}
 	f.daemon = &rpc.Daemon{Config: cfg, Instance: "inst1", StartedAt: time.Now().UTC(), Registry: registry,
 		Events: evlog, Log: log, EmulatorName: "fake@0", Environ: os.Environ(), Side: side, Sandbox: box}
+	if f.daemon.ShellDir, err = shellint.Install(filepath.Join(cfg.StateDir, "shell")); err != nil {
+		t.Fatal(err)
+	}
 	srv := server.New(ep.Token, log, f.daemon.Hello)
 	f.daemon.Register(srv)
 	go srv.Serve(ep.Listener)

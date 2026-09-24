@@ -82,6 +82,33 @@ class JournalNote(BaseModel):
     text: str = Field(max_length=JOURNAL_NOTE_MAX_CHARS)
 
 
+class OrchestratorBody(BaseModel):
+    """Switching a project's orchestrator on. Each field left out keeps what the project has, and a
+    project that never had one starts from the installation's defaults (Settings)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(default=None, max_length=200)
+    """A model preset id; empty is the Settings default for project orchestrators."""
+    autonomy: Literal["ask", "normal", "full"] | None = None
+    concurrency_cap: int | None = Field(default=None, ge=1)
+
+
+class OrchestratorPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(default=None, max_length=200)
+    autonomy: Literal["ask", "normal", "full"] | None = None
+    concurrency: int | None = Field(default=None, ge=1)
+    concurrency_cap: int | None = Field(default=None, ge=1)
+
+
+class ReplaceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=300)
+
+
 def host_bridge(settings: Any) -> bool:
     """Whether a terminal daemon answers on the host, so a host folder can be worked in by anything.
 
@@ -330,6 +357,62 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         entry = await manager.projects.record(project_id, "operator", "note", text)
         await manager.bus.publish("project.changed", {"change": "journal", "actor": "operator"}, project_id=project_id)
         return entry.view()
+
+    # -- the orchestrator ----------------------------------------------------------------
+
+    def orchestrators() -> Any:
+        found = app.extensions.get("orchestrator")
+        if found is None:
+            raise HTTPException(503, "orchestrators are not available on this installation")
+        return found
+
+    def office(project: Project) -> dict[str, Any]:
+        orchestrator = project.settings.orchestrator
+        return {**orchestrator.dump(), "effective_model": orchestrators().model_of(project), "project_id": project.id}
+
+    @api.post("/api/projects/{project_id}/orchestrator")
+    async def enable_orchestrator(project_id: str, body: OrchestratorBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Switch the orchestrator on; a project that has one already only changes what is sent."""
+        await existing(project_id)
+        try:
+            project = await orchestrators().enable(project_id, model=body.model, autonomy=body.autonomy, concurrency_cap=body.concurrency_cap)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return office(project)
+
+    @api.patch("/api/projects/{project_id}/orchestrator")
+    async def patch_orchestrator(project_id: str, body: OrchestratorPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        try:
+            project = await orchestrators().update(project_id, model=body.model, autonomy=body.autonomy, concurrency=body.concurrency, concurrency_cap=body.concurrency_cap)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return office(project)
+
+    @api.delete("/api/projects/{project_id}/orchestrator")
+    async def disable_orchestrator(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Switch it off. Its chat stays, with its history; what it was asked goes to the operator."""
+        await existing(project_id)
+        return office(await orchestrators().disable(project_id))
+
+    @api.post("/api/projects/{project_id}/orchestrator/replace")
+    async def replace_orchestrator(project_id: str, body: ReplaceBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A new orchestrator session in place of the current one, linked to it and journaled."""
+        await existing(project_id)
+        try:
+            project = await orchestrators().replace(project_id, body.reason or "replaced by the operator")
+        except ProjectError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return office(project)
+
+    @api.get("/api/projects/{project_id}/state")
+    async def project_state(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The state block the orchestrator reads at the start of each turn: what it sees, as it sees it."""
+        project = await existing(project_id)
+        orchestrator = project.settings.orchestrator
+        session_id = orchestrator.session_id if orchestrator.enabled else ""
+        text = await orchestrators().project_state(project, session_id=session_id or None)
+        return {"project_id": project_id, "session_id": session_id or None, "text": text, "chars": len(text), "max_chars": manager.config.orchestrator.state_max_chars}
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

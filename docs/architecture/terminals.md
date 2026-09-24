@@ -109,7 +109,7 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 | Method | Params → result | |
 |---|---|---|
 | `daemon.info` | → `{version, protocol, instance, env, os, arch, pid, started_at, uptime_s, home, shell, capabilities{sandbox, shells[], shell_integration[], emulator, stats}, hooks{listen, launches, held}, side_channels{exec_allow[], fs_roots[], state_dir}, limits{…}, counts{running, exited}, machine}` | |
-| `terminal.create` | see below → `{id, pid, cwd, cwd_fallback, shell, created_at}` | |
+| `terminal.create` | see below → `{id, pid, cwd, cwd_fallback, shell, shell_integration, created_at}` | |
 | `terminal.list` | `{ids?, preview_rows? 0..12}` → `{terminals:[Info]}` | see The screen |
 | `terminal.get` | `{id}` → `Info` | |
 | `terminal.write` | see below → `{bytes, seq_before, queued_ms, delivered_at}` | |
@@ -126,20 +126,22 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 | `terminal.keyboard` | `{id, owner: "auto" \| "human" \| "agent", ttl_ms? ≤ 86 400 000}` → `{owner, until?}` | |
 | `terminal.snapshot` | `{id, scrollback? ≤ 10000 = 2000}` → `{cols, rows, seq, first_abs_row, data_b64}` | see The screen |
 | `terminal.read_screen` | `{id, format? "text" \| "runs" \| "vt", scrollback? ≤ 10000, tail_rows?}` → `{cols, rows, cursor{x, y, visible, abs_row}, alt_screen, title, cwd, seq, first_abs_row, lines[] \| runs[][] \| data_b64, truncated?}` | |
-| `terminal.wait_for` | `{id, regex?, scope? "screen" \| "output", since_seq?, idle_ms?, timeout_ms}` → `{matched: "regex" \| "idle" \| "exited" \| "timeout", seq, match?}` | |
-| `terminal.commands`, `wait_for {command_done}` | shell integration | *not yet* |
+| `terminal.wait_for` | `{id, regex?, scope? "screen" \| "output", since_seq?, idle_ms?, command_done?, timeout_ms}` → `{matched: "regex" \| "idle" \| "command_done" \| "exited" \| "timeout", seq, match?, command?}` | see Shell integration |
+| `terminal.commands` | `{id, last? 1..500 = 20, with_output?, output_max? ≤ 256 KiB = 64 KiB}` → `{commands:[Command], busy, shell_integration}` | see Shell integration |
 | `exec.run`, `fs.*`, `net.dial`, `net.allow`, `hooks.*` | side channels for CLI adapters: see below | |
 
 ### `terminal.create`
 
 ```
-{id, argv[] | shell{program?, login? = true}, cwd?, env{}, strip_env[], cols?, rows?, title?,
+{id, argv[] | shell{program?, login? = true, integration? = true}, cwd?, env{}, strip_env[], cols?, rows?, title?,
  ring_bytes?, log_to_disk?, input_idle_ms?, sandbox?, launch_id?, labels{}}
 ```
 
 - `id` is the host's: 1–64 of `A-Z a-z 0-9 - _`. An id in use (running or exited, not forgotten) is
   `1004`.
-- `argv` is run exactly, never typed into a shell. Without it the login shell runs, as `<shell> -l`.
+- `argv` is run exactly, never typed into a shell. Without it the login shell runs, as `<shell> -l`,
+  or, for bash, zsh, fish and PowerShell, launched with its integration (see Shell integration)
+  unless `integration` is false; the reply's `shell_integration` names the one loaded, or is `""`.
   `argv[0]` is resolved against the `PATH` of the program's own environment.
 - `cwd` must be absolute. A missing directory falls back to the home directory and the reply says
   `cwd_fallback: true`.
@@ -159,7 +161,7 @@ writing, not reading:
 ```
 bwrap --ro-bind / / --dev /dev --dev-bind /dev/pts /dev/pts --proc /proc --tmpfs /tmp
       --unshare-pid --die-with-parent  [--bind <w> <w>]...  --tmpfs <run> --tmpfs <state>
-      [launch paths bound back]  --chdir <cwd> -- <program>
+      --ro-bind <state>/shell <state>/shell  [launch paths bound back]  --chdir <cwd> -- <program>
 ```
 
 - Everything is read-only except the `writable` folders and a private `/tmp`. The daemon's run
@@ -173,8 +175,9 @@ bwrap --ro-bind / / --dev /dev --dev-bind /dev/pts /dev/pts --proc /proc --tmpfs
   (`sleep 100 &`, `fg`, Ctrl+C). The outer `/dev/pts` is bound in, so `tty`, `ssh` and `sudo` find the
   terminal where it is. `TIOCSTI` in a PTY the daemon owns can only type into that same PTY.
 - `HISTFILE` is `/tmp/.shell_history` unless the caller sets it: home is read-only inside.
-- A terminal started with a launch gets back what the launch needs from the masked state
-  directory: its overlay directory and the hook command (and the daemon binary it links to)
+- What a program needs from the masked state directory is bound back: the shell-integration scripts
+  (`<state>/shell`) read-only, so a sandboxed shell keeps its command marks; and for a terminal started
+  with a launch, its overlay directory and the hook command (and the daemon binary it links to)
   read-only, its dial directory writable.
 - A working directory inside the daemon's own directories is refused (`-32602`) rather than shown as
   an empty one; one in `/tmp` that no writable folder covers is shown read-only.
@@ -199,11 +202,12 @@ program with the sandbox switched on or off.
  exited_at, last_output_at, last_input_at, last_human_input_at, cols, rows, size_owner, clients[],
  last_detach_at, keyboard{owner, until}, modes{alt_screen, bracketed_paste, mouse, app_cursor,
  mouse_mode?, kitty_flags?}, busy, last_command{command, exit_code, at}, labels, launch_id, sandbox,
- shell, output_seq, preview?}
+ shell, shell_integration?, output_seq, preview?}
 ```
 
-`busy` means a job other than the terminal's own program holds the foreground: under a shell, a
-command is running. `clients` are `{id, kind, label, via?, read_only, attached_at}`; `size_owner` is
+`busy` means a command is running: once the shell has printed a mark with its nonce, between a
+command's start and end marks; before that, and for a program that prints none, a job other than the
+terminal's own program holding the foreground. `clients` are `{id, kind, label, via?, read_only, attached_at}`; `size_owner` is
 `"host"`, `"human:<client id>"`, or null once the owning client left and no other offered a size. `cwd` and `title` follow OSC 7 and OSC 0/2. `output_seq` is one past the last
 output byte.
 
@@ -290,7 +294,7 @@ size.
 | `terminal.bell` | `{seq}` — at most one per 2 s per terminal |
 | `terminal.notify` | `{title, body, seq}` — OSC 9 and OSC 777;notify, at most one per 5 s |
 | `terminal.progress` | `{state, value, seq}` — OSC 9;4, at most one per 500 ms, the latest wins |
-| `terminal.command` | `{phase: "D", exit_code, command, abs_row, seq}` — OSC 133/633 `D` |
+| `terminal.command` | `{phase: "end", n, exit_code, command, cwd, abs_row, end_row, started_at, duration_ms, seq}` — a command ended (see Shell integration); `abs_row` is its first output row, `seq` the offset after its end mark |
 | `terminal.mode` | `{alt_screen, bracketed_paste, mouse, app_cursor, mouse_mode?, kitty_flags?}` |
 | `terminal.stats` | a `terminal.stats` result |
 | `hook` | `{launch_id, terminal_id, name, body, size, truncated?, reply_id?, hold_ms?}` — a hook post of a launch; tagged with the launch's terminal |
@@ -490,17 +494,87 @@ repeats byte for byte an answer the daemon gave to a query that client was shown
 taken for the client answering too and dropped once; the same bytes later are typing and pass.
 
 **Other events**, as the terminal produces them: `title`, `cwd`, `bell`, `notify {title, body}`,
-`progress {state, value}` and `mode {alt_screen, mouse, bracketed_paste, app_cursor}`. A client that
+`progress {state, value}`, `mode {alt_screen, mouse, bracketed_paste, app_cursor}`, and the command
+marks of Shell integration: `command {phase: "prompt", abs_row, at}` where a prompt starts,
+`command {phase: "start", n, command, abs_row, prompt_row, seq, at}` and `command {phase: "end", n,
+exit_code, command, abs_row, end_row, …, seq}`. After every SNAPSHOT of a terminal whose shell reports
+commands comes `marks {list[{n, command, exit_code, prompt_row, output_row, end_row, running}],
+first_abs_row, prompt_row}`: every command whose rows reach the snapshot's first row, as of the
+snapshot's own offset, so a client places its marks again. A `command` event queued before the
+snapshot may still arrive after `marks`; `n` identifies a command, so applying one twice is harmless. A client that
 is behind receives only the latest of each kind, except `notify`, of which at most 64 wait. A frame the
 daemon cannot use is answered with `error {code: "bad_frame"}`.
+
+## Shell integration
+
+A shell launched by the daemon marks its prompts and commands in its output, and the daemon turns the
+marks into records: what ran, where, where its prompt and output are, and how it ended.
+
+**The scripts** are compiled into the daemon and written to `<state>/shell/` at every start
+(directories 0755, files 0644), because the daemon runs where no checkout is. They are loaded by the
+launch alone; the user's own startup files are never edited, and each script reads them first, as
+the shell would have:
+
+| Shell | Launch | Reads |
+|---|---|---|
+| bash | `bash --init-file <state>/shell/bash/init.sh -i`, with `DAEDALUS_SHELL_LOGIN=1` for a login shell | `/etc/profile` and the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` (else `~/.bashrc`) for a login shell, since a login bash never reads `--init-file`; `~/.bashrc` otherwise |
+| zsh | `zsh -l` with `ZDOTDIR=<state>/shell/zsh`, and `DAEDALUS_USER_ZDOTDIR` when the environment had a `ZDOTDIR` | `.zshenv`, `.zprofile` and `.zshrc` from the user's `ZDOTDIR` (or home), each sourced at the top level with `ZDOTDIR` as the user's files expect it; after `.zshrc`, `ZDOTDIR` is handed back for good, so zsh reads the user's own `.zlogin` and a nested zsh starts plainly |
+| fish | `fish --login --init-command "source <state>/shell/fish/init.fish"` | the user's configuration, as always: the init command runs after it |
+| PowerShell | `pwsh [-Login] -NoLogo -NoExit -Command "try { . '<state>/shell/pwsh/init.ps1' } catch { }"` | the user's profile, as always. Tested with pwsh on Linux; not yet run by a daemon on Windows, where it is meant for |
+
+**The marks.** `OSC 133 ; A` where the prompt starts and `B` where it ends, `C` when a command starts,
+`D ; <exit status>` when it ends, `OSC 633 ; E ; <command line>` just before `C` (a backslash doubled,
+`;` and control characters as `\xNN`), and `OSC 7` with the directory before every prompt. What the
+user set up is extended, never replaced: bash's `PROMPT_COMMAND` gains an entry before and after its
+own (array or string), `PS0` keeps its text (bash 4.4 and later; older bash chains the user's `DEBUG`
+trap instead), and with bash-preexec loaded its hook arrays are used; zsh gains hooks in
+`precmd_functions` and `preexec_functions`; fish gains event handlers, and its `fish_prompt` is kept
+under another name and called first. `B` is appended to the prompt after the user's prompt code ran,
+so a framework that rebuilds the prompt at every prompt keeps it; a theme that rebuilds it later
+loses `B`, which costs nothing but that row. bash takes the command line from its history, checked
+against the number the prompt expected: a line kept out of the history (a leading space under
+`ignorespace`, or history switched off) is reported without its text.
+
+**The nonce.** Every mark carries `k=<nonce>`, 16 random bytes in hex, new for every terminal and
+passed in `DAEDALUS_SI_NONCE`, which the scripts take out of their environment at once (fish after the
+user's configuration ran). A shell mark without it — output replayed from a recorded session, a nested
+shell over ssh, a program imitating a shell — is ignored. Every terminal gets a nonce, so a program
+that is not a shell may report commands itself by printing marks with it. The nonce is not a secret
+from the terminal's own user: a process of the same user can read it from the shell's initial
+environment, and a log of this terminal's own output replayed into it carries it.
+
+**Records.** `C` starts a command: its number `n`, the command line from the `E` before it, the
+directory, the prompt row of the `A` before it, and its first output row (the cursor's absolute row at
+`C`). `D` ends it with its status (none when `D` carried none), its end row (the cursor's row, one
+further when the output left the cursor mid-line) and its duration. A `D` with no command open (the
+first prompt, an empty line) is ignored; an `A` or a second `C` while a command is open ends it with
+no status. A command line is kept to 4 KiB and the newest 500 commands per terminal.
+
+`Command` in `terminal.commands` is `{n, command, cwd, exit_code, started_at, finished_at,
+duration_ms, prompt_row, output_row, end_row, start_seq, end_seq, output?, output_truncated?}`,
+oldest first; a running command has no `finished_at`, `end_row` or `end_seq`. Rows are absolute
+(`first_abs_row` in The screen) and approximate across a resize. `with_output` adds each command's
+output as the screen shows it, while its rows are still in the history: the end is kept past
+`output_max`, and `output_truncated` says that some is gone. The whole answer is kept within one frame
+by leaving out the oldest commands. A terminal whose shell loaded no integration and printed no mark
+with its nonce answers `1007`.
+
+`terminal.wait_for {command_done: true}` ends on the first command whose end mark comes after
+`since_seq`, or after the output head at the call; passing the `seq_before` of the write that typed
+the command closes the race with a command that ends before the wait begins. It answers
+`{matched: "command_done", seq: <end_seq>, command: Command}`, and `1007` where commands are unknown.
+`terminal.command` events go out at every end, and `daemon.info.capabilities.shell_integration`
+lists the shells integrated with.
 
 ## The environment of a spawned program
 
 The daemon's environment, minus `DAEDALUS_PTYD_*`, `DAEDALUS_TERMINAL_ID`, `DAEDALUS_LAUNCH_*`,
-`DAEDALUS_HOOK_*`, `DAEDALUS_DIAL_DIR`, `TERM_PROGRAM*`, `VSCODE_*`, `TMUX*`, `STY`, `WINDOW`,
+`DAEDALUS_HOOK_*`, `DAEDALUS_DIAL_DIR`, `DAEDALUS_SI_*`, `DAEDALUS_SHELL_LOGIN`,
+`DAEDALUS_USER_ZDOTDIR`, `TERM_PROGRAM*`, `VSCODE_*`, `TMUX*`, `STY`, `WINDOW`,
 `KITTY_*`, `ITERM_*`, `WT_SESSION`, `CLAUDE*` and the caller's `strip_env` patterns (a name, or a
 prefix ending in `*`); plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `CLAUDE_CODE_NO_FLICKER=1`,
-`CLAUDE_CODE_SCROLL_SPEED=3`, `DAEDALUS_TERMINAL_ID=<id>` and `HOME`; plus the caller's `env` on top.
+`CLAUDE_CODE_SCROLL_SPEED=3`, `DAEDALUS_TERMINAL_ID=<id>`, `DAEDALUS_SI_NONCE=<nonce>` and `HOME`;
+plus the caller's `env` on top.
 When the effective character type (the first of `LC_ALL`, `LC_CTYPE`, `LANG` that is set) is not
 UTF-8, the non-UTF-8 overrides are removed and `LANG=C.UTF-8` is set; a user's `ru_RU.UTF-8` is
 kept.
@@ -674,6 +748,11 @@ because the token in them is a shell.
 - **The audit** records create, kill, restart, signal, keyboard, update and remove for every
   terminal, every agent write with its first 4 KiB and the SHA-256 of the whole, and each browser's
   attach and detach of a host terminal. What a person types is never recorded, only how much.
+- **Commands.** A row's `shell_integration` says whether its shell was started with its integration,
+  and the view carries it. Each `terminal.command` from the daemon is written to the row as its last
+  command (`{command, exit_code, at, duration_ms}`), so the list shows it after the daemon forgot the
+  terminal. `Terminals.commands()` and `GET /api/terminals/{id}/commands` ask the daemon for the
+  records.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
   /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
 - **The event bus.** Every terminal event on the bus carries `terminal_id`, `project_id`, and
@@ -715,6 +794,7 @@ because the token in them is a shell.
 | `GET`, `PATCH`, `DELETE /api/terminals/{id}` | the view; rename or hand to another owner; remove an ended row |
 | `POST /api/terminals/{id}/kill`, `/signal`, `/restart` | end; `{signal}`; the same program as a new terminal |
 | `GET /api/terminals/{id}/screen`, `/audit` | the screen (with the emulator); the audit, newest first |
+| `GET /api/terminals/{id}/commands?last=1..500&output=0\|1` | `{commands}`, as `terminal.commands`; 501 for a terminal whose program reports none |
 | `POST /api/terminals/{id}/ticket` | `{read_only?}` → `{ticket, expires_in}` for the WebSocket |
 | `POST /api/terminals/envs/container/update` | `{confirm?}` → `{job, running, image_version}` (202): recreate the terminals service from the image; `409 {"code": "live_terminals", "running"}` until confirmed while any run, `503 {"code": "no_rebuilder", "command"}` without a rebuilder |
 | `GET /api/terminals/envs/container/update/{job}` | `{state: pending\|completed\|failed, detail}` |

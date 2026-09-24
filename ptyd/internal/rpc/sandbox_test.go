@@ -102,9 +102,10 @@ func TestSandboxedShellWritesOnlyWhereItMay(t *testing.T) {
 	// The symlinked folder was not bound: writing through it is writing to the read-only other.
 	f.type_(t, "sb", `touch "`+link+`/through" 2>/dev/null; echo W3=$?`)
 	f.waitOutput(t, "sb", "W3=1")
-	f.type_(t, "sb", `test -e "`+token+`"; echo T=$?; ls -A "`+f.daemon.Config.StateDir+`" | wc -l | sed 's/^ */S=/'`)
+	// Of the state directory only the shell-integration scripts are there, bound back.
+	f.type_(t, "sb", `test -e "`+token+`"; echo T=$?; echo "S=$(ls -A "`+f.daemon.Config.StateDir+`" | tr '\n' ,)"`)
 	f.waitOutput(t, "sb", "T=1")
-	f.waitOutput(t, "sb", "S=0")
+	f.waitOutput(t, "sb", "S=shell,\n")
 	f.type_(t, "sb", `echo "H=$HISTFILE"; echo "TTY=$(tty)"`)
 	f.waitOutput(t, "sb", "H="+sandbox.HistoryFile)
 	if out := f.waitOutput(t, "sb", "TTY=/"); !regexp.MustCompile(`TTY=/dev/pts/\d+`).MatchString(out) {
@@ -148,7 +149,11 @@ func TestSandboxedShellKeepsJobControl(t *testing.T) {
 	waitFor(t, "a job in the foreground reads as busy", busy)
 	f.call(t, "terminal.write", map[string]any{"id": "jc", "keys": []string{"C-c"}, "wait": "none",
 		"origin": map[string]any{"kind": "agent", "actor": "test"}}, nil)
-	waitFor(t, "Ctrl+C ends the job and the shell has the foreground again", func() bool { return !busy() })
+	if !eventuallyTrue(func() bool { return !busy() }) {
+		var info term.Info
+		f.call(t, "terminal.get", map[string]any{"id": "jc"}, &info)
+		t.Fatalf("Ctrl+C did not give the shell the foreground again: %+v\n%s", info, f.waitOutput(t, "jc", ""))
+	}
 	f.type_(t, "jc", "echo J=$? $(jobs | wc -l)")
 	f.waitOutput(t, "jc", "J=130 0")
 
@@ -203,6 +208,34 @@ func TestSandboxedLaunchReachesItsOwnFilesAndHooks(t *testing.T) {
 	}
 }
 
+func TestSandboxedShellKeepsItsIntegration(t *testing.T) {
+	box := realSandbox(t)
+	f, _ := startSideWith(t, box)
+	dir := outsideTmp(t)
+	home := shellHome(t, map[string]string{".bashrc": "HISTFILE=\n"})
+	s := &shellSession{t: t, f: f, id: "si", home: home}
+	var created struct {
+		ShellIntegration string `json:"shell_integration"`
+	}
+	f.call(t, "terminal.create", map[string]any{"id": "si", "shell": map[string]any{"program": "bash"}, "cwd": dir,
+		"env": map[string]string{"HOME": home}, "sandbox": map[string]any{"writable": []string{dir}}}, &created)
+	if created.ShellIntegration != "bash" {
+		t.Fatalf("shell_integration %q", created.ShellIntegration)
+	}
+	// The scripts are in the daemon's state directory, which the sandbox hides but for them: the
+	// shell reads its init file, marks its commands, and cannot change the scripts.
+	if r := s.run("true"); r.ExitCode == nil || *r.ExitCode != 0 {
+		t.Fatalf("true: %+v\n%s", r, f.waitOutput(t, "si", ""))
+	}
+	r := s.run(`echo x >> "` + filepath.Join(f.daemon.ShellDir, "bash", "init.sh") + `"`)
+	if r.ExitCode == nil || *r.ExitCode == 0 {
+		t.Fatalf("the integration scripts were writable from the sandbox: %+v", r)
+	}
+	if got := s.commands(false); len(got) != 2 {
+		t.Fatalf("records: %+v", got)
+	}
+}
+
 func TestSandboxRefusals(t *testing.T) {
 	// Without a prober the build offers no sandbox, and says so.
 	f, _ := startSide(t)
@@ -246,11 +279,18 @@ func TestSandboxRefusals(t *testing.T) {
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
+	if !eventuallyTrue(cond) {
+		t.Fatalf("never: %s", what)
+	}
+}
+
+func eventuallyTrue(cond func() bool) bool {
 	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("never: %s", what)
+			return false
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	return true
 }

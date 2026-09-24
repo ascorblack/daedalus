@@ -23,6 +23,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
@@ -87,6 +88,9 @@ func startWith(t *testing.T, emu emulator.Factory) *fixture {
 	}
 	f.daemon = &rpc.Daemon{Config: cfg, Instance: "inst1", StartedAt: time.Now().UTC(), Registry: registry,
 		Events: evlog, Log: log, EmulatorName: "fake@0", Environ: os.Environ()}
+	if f.daemon.ShellDir, err = shellint.Install(filepath.Join(cfg.StateDir, "shell")); err != nil {
+		t.Fatal(err)
+	}
 	srv := server.New(ep.Token, log, f.daemon.Hello)
 	f.daemon.Register(srv)
 	go srv.Serve(ep.Listener)
@@ -350,7 +354,16 @@ func TestResizeSignalAndStats(t *testing.T) {
 			CPUs          int   `json:"cpus"`
 		} `json:"machine"`
 	}
-	f.call(t, "terminal.stats", map[string]any{"ids": []string{"s"}}, &stats)
+	// Busy may be stty still, or the moment between it and sleep, when the shell is the only process:
+	// the count is read again until sleep runs.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		f.call(t, "terminal.stats", map[string]any{"ids": []string{"s"}}, &stats)
+		if !stats.Supported || (len(stats.Terminals) == 1 && stats.Terminals[0].Processes >= 2) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if stats.Supported {
 		if len(stats.Terminals) != 1 || stats.Terminals[0].Processes < 2 || stats.Terminals[0].RSSBytes <= 0 {
 			t.Fatalf("stats %+v", stats)

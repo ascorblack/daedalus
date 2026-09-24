@@ -38,9 +38,10 @@ func (d *Daemon) sandboxStatus() string {
 	return d.Sandbox.Peek()
 }
 
-// wrapSandbox returns the command that runs path/argv inside the sandbox. A launch's program gets
-// back the paths of the daemon's state directory it needs — its overlay files and the hook command
-// read-only, its dial directory writable — because the sandbox hides the rest of that directory.
+// wrapSandbox returns the command that runs path/argv inside the sandbox. The program gets back the
+// paths of the daemon's state directory it needs, because the sandbox hides the rest of it: the
+// shell-integration scripts read-only, and for a launch its overlay files and the hook command
+// read-only and its dial directory writable.
 func (d *Daemon) wrapSandbox(ctx context.Context, p *sandboxParams, path string, argv []string, cwd, launchID string) (sandbox.Plan, error) {
 	if d.Sandbox == nil {
 		return sandbox.Plan{}, wire.Errorf(wire.CodeUnsupported, "the sandbox is not available in this build")
@@ -49,9 +50,14 @@ func (d *Daemon) wrapSandbox(ctx context.Context, p *sandboxParams, path string,
 		return sandbox.Plan{}, wire.Errorf(wire.CodeUnsupported, "the sandbox is not available: %s", status)
 	}
 	var rebind []sandbox.Bind
+	// The shell-integration scripts live in the state directory too: without them a sandboxed shell
+	// would start without its command marks (bash's --init-file would name a missing file).
+	if d.ShellDir != "" {
+		rebind = append(rebind, sandbox.Bind{Path: d.ShellDir})
+	}
 	if d.Side != nil && launchID != "" {
 		if paths, ok := d.Side.Launches.Paths(launchID); ok {
-			rebind = []sandbox.Bind{{Path: paths.Dir}, {Path: paths.Dial, Writable: true}, {Path: paths.Bin}, {Path: paths.Exe}}
+			rebind = append(rebind, sandbox.Bind{Path: paths.Dir}, sandbox.Bind{Path: paths.Dial, Writable: true}, sandbox.Bind{Path: paths.Bin}, sandbox.Bind{Path: paths.Exe})
 		}
 	}
 	program := append([]string{path}, argv[1:]...)

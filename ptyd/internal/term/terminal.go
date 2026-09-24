@@ -73,6 +73,10 @@ type Spec struct {
 	LaunchID    string
 	Labels      map[string]string
 	Shell       string // the shell, when the terminal runs the login shell
+	// Nonce is the launch's shell-integration nonce: only shell marks that carry it are believed.
+	// Empty, no mark is. Integration names the integration the launch loaded, or "".
+	Nonce       string
+	Integration string
 	// Sandbox is a program wrapped in bubblewrap: Path and Argv are bubblewrap's, and Program is
 	// what it runs, which is what the terminal reports as its argv.
 	Sandbox bool
@@ -146,7 +150,7 @@ type Terminal struct {
 	sizeOwner     string
 	modes         ModesInfo
 	lastCommand   *Command
-	pendingCmd    string
+	cmds          commandLog
 }
 
 type vtRequest struct {
@@ -187,6 +191,7 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 		vt: make(chan vtRequest, emulatorQueue), vtQuit: make(chan struct{}),
 		readerDone: make(chan struct{}), done: make(chan struct{}),
 		title: spec.Title, cwd: spec.Cwd, cols: spec.Cols, rows: spec.Rows, status: "running", sizeOwner: "host",
+		cmds: commandLog{nonce: spec.Nonce, integration: spec.Integration},
 	}
 	t.in = newInput(proc.Master, deps.Clock, spec.InputIdle, t.ring.Head)
 	t.in.onDelivered = t.delivered
@@ -346,24 +351,10 @@ func (t *Terminal) onMark(e emulator.Emulator, m scan.Mark, seq int64) {
 	case scan.KindProgress:
 		pub("terminal.progress", t.ID, map[string]any{"state": m.State, "value": m.Value, "seq": seq})
 	case scan.KindPrompt, scan.KindVscode:
-		switch m.Letter {
-		case 'E':
-			t.mu.Lock()
-			t.pendingCmd = m.Text
-			t.mu.Unlock()
-		case 'D':
-			now := t.deps.Clock.Now().UTC()
-			c := &Command{At: now}
-			if m.HasExit {
-				code := m.Exit
-				c.ExitCode = &code
-			}
-			t.mu.Lock()
-			c.Command, t.pendingCmd = t.pendingCmd, ""
-			t.lastCommand = c
-			t.mu.Unlock()
-			pub("terminal.command", t.ID, map[string]any{"phase": "D", "exit_code": c.ExitCode, "command": c.Command,
-				"abs_row": e.Cursor().AbsRow, "seq": seq})
+		// Marks without the launch's nonce are ignored: they are output replayed from somewhere
+		// else, a nested shell's, or a program imitating a shell.
+		if t.verifiedMark(m) {
+			t.onShellMark(e, m, seq)
 		}
 	case scan.KindQuery:
 		if t.deps.Answer != nil {

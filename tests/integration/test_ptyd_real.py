@@ -171,8 +171,10 @@ async def test_a_real_programs_marks_reach_the_event_bus(db: Database, base: Pat
     try:
         assert await service.wait_available("container", timeout=15)
         async with bus.subscribe(EventFilter(types=("terminal.",)), name="test") as sub:
-            marks = r"\033]2;building\007\033]7;file://box/srv/app\007\007\033]9;Build finished\007\033]133;D;3\007"
-            view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(base), argv=["/bin/sh", "-c", f"printf '{marks}'; sleep 1"]))
+            # A program's command marks count when they carry its terminal's nonce, as a shell's do.
+            marks = r"\033]2;building\007\033]7;file://box/srv/app\007\007\033]9;Build finished\007\033]133;C;k=%s\007\033]133;D;3;k=%s\007"
+            script = f"printf '{marks}' \"$DAEDALUS_SI_NONCE\" \"$DAEDALUS_SI_NONCE\"; sleep 1"
+            view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(base), argv=["/bin/sh", "-c", script]))
             seen: dict[str, dict[str, Any]] = {}
             async with asyncio.timeout(20):
                 while "terminal.exited" not in seen:
@@ -187,6 +189,37 @@ async def test_a_real_programs_marks_reach_the_event_bus(db: Database, base: Pat
     finally:
         await service.close()
         await bus.close()
+
+
+async def test_a_real_shell_reports_its_commands(db: Database, base: Path, daemon: subprocess.Popen[bytes]) -> None:
+    if shutil.which("bash") is None:
+        pytest.skip("bash is not installed")
+    home = base / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("HISTFILE=\nalias ll='echo from-the-alias'\n")
+    cfg = TerminalsConfig(shell="bash")
+    service = Terminals(db, run_dirs={"container": base / "run", "host": None}, config=lambda: cfg, owners=FreeOnly())
+    await service.start()
+    try:
+        assert await service.wait_available("container", timeout=15)
+        view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(base), env_vars={"HOME": str(home)}))
+        assert view["shell_integration"] is True
+        origin = Origin(actor="test")
+        for line in ("ll", "false"):
+            receipt = await service.write(view["id"], text=line + "\r", origin=origin, wait_keyboard=False)
+            done = await service.wait_for(view["id"], command_done=True, since_seq=receipt.seq_before, timeout=15)
+            assert done["matched"] == "command_done" and done["command"]["command"] == line
+        commands = await service.commands(view["id"], with_output=True)
+        assert [(c["command"], c["exit_code"]) for c in commands] == [("ll", 0), ("false", 1)]
+        assert commands[0]["output"] in ("from-the-alias", "")  # empty only from a daemon built without its screen
+
+        async def mirrored() -> Any:
+            row = await db.fetchone("SELECT last_command_json FROM terminals WHERE id = ?", (view["id"],))
+            return row["last_command_json"] and '"false"' in row["last_command_json"]
+
+        await _until(mirrored, True)
+    finally:
+        await service.close()
 
 
 class OneSession(FreeOnly):

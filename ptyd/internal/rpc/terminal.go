@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
@@ -135,13 +137,17 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	if err := d.launchEnv(p.LaunchID, extra); err != nil {
 		return nil, err
 	}
+	// Every terminal gets a nonce, not only an integrated shell: a program that prints shell marks
+	// itself (a harness, a script) is believed when it knows the nonce of the terminal it runs in.
+	nonce := shellint.NewNonce()
+	extra[shellint.NonceEnv] = nonce
 	env := term.BuildEnv(d.Environ, p.StripEnv, extra, p.ID)
 
 	argv := p.Argv
-	shell := ""
+	shell, integration := "", ""
 	if len(argv) == 0 {
 		shell = d.Config.Shell
-		login := true
+		login, integrate := true, true
 		if p.Shell != nil {
 			if p.Shell.Program != "" {
 				shell = p.Shell.Program
@@ -149,10 +155,23 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 			if p.Shell.Login != nil {
 				login = *p.Shell.Login
 			}
+			if p.Shell.Integration != nil {
+				integrate = *p.Shell.Integration
+			}
 		}
 		argv = []string{shell}
 		if login {
 			argv = append(argv, "-l")
+		}
+		if kind := shellint.KindOf(shell); integrate && kind != "" && d.ShellDir != "" {
+			userZdotdir, hasZdotdir := lookupEnv(env, "ZDOTDIR")
+			if l, ok := shellint.Rewrite(kind, shell, login, d.ShellDir, nonce, userZdotdir, hasZdotdir); ok {
+				argv, integration = l.Argv, kind
+				for k, v := range l.Env {
+					extra[k] = v
+				}
+				env = term.BuildEnv(d.Environ, p.StripEnv, extra, p.ID)
+			}
 		}
 	}
 	path, ok := term.LookPath(argv[0], env, cwd)
@@ -178,7 +197,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	t, err := d.Registry.Create(term.Spec{
 		ID: p.ID, Path: path, Argv: argv, Cwd: cwd, CwdFallback: fallback, Env: env, Cols: p.Cols, Rows: p.Rows,
 		Title: p.Title, RingBytes: ring, LogPath: logPath, InputIdle: idle, LaunchID: p.LaunchID, Labels: labels,
-		Shell: shell, Sandbox: box != nil, Program: program,
+		Shell: shell, Nonce: nonce, Integration: integration, Sandbox: box != nil, Program: program,
 	})
 	d.launchStarted(t, p.LaunchID, p.ID)
 	if err != nil {
@@ -193,7 +212,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	}
 	d.Log.Info("terminal created", "terminal", t.ID, "pid", t.Pid, "program", name, "sandbox", box != nil)
 	reply := map[string]any{"id": t.ID, "pid": t.Pid, "cwd": cwd, "cwd_fallback": fallback, "shell": shell,
-		"created_at": t.CreatedAt}
+		"shell_integration": integration, "created_at": t.CreatedAt}
 	if box != nil {
 		// What the sandbox made writable, and each folder it left read-only with the reason: the host
 		// tells the operator rather than letting a write fail later with no explanation.
@@ -204,6 +223,17 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 		reply["sandbox"] = map[string]any{"writable": plan.Writable, "skipped": skipped}
 	}
 	return reply, nil
+}
+
+// lookupEnv finds a variable in an environment list; the last assignment wins, as for a process.
+func lookupEnv(env []string, name string) (string, bool) {
+	value, found := "", false
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, name+"="); ok {
+			value, found = v, true
+		}
+	}
+	return value, found
 }
 
 func containsAny(s, chars string) bool {

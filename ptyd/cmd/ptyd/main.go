@@ -22,6 +22,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
 )
@@ -124,6 +125,13 @@ func serve(args []string) error {
 	daemon := &rpc.Daemon{
 		Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(), Registry: registry,
 		Events: evlog, Log: log, EmulatorName: production.Name, Environ: environ,
+	}
+	// Without its scripts the daemon still starts shells, plainly: marks are a convenience, and a
+	// read-only or full state directory must not cost the operator every terminal.
+	if dir, err := shellint.Install(filepath.Join(cfg.StateDir, "shell")); err != nil {
+		log.Error("shell integration unavailable", "error", err.Error())
+	} else {
+		daemon.ShellDir = dir
 	}
 	side, closeSide, err := startSide(cfg, evlog, environ, log)
 	if err != nil {

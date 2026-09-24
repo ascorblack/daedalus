@@ -46,7 +46,7 @@ class FakeTerminal:
     """The screen's lines, once a test gives it one; without, ``read_screen`` is unknown to the daemon,
     as it is to a daemon without an emulator."""
     commands: list[dict[str, Any]] | None = None
-    """The shell's commands, likewise; without, ``terminal.commands`` is unknown."""
+    """The shell's commands, likewise; without, ``terminal.commands`` says the program reports none."""
     pid: int = field(default_factory=lambda: 1000 + secrets.randbelow(30000))
     sandbox: dict[str, Any] | None = None
     """What ``terminal.create`` was asked to make writable, when it was sandboxed."""
@@ -344,7 +344,8 @@ class FakePtyd:
                 del self.terminals[term.id]
                 raise _RpcFail(1008, "launch is not registered or has ended")
             self.emit("terminal.created", term.id, {"pid": term.pid, "argv": term.argv, "cwd": term.cwd, "labels": term.labels, "launch_id": params.get("launch_id") or ""})
-            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "created_at": term.created_at, **reply}
+            integration = "" if params.get("argv") else "bash"
+            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "shell_integration": integration, "created_at": term.created_at, **reply}
         if method == "terminal.list":
             ids = params.get("ids")
             return {"terminals": [t.info(int(params.get("preview_rows") or 0)) for t in self.terminals.values() if not ids or t.id in ids]}
@@ -391,8 +392,11 @@ class FakePtyd:
             assert term.screen is not None
             return {"cols": term.cols, "rows": term.rows, "cursor": {"x": 0, "y": len(term.screen) - 1, "visible": True, "abs_row": len(term.screen) - 1},
                     "alt_screen": False, "title": term.title, "cwd": term.cwd, "seq": len(term.output), "lines": list(term.screen)}
-        if method == "terminal.commands" and self._term(params).commands is not None:
-            return {"commands": list(self._term(params).commands or [])[-int(params.get("last") or 20):]}
+        if method == "terminal.commands":
+            term = self._term(params)
+            if term.commands is None:
+                raise _RpcFail(1007, "this terminal's program reports no commands: it is not a shell with integration")
+            return {"commands": list(term.commands)[-int(params.get("last") or 20):], "busy": False, "shell_integration": "bash"}
         if method == "terminal.stats":
             running = [t for t in self.terminals.values() if t.status == "running"]
             return {"at": stamp(), "supported": True, "machine": self.machine,

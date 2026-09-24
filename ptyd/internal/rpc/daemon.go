@@ -17,6 +17,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
@@ -33,6 +34,7 @@ type Daemon struct {
 	EmulatorName string
 	Environ      []string        // the environment spawned processes inherit
 	Side         *Side           // the side channels; nil in builds and tests without them
+	ShellDir     string          // where the shell-integration scripts are installed; "" for none
 	Sandbox      *sandbox.Prober // bubblewrap; nil where the daemon offers no sandbox
 
 	sampler  *procstat.Sampler
@@ -64,6 +66,7 @@ func (d *Daemon) Register(srv *server.Server) {
 	srv.Handle("terminal.snapshot", d.snapshot)
 	srv.Handle("terminal.read_screen", d.readScreen)
 	srv.Handle("terminal.wait_for", d.waitFor)
+	srv.Handle("terminal.commands", d.commands)
 	srv.Handle("terminal.stats", d.stats)
 	d.registerSide(srv)
 }
@@ -128,7 +131,7 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 		"capabilities": map[string]any{
 			"sandbox":           d.sandboxStatus(),
 			"shells":            config.Shells(),
-			"shell_integration": []string{},
+			"shell_integration": d.integrations(),
 			"emulator":          d.EmulatorName,
 			"stats":             stats,
 		},
@@ -155,4 +158,12 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 		"counts":  map[string]any{"running": running, "exited": exited},
 		"machine": sample.Machine,
 	}, nil
+}
+
+// integrations lists the shells whose integration the daemon has installed.
+func (d *Daemon) integrations() []string {
+	if d.ShellDir == "" {
+		return []string{}
+	}
+	return shellint.Kinds
 }
