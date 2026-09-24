@@ -32,8 +32,8 @@ PROJECT = {
     "sessions": [{"id": "s1", "title": "Writer", "running": False}],
 }
 WORDS = {
-    "en": {"projects": "Projects", "remove": "Remove", "readonly": "Agents read it and never write it.", "unmounted": "Not mounted in the container yet", "terminals": "only CLI agents and host terminals reach it", "mount": "the bot sees a folder only once it is mounted", "host": "A host folder is worked in through the host terminal"},
-    "ru": {"projects": "Проекты", "remove": "Убрать", "readonly": "Агенты читают её и никогда не пишут.", "unmounted": "Ещё не смонтирована в контейнер", "terminals": "её видят только CLI-агенты и терминалы хоста", "mount": "бот видит папку, только когда она смонтирована", "host": "С папкой на хосте работают через терминал хоста"},
+    "en": {"projects": "Projects", "settings": "Settings for Bakery", "remove": "Remove", "readonly": "Agents read it and never write it.", "unmounted": "Not mounted in the container yet", "terminals": "only CLI agents and host terminals reach it", "mount": "the bot sees a folder only once it is mounted", "host": "A host folder is worked in through the host terminal"},
+    "ru": {"projects": "Проекты", "settings": "Настройки: Bakery", "remove": "Убрать", "readonly": "Агенты читают её и никогда не пишут.", "unmounted": "Ещё не смонтирована в контейнер", "terminals": "её видят только CLI-агенты и терминалы хоста", "mount": "бот видит папку, только когда она смонтирована", "host": "С папкой на хосте работают через терминал хоста"},
 }
 
 
@@ -112,7 +112,8 @@ def scenario(page: Page, lang: str, unhandled: Unhandled, name: str) -> None:
     page.goto(f"{BASE}/agents?token=t&lang={lang}")
     # The switcher is the chip in the sidebar on a desktop and a button over the chats on a phone.
     page.locator(f".project-chip:visible, .start-list-head .iconbtn[aria-label='{words['projects']}']:visible").first.click()
-    page.locator(".project-row .iconbtn").first.click()
+    # By its name: the row carries the team button as well, before the settings one.
+    page.locator(f".project-row .iconbtn[aria-label='{words['settings']}']").click()
     rows = page.locator(".dir-row")
     expect(rows).to_have_count(2)
     docs = page.locator(".dir-row[data-folder='f-docs']")
