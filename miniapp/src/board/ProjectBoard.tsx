@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Skeleton, copyText } from "../components";
 import { OverflowMenu, Sheet } from "../dialogs";
+import { useEvent, useStreamUp } from "../events";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
 import { plural, t } from "../i18n";
@@ -53,7 +54,13 @@ function launchText(launch: Launch): string | null {
 export function ProjectBoard({ projectId, toast, selected, layout = "auto" }: { projectId: string; toast: (text: string) => void; selected?: string | null; layout?: "auto" | "list" }) {
   const [showDone, setShowDone] = useState(false);
   const key = `${boardKey(projectId)}?include_done=${showDone ? 1 : 0}`;
-  const { data, error, loading, refresh } = useQuery<BoardResponse>(key, { pollMs: 10000, staleMs: 3000 });
+  // While the event stream is up the board is read again when its project changes; the poll is only
+  // the fallback for a window without the stream.
+  const live = useStreamUp();
+  const { data, error, loading, refresh } = useQuery<BoardResponse>(key, { pollMs: live ? 60000 : 10000, staleMs: 3000 });
+  useEvent(["task.", "ask.", "permission.", "staff.status"], (event) => {
+    if (event.project_id === projectId) invalidate(boardKey(projectId));
+  }, [projectId]);
   const wideWindow = useMedia("(min-width: 1024px)");
   const wide = layout === "auto" && wideWindow;
   const [filter, setFilter] = useState<Column | null>(null);
