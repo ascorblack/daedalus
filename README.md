@@ -234,7 +234,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
 | Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
-| Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
+| Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share; `TerminalRead` — the screen, output and commands of the session's own terminals, read-only |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
 | Self | `SelfWorkspace` plus either `SelfApply` (local: commit into the running checkout, restart to apply) or `SelfPropose`, `SelfRebuild`, `SelfRollback` (server: pull request, rebuild, roll back) — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
@@ -554,6 +554,35 @@ staff branch is not merged); `GET /api/board?project=<id>` is one project's task
 and orchestrator see its whole board, move only their own tasks and never to done; an ordinary agent
 keeps its own board, without the team's tasks. Each change is a `task.created`, `task.moved`,
 `task.assigned` or `task.accepted` event naming its `actor`.
+
+**A project's team at work.** `POST /api/staff/{id}/assign` with `{"task_id"}` gives a staff member a
+task from its project's board; the task needs all four parts of its brief (objective, deliverable,
+boundaries, done-when). It starts at once or waits in the project's launch queue, and the answer
+says which: `{"state": "started" | "queued", "position", "reason", "detail"}`. A launch waits while
+the project's concurrency is taken, while the member is busy with another task, while the task's
+dependencies are open, for a few seconds between two launches of one project, and — for a
+command-line member, which is a terminal session — while the machine already runs as many terminal
+sessions as its cap allows or the terminals service is not there. Each member in
+`GET /api/projects/{id}/staff` carries what it waits for under `queued`, and the listing the whole
+queue under `queue`. `POST /api/staff/{id}/tell` (`{"text", "mode": "queue" | "steer" |
+"interrupt"}`) answers with the message's receipt; `…/interrupt`, `…/pause` (finish the turn, commit
+what is uncommitted, start nothing new) and `…/release` (`{"keep_worktree"}`) control the live
+session. What staff ask — a question, or a call the policy refused — is a request:
+`GET /api/asks?project=<id>&routed_to=operator` lists the ones waiting for you, and
+`POST /api/asks/{id}/answer` (`{"allow"}`, `{"selected": [...]}` or `{"text"}`, the id or its
+six-character short form) answers one; the first answer wins, and a second gets 409 naming who was
+first. A request the orchestrator leaves unanswered for ten minutes comes to you.
+
+Push reaches a phone or a browser with the app closed once the app is served from a public https
+address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
+bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.
+The host signs and encrypts every message itself (VAPID keys made once and kept in the database).
+`GET /api/push/config` gives the key a browser subscribes with, `POST /api/push/subscriptions` takes
+what `PushSubscription.toJSON()` returns plus a `device` name, `GET` lists the devices and
+`DELETE /api/push/subscriptions/{id}` removes one; a device that fails for a week is dropped. A
+permission request or a short question carries Allow/Deny (or its options) on the notification where
+the platform shows buttons; a host-level permission never does and is answered in the app. When a
+pushed request is answered anywhere else, the other devices are told to close it.
 
 ## Layout
 

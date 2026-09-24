@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 EXTENSIONS = (
     "daedalus.extensions.notifications",
+    "daedalus.extensions.push",
     "daedalus.extensions.selfdev",
     "daedalus.extensions.scheduler",
     "daedalus.extensions.heartbeat",
@@ -28,6 +29,7 @@ EXTENSIONS = (
     "daedalus.extensions.board",
     "daedalus.extensions.peers",
     "daedalus.extensions.subagents",
+    "daedalus.extensions.staff",
     "daedalus.extensions.loops",
     "daedalus.extensions.services",
     "daedalus.extensions.balance",

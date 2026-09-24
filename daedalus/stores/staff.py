@@ -838,6 +838,31 @@ class StaffStore:
         await self._db.execute("UPDATE staff_sessions SET last_signal_at = ? WHERE id = ? AND ended_at IS NULL", (_now(), staff_session_id))
         return True
 
+    async def by_session(self, session_id: str) -> StaffSession | None:
+        """The staff session a Daedalus session belongs to, live or ended; ``None`` for any other session."""
+        row = await self._db.fetchone("SELECT * FROM staff_sessions WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1", (session_id,))
+        return _session(row) if row is not None else None
+
+    async def all_live(self) -> list[StaffSession]:
+        """Every live staff session of every project: what a host rebuilds its live map from at start."""
+        return [_session(r) for r in await self._db.fetchall("SELECT * FROM staff_sessions WHERE ended_at IS NULL ORDER BY started_at")]
+
+    async def team_token_hash(self, staff_session_id: str) -> str:
+        row = await self._db.fetchone("SELECT team_token_hash FROM staff_sessions WHERE id = ?", (staff_session_id,))
+        return str(row["team_token_hash"]) if row is not None else ""
+
+    async def request_pause(self, staff_session_id: str, requested: bool = True) -> bool:
+        """Ask a live session to stop after its turn; True when the session was live."""
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute("UPDATE staff_sessions SET pause_requested = ? WHERE id = ? AND ended_at IS NULL", (int(requested), staff_session_id))
+            changed = cursor.rowcount
+            await cursor.close()
+        return changed == 1
+
+    async def record_usage(self, staff_session_id: str, usage: dict[str, Any]) -> None:
+        """What the session has spent, as its runtime last reported it."""
+        await self._db.execute("UPDATE staff_sessions SET usage_json = ? WHERE id = ?", (json.dumps(usage), staff_session_id))
+
     async def chain(self, staff_session_id: str, *, limit: int = 50) -> list[StaffSession]:
         """The session and the ones it replaced, newest first, following ``predecessor_id``.
 

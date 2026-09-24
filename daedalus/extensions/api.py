@@ -18,7 +18,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import replace
@@ -58,6 +58,7 @@ from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
+from daedalus.extensions.push import PushRefused, PushService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.harness.capabilities import CAPABILITIES
@@ -327,6 +328,46 @@ class StaffPatch(BaseModel):
     color: str | None = None
 
 
+class AssignBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+
+
+class TellBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    mode: Literal["queue", "steer", "interrupt"] = "queue"
+
+
+class ReleaseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keep_worktree: bool = True
+
+
+class AskAnswerBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allow: bool | None = None
+    text: str | None = None
+    selected: list[str] | None = None
+
+
+class TeamReportBody(BaseModel):
+    kind: str
+    note: str
+    artifacts: list[str] | None = None
+    remember: str | None = None
+
+
+class TeamAskBody(BaseModel):
+    question: str
+    options: list[str] | None = None
+    context: str = ""
+
+
 class NewSessionBody(BaseModel):
     title: str = ""
     """Empty when the chat is started by its first message; a clip of that message stands in."""
@@ -427,11 +468,41 @@ class NotificationsSeenBody(BaseModel):
 
 
 class NotificationActBody(BaseModel):
-    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words."""
+    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words.
+
+    From a lock screen the service worker has no sign-in of its own; it sends the ``token`` that came
+    inside the pushed message instead, and names its own subscription ``endpoint`` so the
+    withdrawal that follows the answer skips the device that gave it.
+    """
 
     action: str = Field(min_length=1, max_length=64)
     value: str | None = Field(default=None, max_length=4000)
+    via: Literal["notification", "push"] = "notification"
+    token: str | None = Field(default=None, max_length=200)
+    endpoint: str | None = Field(default=None, max_length=1024)
     model_config = {"extra": "forbid"}
+
+
+class PushKeysBody(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=200)
+    auth: str = Field(min_length=1, max_length=100)
+    model_config = {"extra": "ignore"}
+
+
+class PushSubscriptionBody(BaseModel):
+    """What ``PushSubscription.toJSON()`` gives, plus a name for the device. Unknown keys (``expirationTime``) are ignored."""
+
+    endpoint: str = Field(min_length=1, max_length=1024)
+    keys: PushKeysBody
+    device: str = Field(default="", max_length=80)
+    model_config = {"extra": "ignore"}
+
+
+class PushRenewBody(PushSubscriptionBody):
+    """A subscription the browser replaced by itself; the old one's secret proves who is asking."""
+
+    old_endpoint: str = Field(min_length=1, max_length=1024)
+    old_auth: str = Field(min_length=1, max_length=100)
 
 
 class NotificationPreferencesBody(BaseModel):
@@ -1330,7 +1401,28 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # -- staff: the named members of a project's team ------------------------------------------
 
     def staff_row(member: Staff, live: Any, sessions: int) -> dict[str, Any]:
-        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions}
+        queue = getattr(app.extensions.get("staff"), "queue", None)
+        # What the member waits to start, each with why: "queued" alone is the question the
+        # operator would then have to ask.
+        queued = queue.waiting_for(member.id) if queue is not None else []
+        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions, "queued": queued}
+
+    def team_or_503() -> Any:
+        team = app.extensions.get("staff")
+        if team is None:
+            raise HTTPException(503, "the staff runtime is not running")
+        return team
+
+    async def team_call(call: Awaitable[Any]) -> Any:
+        """A team operation with its refusals as the HTTP answers the app shows as they are."""
+        try:
+            return await call
+        except KeyError as exc:
+            raise HTTPException(404, f"no such {exc.args[0] if exc.args else 'thing'}") from exc
+        except StaffBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StaffError as exc:
+            raise HTTPException(409 if type(exc).__name__ == "AlreadyAnswered" else 400, str(exc)) from exc
 
     async def staff_project(project_id: str) -> Project:
         project = await manager.projects.get(project_id)
@@ -1377,6 +1469,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 "folders": [{"id": f.id, "path": str(f.path), "label": f.label, "env": f.env, "is_git": f.is_git, "readonly": f.readonly} for f in project.folders],
             },
             "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0)) for m in members],
+            "queue": queue.queue(project_id) if (queue := getattr(app.extensions.get("staff"), "queue", None)) is not None else [],
             "counts": {"staff": sum(1 for m in members if m.active), "working": sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)},
             "choices": {
                 "harnesses": list(HARNESSES),
@@ -1456,6 +1549,84 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def staff_sessions(staff_id: str, limit: int = 50, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
         await staff_member(staff_id)
         return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
+
+    @api.post("/api/staff/{staff_id}/assign")
+    async def assign_staff(staff_id: str, body: AssignBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Give a member a task: it starts now, or waits in the project's queue with the reason."""
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.assign(member, body.task_id, by="operator"))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/tell")
+    async def tell_staff(staff_id: str, body: TellBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.tell(member, body.text, mode=body.mode, by="operator"))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/interrupt")
+    async def interrupt_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        await team_call(team.interrupt(member))
+        return {"ok": True}
+
+    @api.post("/api/staff/{staff_id}/pause")
+    async def pause_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        return await team_call(team.pause(member))  # type: ignore[no-any-return]
+
+    @api.post("/api/staff/{staff_id}/release")
+    async def release_staff(staff_id: str, body: ReleaseBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        team = team_or_503()
+        member = await staff_member(staff_id)
+        released = await team_call(team.release(member, keep_worktree=body.keep_worktree if body is not None else True))
+        return {"released": bool(released)}
+
+    @api.get("/api/asks")
+    async def list_asks(project: str, open: bool = True, routed_to: Literal["orchestrator", "operator"] | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The project's requests; ``routed_to=operator`` is "Needs you"."""
+        await staff_project(project)
+        if open:
+            asks = await manager.asks.open_for(project, routed_to)
+        else:
+            rows = await manager.db.fetchall("SELECT id FROM asks WHERE project_id = ? ORDER BY created_at DESC LIMIT 200", (project,))
+            asks = [a for a in [await manager.asks.get(r["id"]) for r in rows] if a is not None]
+        return {"asks": [a.view() for a in asks]}
+
+    @api.post("/api/asks/{ask_id}/answer")
+    async def answer_ask(ask_id: str, body: AskAnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator's answer. The first answer to reach a request wins; a later one is a 409 naming who was first."""
+        team = team_or_503()
+        return await team_call(team.answer(ask_id, allow=body.allow, text=body.text, selected=body.selected, by="operator", via="app"))  # type: ignore[no-any-return]
+
+    async def team_live(staff_session_id: str, request: Request) -> Any:
+        """A command-line member's team server, authenticated by the token minted for its launch —
+        not by the operator's credentials, which the member never holds."""
+        team = team_or_503()
+        try:
+            return team, await team.authenticate(staff_session_id, request.headers.get("x-daedalus-team-token", ""))
+        except PermissionError as exc:
+            raise HTTPException(401, str(exc)) from exc
+
+    @api.post("/api/team/{staff_session_id}/report")
+    async def team_report(staff_session_id: str, body: TeamReportBody, request: Request) -> dict[str, Any]:
+        team, live = await team_live(staff_session_id, request)
+        try:
+            told = await team.ingress.report(live, body.kind, body.note, body.artifacts, body.remember)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "text": told}
+
+    @api.post("/api/team/{staff_session_id}/ask")
+    async def team_ask(staff_session_id: str, body: TeamAskBody, request: Request) -> dict[str, Any]:
+        team, live = await team_live(staff_session_id, request)
+        try:
+            ask_id = await team.ingress.ask(live, body.question, body.options, body.context)
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        ask = await manager.asks.get(ask_id)
+        return {"ask_id": ask_id, "short_id": ask.short_id if ask else "", "text": "Asked. End your turn: the answer arrives as a message."}
 
     # -- sessions -------------------------------------------------------------------
 
@@ -4506,11 +4677,35 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such notification")
         return {"deleted": entry_id, "summary": await service.summary()}
 
+    def installed_push() -> PushService | None:
+        push = app.extensions.get("push")
+        return push if isinstance(push, PushService) else None
+
+    def push_service() -> PushService:
+        push = installed_push()
+        if push is None:
+            raise HTTPException(503, "push is not installed")
+        return push
+
     @api.post("/api/notifications/{entry_id}/act")
-    async def notifications_act(entry_id: int, body: NotificationActBody, _: dict[str, Any] = Depends(auth)) -> Any:
+    async def notifications_act(entry_id: int, body: NotificationActBody, request: Request) -> Any:
         service = notifications_service()
+        # Signed in, any action the entry offers. Otherwise only a pushed message's token, and with
+        # it only the actions marked quick: what a lock screen may do, and a host-level permission
+        # is never among them.
+        quick_only = False
         try:
-            resolution, view = await service.act(entry_id, body.action, body.value, via="notification")
+            await auth(request)
+        except HTTPException as exc:
+            push = installed_push()
+            if exc.status_code != 401 or not body.token or push is None or not await push.verify_token(entry_id, body.token):
+                raise
+            quick_only = True
+        push = installed_push()
+        if body.via == "push" and push is not None:
+            push.note_actor(entry_id, body.endpoint)
+        try:
+            resolution, view = await service.act(entry_id, body.action, body.value, via=body.via, quick_only=quick_only)
         except LookupError as exc:
             raise HTTPException(404, "no such notification") from exc
         except ActionRefused as exc:
@@ -4548,6 +4743,47 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/notifications/test")
     async def notifications_test(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {"delivered": await notifications_service().test()}
+
+    # -- web push -----------------------------------------------------------------------
+
+    @api.get("/api/push/config")
+    async def push_config(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Whether this address can take push subscriptions, and the key a browser subscribes with."""
+        return await push_service().config()
+
+    @api.get("/api/push/subscriptions")
+    async def push_subscriptions(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"subscriptions": await push_service().devices()}
+
+    @api.post("/api/push/subscriptions")
+    async def push_subscribe(body: PushSubscriptionBody, request: Request, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        push = push_service()
+        if push.reason():
+            raise HTTPException(409, push.reason())
+        try:
+            view = await push.subscribe(body.endpoint, body.keys.p256dh, body.keys.auth, device=body.device, user_agent=request.headers.get("user-agent", ""))
+        except PushRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"subscription": view}
+
+    @api.post("/api/push/subscriptions/renew")
+    async def push_renew(body: PushRenewBody) -> dict[str, Any]:
+        """Unauthenticated on purpose: the service worker renewing a subscription has no sign-in, and
+        the old subscription's secret is the proof. It can only replace a device, never add one."""
+        push = push_service()
+        try:
+            view = await push.renew(body.old_endpoint, body.old_auth, body.endpoint, body.keys.p256dh, body.keys.auth)
+        except PermissionError as exc:
+            raise HTTPException(403, "no such subscription") from exc
+        except PushRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"subscription": {"id": view["id"]}}
+
+    @api.delete("/api/push/subscriptions/{subscription_id}")
+    async def push_unsubscribe(subscription_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if not await push_service().remove(subscription_id):
+            raise HTTPException(404, "no such subscription")
+        return {"deleted": subscription_id}
 
     # -- heartbeat ------------------------------------------------------------------------
 

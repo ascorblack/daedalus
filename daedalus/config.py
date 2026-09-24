@@ -985,7 +985,7 @@ class ModeConfig(BaseModel):
     description: str = ""
 
 
-PLAN_MODE_TOOLS_ONLY = ["Read", "Find", "Search", "WebFetch", "WebSearch", "HistorySearch", "HistoryExpand", "Recall", "Remember", "Skill", "ImageView", "BoardList", "BoardGet", "ScheduleList", "LoopStatus", "JobOutput", "JobList", "ServiceList", "ServiceLogs", "McpList", "PeerList", "SubAgentList", "IntentList", "LearningReport", "AskUser", "StaySilent"]
+PLAN_MODE_TOOLS_ONLY = ["Read", "Find", "Search", "WebFetch", "WebSearch", "HistorySearch", "HistoryExpand", "Recall", "Remember", "Skill", "ImageView", "BoardList", "BoardGet", "ScheduleList", "LoopStatus", "JobOutput", "JobList", "ServiceList", "ServiceLogs", "TerminalRead", "McpList", "PeerList", "SubAgentList", "IntentList", "LearningReport", "AskUser", "StaySilent"]
 """What a plan may do: read, search, look, remember and ask. Everything else — files, commands, Verify, sending,
 starting, peers, MCP tools — is off until the operator switches the mode."""
 
@@ -1014,6 +1014,34 @@ quick factual question itself. Nothing that reads, writes or runs anything — t
 
 VOICE_ONLY_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "Projects"]
 """The tools that exist for the concierge alone; every other session is blocked from them (it has SpawnAgent)."""
+
+STAFF_BLOCKED_TOOLS = [
+    "AskUser",
+    "SpawnAgent",
+    "ScheduleCreate",
+    "ScheduleList",
+    "ScheduleDelete",
+    "LoopNext",
+    "LoopPause",
+    "LoopResume",
+    "LoopStatus",
+    "LoopStop",
+    "IntentCreate",
+    "IntentDelete",
+    "IntentList",
+    "SelfPropose",
+    "SelfApply",
+    "SelfRebuild",
+    "SelfRollback",
+    "SelfWorkspace",
+]
+"""What a staff member of a project may not call. It asks the orchestrator, not the operator
+(``AskOrchestrator``), works on the task it was given rather than starting agents, schedules, loops
+or intents of its own, and never changes the installation. Enforced by the host beside the voice rule,
+not through a mode, so editing a mode cannot hand a staff member any of them."""
+
+STAFF_ONLY_TOOLS = ["Report", "AskOrchestrator"]
+"""The tools that exist for staff alone; every other session is blocked from them."""
 
 
 class WebhookConfig(BaseModel):
@@ -1237,6 +1265,10 @@ class TerminalsConfig(BaseModel):
     """How often the Terminals screen refreshes its previews while it is visible."""
     agent_launch_wait_seconds: float = Field(default=600.0, ge=0)
     """How long an agent's launch waits in line for a free place under the cap before it gives up."""
+    agent_reads_host: bool = False
+    """Whether a session's agent may read the host terminals of its own session. Off by default: a
+    host terminal is the operator's own machine, where a screen can hold what was never meant for a
+    model — a password prompt's surroundings, another project's secrets."""
 
 
 class HeartbeatConfig(BaseModel):
@@ -1684,4 +1716,6 @@ __all__ = [
     "TtsConfig",
     "VOICE_TOOLS",
     "VOICE_ONLY_TOOLS",
+    "STAFF_BLOCKED_TOOLS",
+    "STAFF_ONLY_TOOLS",
 ]

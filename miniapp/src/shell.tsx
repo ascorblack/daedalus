@@ -9,6 +9,7 @@ import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 import { t } from "./i18n";
 import { LangPicker } from "./components";
+import { insideTerminal } from "./terminal/keys";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
 
@@ -174,6 +175,8 @@ export function useShortcuts(onPalette: () => void, selfdev: SelfDevMode) {
   useEffect(() => {
     let pendingG = 0;
     const onKey = (e: KeyboardEvent) => {
+      // A focused terminal keeps Ctrl+K and every letter: they are the shell's.
+      if (insideTerminal(e.target)) return;
       const t = e.target as HTMLElement | null;
       const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {

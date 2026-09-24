@@ -138,7 +138,7 @@ class Rig:
     ``FAKE_CLI_FAULTS``…); ``log`` is the fakes' ``FAKE_CLI_LOG``.
     """
 
-    def __init__(self, *, extra_env: Mapping[str, str] | None = None, input_idle_ms: int = 10_000, launch_grace_s: float = 30.0) -> None:
+    def __init__(self, *, extra_env: Mapping[str, str] | None = None, input_idle_ms: int = 10_000, launch_grace_s: float = 30.0, ptyd_bin: Path | None = None) -> None:
         # Short, because a unix socket path is limited to 108 bytes and dial sockets live below it.
         self.root = Path(tempfile.mkdtemp(prefix="ptyd-"))
         self.home = self.root / "home"
@@ -147,7 +147,7 @@ class Rig:
         self.log = self.root / "fake-cli.jsonl"
         for directory in (self.home, self.work):
             directory.mkdir()
-        fake_cli.install(self.bin)
+        fake_cli.install(self.bin, ptyd=ptyd_bin)
         env = {"FAKE_CLI_LOG": str(self.log), "FAKE_CLI_TIME_SCALE": "0.05", **(extra_env or {})}
         self.ptyd = LivePtyd(self.root / "run", home=self.home, bin_dir=self.bin, base_env=env, input_idle_ms=input_idle_ms, launch_grace_s=launch_grace_s)
         self.events: list[dict[str, Any]] = []

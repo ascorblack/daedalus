@@ -1,7 +1,8 @@
 """Terminals: the terminal daemons of this installation, reached through ``daedalus.terminals``.
 
 Installs the service, ties terminals to the lives of their owners — a session or a project that is
-deleted ends its terminals — and hands a session's agent read access to its own ones.
+deleted ends its terminals — retells what the daemons report on the event bus, and hands a session's
+agent read access to its own ones.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from daedalus.terminals.bus import BusBridge
 from daedalus.terminals.owners import ManagerOwners
 from daedalus.terminals.service import Terminals
 
@@ -47,6 +49,8 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     manager.delete_hooks.append(session_deleted)
     manager.project_delete_hooks.append(project_deleted)
     manager.service_hooks["terminals"] = terminals.agent_service
+    # Before the connections start, so the events replayed on the first one are retold as well.
+    terminals.subscribe(BusBridge(terminals))
     tasks = await terminals.start()
 
     async def closer() -> None:

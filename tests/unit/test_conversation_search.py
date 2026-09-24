@@ -24,6 +24,23 @@ async def add(db, sid='one', text='A bicycle route along the river', tenant='dae
     return store, message
 
 
+def complete_search(*args, **kwargs):
+    """Retry on ``partial`` instead of trusting one attempt against ``search()``'s wall-clock budget.
+
+    ``search()`` bounds its own SQLite work by real time so a loaded host returns something rather
+    than blocking; under heavy scheduling contention that budget can lapse before the process even
+    gets a turn to run the trivial query this test builds, which interrupts the scan and reports it
+    honestly as ``partial``. That flag is the actual completion signal — retrying gives the next
+    attempt a fresh budget, which is what fixed the intermittent ``IndexError`` here without ever
+    widening the deadline itself (that would just move the same race, not remove it).
+    """
+    for _ in range(10):
+        result = search(*args, **kwargs)
+        if not result['partial']:
+            return result
+    raise AssertionError('search() kept returning a partial scan across 10 attempts')
+
+
 def test_reciprocal_ranks_and_collapse_do_not_reward_long_conversations():
     assert fusion(1, 1) == pytest.approx(2 / 61)
     assert fusion(None, 2) == pytest.approx(1 / 62)
@@ -82,7 +99,7 @@ async def test_new_message_becomes_semantically_findable_and_deleted_vectors_go(
     passage = await index.next()
     await index.save(passage, [1, 0], 'test', 2)
     # Different words; only the embedding half can retrieve this passage.
-    found = search(db.path, 'daedalus', 'cycling by water', vector=[1, 0], model='test', dimension=2)
+    found = complete_search(db.path, 'daedalus', 'cycling by water', vector=[1, 0], model='test', dimension=2)
     assert found['hits'][0]['session_id'] == 'one'
     assert 'bicycle' in found['hits'][0]['snippet']
     await store.append_transcript('one', [Message(role=MessageRole.assistant, content_blocks=[TextBlock(text='A mountain trail')])])
@@ -91,7 +108,7 @@ async def test_new_message_becomes_semantically_findable_and_deleted_vectors_go(
         if passage is None:
             break
         await index.save(passage, [0, 1] if passage.text else None, 'test', 2)
-    found = search(db.path, 'daedalus', 'hill walking', vector=[0, 1], model='test', dimension=2)
+    found = complete_search(db.path, 'daedalus', 'hill walking', vector=[0, 1], model='test', dimension=2)
     assert 'mountain' in found['hits'][0]['snippet']
     await db.execute("DELETE FROM transcript WHERE session_id='one'")
     assert (await db.fetchone('SELECT count(*) FROM search_vectors'))[0] == 0

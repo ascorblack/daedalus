@@ -54,3 +54,138 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+// Web Push. The host decides what is pushed and encrypts it for this browser; what arrives here is
+// shown, and the buttons on it are answered from here without opening the app.
+//
+// Every push must show a notification: a browser that sees pushes with nothing shown treats the
+// site as abusing push (Safari cancels the subscription). The one message that shows nothing is a
+// withdrawal — a request answered elsewhere — and the host never sends that to Apple's service.
+const APP = "/app/";
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {};
+  }
+  event.waitUntil(onPush(data));
+});
+
+async function badge(unseen) {
+  const nav = self.navigator;
+  if (typeof unseen !== "number" || !nav || !("setAppBadge" in nav)) return;
+  try {
+    if (unseen > 0) await nav.setAppBadge(unseen);
+    else await nav.clearAppBadge();
+  } catch {
+    /* a platform that has the call and refuses it: the badge is a nicety */
+  }
+}
+
+async function onPush(data) {
+  await badge(data.unseen);
+  if (data.kind === "withdraw") {
+    const shown = await self.registration.getNotifications({ tag: data.tag });
+    for (const notification of shown) notification.close();
+    return;
+  }
+  const actions = Array.isArray(data.actions) ? data.actions.map((a) => ({ action: String(a.id), title: String(a.label) })) : [];
+  const options = {
+    body: data.body || "",
+    tag: data.tag || undefined,
+    // A repeat of the same thing replaces the old notification; renotify makes the replacement heard,
+    // since the host sends a repeat only when it is worth hearing.
+    renotify: !!data.tag,
+    requireInteraction: data.level === "urgent",
+    icon: "/app/icons/icon-192.png",
+    badge: "/app/icons/icon-192.png",
+    timestamp: Date.parse(data.at || "") || Date.now(),
+    data: { id: data.id, link: data.link || APP, token: data.token || "" },
+  };
+  if (actions.length) options.actions = actions;
+  return self.registration.showNotification(data.title || "Daedalus", options);
+}
+
+self.addEventListener("notificationclick", (event) => {
+  const notification = event.notification;
+  const data = notification.data || {};
+  notification.close();
+  event.waitUntil(event.action ? act(data, event.action) : openApp(data.link));
+});
+
+async function act(data, action) {
+  try {
+    const subscription = await self.registration.pushManager.getSubscription();
+    const response = await fetch(`/api/notifications/${encodeURIComponent(data.id)}/act`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, token: data.token || undefined, via: "push", endpoint: subscription ? subscription.endpoint : undefined }),
+    });
+    // 409: answered already, from somewhere else; nothing is left to do here either.
+    if (response.ok || response.status === 409) return;
+  } catch {
+    /* offline, or the host is restarting: the app can still answer it */
+  }
+  return openApp(data.link);
+}
+
+async function openApp(link) {
+  const path = typeof link === "string" && link.startsWith(APP) ? link : APP;
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const open = windows.find((w) => new URL(w.url).pathname.startsWith(APP));
+  if (open) {
+    // The app moves itself to the item: no reload, and the conversation it had open keeps its state.
+    open.postMessage({ type: "daedalus.open", link: path });
+    return open.focus();
+  }
+  return self.clients.openWindow(path);
+}
+
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(resubscribe(event.oldSubscription, event.newSubscription));
+});
+
+function keyBytes(base64url) {
+  const raw = atob(base64url.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (base64url.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+function b64url(buffer) {
+  let text = "";
+  for (const byte of new Uint8Array(buffer)) text += String.fromCharCode(byte);
+  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// The browser replaced the subscription on its own, usually with no page open. The old
+// subscription's secret proves to the host that this is the same device; without an old one, the
+// sign-in cookie is the only way in, and if that is refused the app re-registers on its next start.
+async function resubscribe(old, fresh) {
+  let key = old && old.options ? old.options.applicationServerKey : null;
+  if (!key) {
+    const response = await fetch("/api/push/config", { credentials: "include" });
+    if (!response.ok) return;
+    const config = await response.json();
+    if (!config.public_key) return;
+    key = keyBytes(config.public_key);
+  }
+  const subscription = fresh || (await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  const body = subscription.toJSON();
+  const oldAuth = old && old.getKey ? old.getKey("auth") : null;
+  if (old && oldAuth) {
+    await fetch("/api/push/subscriptions/renew", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, old_endpoint: old.endpoint, old_auth: b64url(oldAuth) }),
+    });
+    return;
+  }
+  await fetch("/api/push/subscriptions", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}

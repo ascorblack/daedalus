@@ -10,6 +10,7 @@ import { hold, invalidate, prime, release, useQuery } from "../store";
 import { SUMMARY_KEY } from "../events";
 import { useProjects } from "../projects";
 import { ActionButtons, NeedsYou, NotificationList, NotificationRow, byDay, byProject, entryPath, listKey, projectNames, useNotifications } from "../notifications";
+import { PushNudge } from "../pushui";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
@@ -137,6 +138,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         </div>
       </PageHeader>
       <div className="screen narrow">
+        <PushNudge />
         <NeedsYou names={names} card />
         {pending.length > 0 && filter !== "problems" && (
           <section>
