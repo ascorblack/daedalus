@@ -38,3 +38,6 @@ tests/browser/*.png
 miniapp/tsconfig.tsbuildinfo
 deploy/dependencies/local.json
 deploy/dependencies/local.pending
+
+# the terminal daemon, when built in place
+ptyd/ptyd
