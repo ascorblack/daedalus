@@ -35,12 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
-    GATES,
+    TeamStub,
     Unhandled,
     expect_app,
     file_entries,
     file_search,
     folders,
+    fulfil_shared,
 )
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
@@ -80,6 +81,22 @@ PROJECTS = [
     # The installation's own: the concierge and what it started by being spoken to.
     {"id": PV, "name": "Voice", "folders": folders("/home/operator/.daedalus/workspaces/voice"), "created_at": ago(days=12), "settings": {"snapshots": False, "system": "voice"}, "system": "voice", "sessions": []},
 ]
+
+
+def _team() -> TeamStub:
+    """The Bakery site's team: a Daedalus writer at work, a Claude Code reviewer waiting on permission,
+    a Codex tester with nothing to do, and a one-off helper that finished its turn."""
+    bakery = next(p for p in PROJECTS if p["id"] == P1)
+    listed = [dict(f, is_git=True) for f in bakery["folders"]]
+    staff = [
+        TeamStub.member("st-ada", "Ada", status="working", sessions=4, color="teal", role="Builds the seasonal menu page", agent="builder", model="strong", created_at=ago(days=3)),
+        TeamStub.member("st-cleo", "Cleo", harness="claude", status="permission", sessions=9, color="violet", role="Reviews every change before it reaches review", agent="code-reviewer", model="opus", permission_mode="acceptEdits", created_at=ago(days=3)),
+        TeamStub.member("st-kai", "Kai", harness="codex", sessions=2, color="amber", role="Keeps the checkout tests green", model="gpt-5.2-codex", isolation="shared", created_at=ago(days=2)),
+        TeamStub.member("st-photo", "Photo sorter", status="turn_done_unseen", sessions=1, color="rose", role="Renames and crops the product photos", one_off=True, isolation="shared", created_at=ago(hours=5)),
+    ]
+    for member in staff:
+        member["project_id"] = P1
+    return TeamStub({**bakery, "folders": listed}, staff=staff, presets=[{"id": "strong", "label": "Claude Opus 5"}, {"id": "fast", "label": "DeepSeek Flash"}], personas=["builder", "reviewer", "tester"])
 
 
 def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, own: bool = False, meta: dict | None = None, project: str) -> dict:
@@ -279,13 +296,23 @@ BOARD = [
     {"id": "51c8aa", "title": "Gallery: six square photos", "status": "done", "priority": 3, "acceptance": "Six photos in photos/gallery, 800×800.", "checklist": [{"text": "pick", "done": True}, {"text": "crop", "done": True}], "depends_on": [], "session_id": S2, "origin_session_id": S2, "notes": "", "created_at": ago(hours=1), "updated_at": ago(minutes=12)},
 ]
 
+
+def notification(id: int, at: str, kind: str, category: str, level: str, tone: str, title: str, body: str, session_id: str | None, seen: bool, count: int = 1) -> dict:
+    return {
+        "id": id, "at": at, "updated_at": at, "category": category, "kind": kind, "level": level, "tone": tone, "title": title, "body": body,
+        "link": f"/app/agents/{session_id}" if session_id else "", "session_id": session_id, "run_id": None, "project_id": None, "staff_id": None,
+        "terminal_id": None, "source": "system", "dedupe_key": None, "count": count, "actions": [], "seen": seen, "resolved": None, "needs_you": False, "delivered": {},
+    }
+
+
 INBOX = [
-    {"id": 31, "at": ago(minutes=4), "kind": "ask_user", "severity": "notice", "title": "Weekly digest asks: keep it to the usual 8?", "body": "The digest has 14 items this week.", "session_id": S4, "run_id": "r4", "read": 0},
-    {"id": 30, "at": ago(minutes=20), "kind": "self_change", "severity": "notice", "title": "Pull request #57 is waiting for your decision", "body": "WebSearch: retry a backend that timed out once before falling back", "session_id": None, "run_id": None, "read": 0},
-    {"id": 29, "at": ago(minutes=52), "kind": "loop", "severity": "info", "title": "Support inbox: 6 answered, 2 on the board", "body": "Two delivery questions wait for the courier's rates.", "session_id": S3, "run_id": "r3", "read": 1},
-    {"id": 28, "at": ago(hours=3), "kind": "service", "severity": "warning", "title": "digest-api restarted after the rebuild", "body": "It was running before the rebuild and is running again on :8101.", "session_id": S4, "run_id": None, "read": 1},
-    {"id": 27, "at": ago(hours=20), "kind": "balance", "severity": "warning", "title": "DeepSeek balance below $5", "body": "$4.62 left; the next threshold is $2.", "session_id": None, "run_id": None, "read": 1},
+    notification(31, ago(minutes=4), "ask_user", "question", "normal", "info", "Weekly digest asks: keep it to the usual 8?", "The digest has 14 items this week.", S4, False),
+    notification(30, ago(minutes=20), "change_proposal", "system", "normal", "info", "Pull request #57 is waiting for your decision", "WebSearch: retry a backend that timed out once before falling back", None, False),
+    notification(29, ago(minutes=52), "loop", "agent_notify", "quiet", "info", "Support inbox: 6 answered, 2 on the board", "Two delivery questions wait for the courier's rates.", S3, True),
+    notification(28, ago(hours=3), "service", "system", "normal", "warning", "digest-api restarted after the rebuild", "It was running before the rebuild and is running again on :8101.", S4, True),
+    notification(27, ago(hours=20), "balance", "system", "normal", "warning", "DeepSeek balance below $5", "$4.62 left; the next threshold is $2.", None, True, count=2),
 ]
+INBOX_SUMMARY = {"unseen": 2, "needs_you": 0}
 
 PROPOSALS = [{"id": "p57", "repo": "daedalus", "branch": "bot/websearch-retry", "pr_number": 57, "pr_url": "https://github.com/example/daedalus/pull/57", "title": "WebSearch: retry a backend that timed out once before falling back", "summary": "A backend that answers 504 once is tried again after a second; only a second failure falls through to the next backend. Unit test added.", "status": "pending", "reason": None, "created_at": ago(minutes=20)}]
 
@@ -540,6 +567,9 @@ COMPONENTS = {
 # ---- the stub API -------------------------------------------------------------------------
 
 
+TEAM = _team()
+
+
 def respond(route, body, *, content_type: str = "application/json", status: int = 200) -> None:  # type: ignore[no-untyped-def]
     route.fulfill(status=status, content_type=content_type, body=body if isinstance(body, (bytes, str)) else json.dumps(body))
 
@@ -557,6 +587,9 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
         return respond(route, SILENCE, content_type="audio/wav")
+    team = TEAM.answer(request.method, rel, urlsplit(url).query, None)
+    if team is not None:
+        return respond(route, team[1], status=team[0])
     if request.method != "GET":
         return respond(route, {"ok": True})
     if rel == "/api/stt/progress":
@@ -628,10 +661,14 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, MEMORY)
     if rel == "/api/board":
         return respond(route, BOARD)
-    if rel == "/api/inbox/unread":
-        return respond(route, {"unread": 2})
-    if rel == "/api/inbox":
-        return respond(route, {"entries": INBOX, "unread": 2})
+    if rel == "/api/notifications/summary":
+        return respond(route, INBOX_SUMMARY)
+    if rel == "/api/notifications":
+        view = params.get("view", ["all"])[0]
+        shown = [e for e in INBOX if not e["seen"] and e["level"] != "quiet"] if view == "unseen" else [e for e in INBOX if e["tone"] in ("warning", "error")] if view == "problems" else INBOX
+        return respond(route, {"entries": shown, "next_before": None, "summary": INBOX_SUMMARY})
+    if rel == "/api/notifications/seen":
+        return respond(route, {"marked": 0, "summary": INBOX_SUMMARY})
     if rel == "/api/proposals":
         return respond(route, PROPOSALS)
     if rel == "/api/schedules":
@@ -683,8 +720,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, CAPABILITIES)
     if rel == "/api/status":
         return respond(route, {"ok": True})
-    if rel in GATES:
-        return respond(route, GATES[rel])
+    if fulfil_shared(route):
+        return None
     # A route nobody taught this stub about is answered with nothing and reported at the end: the
     # app grows gates (a model, the capabilities) that decide whether a screen is drawn at all, and
     # one harness knowing about them while another does not is how the pictures and the numbers
@@ -767,8 +804,8 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details"},
-    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения"},
+    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details", "role": "Writes the delivery page"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения", "role": "Пишет страницу доставки"},
 }
 
 
@@ -853,6 +890,13 @@ def open_projects(page: Page) -> None:
     """The switcher over a list already grouped by project: the folders on one side, the agents in them on the other."""
     page.locator(".sidebar .project-chip").click()
     page.wait_for_selector(".project-row", timeout=5000)
+
+
+def open_hire(page: Page) -> None:
+    page.locator(".pagehead-actions .iconbtn").click()
+    page.wait_for_selector(".staff-sheet .executor")
+    page.locator("#staff-name").fill("Mira")
+    page.locator("#staff-role").fill(word("role"))
 
 
 def open_menu(page: Page) -> None:
@@ -1120,6 +1164,8 @@ def run() -> int:
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
+        shot(page, "team", f"project/{P1}/team", wait=".staff-row")
+        shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
         shot(page, "projects", "agents", before=open_projects)
         shot(page, "voice", "voice")
         shot(page, "voice-settings", "settings/voice", wait=".stt-list .stt-card", before=scroll_to_voices, settle=700)
@@ -1155,6 +1201,7 @@ def run() -> int:
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
+        shot(page, "phone-team", f"project/{P1}/team", wait=".staff-row")
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]

@@ -11,7 +11,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folders  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -87,12 +87,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         body = json.dumps({"sessions": [], "projects": []})
     else:
         rel = path[path.index("/api/"):] if "/api/" in path else ""
-        if rel in GATES:
-            body = json.dumps(GATES[rel])
-        else:
-            if rel:
-                UNHANDLED.record(rel)
-            body = "[]"
+        if fulfil_shared(route):
+            return
+        if rel:
+            UNHANDLED.record(rel)
+        body = "[]"
     route.fulfill(status=200, content_type="application/json", body=body)
 
 

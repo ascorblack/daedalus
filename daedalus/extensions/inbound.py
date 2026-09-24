@@ -19,6 +19,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.notifications import Draft, Tone
+
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -147,9 +149,7 @@ class Inbound:
         if folded:
             body += "\n\n" + "\n\n".join(folded)
         run_id = await manager.submit(state.session.id, body, as_answer=False, origin=f"inbound:{source}")
-        inbox = self.app.extensions.get("inbox")
-        if inbox is not None:
-            await inbox.post("inbound", f"Inbound from {source}", text[:2000], session_id=state.session.id, run_id=run_id or None)
+        await self._post("inbound", f"Inbound from {source}", text[:2000], quiet=True, session_id=state.session.id, run_id=run_id or None)
         return {"session_id": state.session.id, "run_id": run_id}
 
     async def record_delivery(self, provider: str, delivery_id: str) -> bool:
@@ -217,14 +217,14 @@ class Inbound:
                 continue
             if int(row["fired_count"]) >= int(row["max_fires"]):
                 await self.app.db.execute("UPDATE intents SET enabled = 0 WHERE id = ?", (row["id"],))
-                await self._post("intent_exhausted", f"Standing intent '{row['pattern']}' used its fire budget", row["action"][:500], severity="notice")
+                await self._post("intent_exhausted", f"Standing intent '{row['pattern']}' used its fire budget", row["action"][:500])
                 continue
             if row["last_fired_at"] and now - datetime.fromisoformat(row["last_fired_at"]) < timedelta(minutes=int(row["cooldown_minutes"])):
                 continue
             matched = await asyncio.to_thread(search_bounded, row["pattern"], text)
             if matched is None:
                 await self.app.db.execute("UPDATE intents SET enabled = 0 WHERE id = ?", (row["id"],))
-                await self._post("intent_disabled", f"Standing intent '{row['pattern'][:80]}' disabled", f"its pattern did not finish matching within {INTENT_MATCH_SECONDS:.0f} s (or no longer compiles); rewrite it with IntentCreate", severity="warning")
+                await self._post("intent_disabled", f"Standing intent '{row['pattern'][:80]}' disabled", f"its pattern did not finish matching within {INTENT_MATCH_SECONDS:.0f} s (or no longer compiles); rewrite it with IntentCreate", tone="warning")
                 continue
             if not matched:
                 continue
@@ -242,21 +242,20 @@ class Inbound:
                 else:
                     scheduler = self.app.extensions.get("scheduler")
                     if scheduler is None:
-                        await self._post("intent_deferred", f"Standing intent '{row['pattern'][:80]}' matched but could not run", "its session is busy or gone and no task session could be started; the intent stays armed", severity="notice")
+                        await self._post("intent_deferred", f"Standing intent '{row['pattern'][:80]}' matched but could not run", "its session is busy or gone and no task session could be started; the intent stays armed")
                         continue
                     await scheduler.run_task_session(f"[intent] {row['pattern'][:30]}", prompt, self.app.settings.workspaces_dir / f"intent-{row['id']}", {"intent_id": row["id"], "unattended": True}, origin="intent")  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
-                await self._post("intent_failed", f"Standing intent '{row['pattern']}' could not run", f"{type(exc).__name__}: {exc}", severity="warning")
+                await self._post("intent_failed", f"Standing intent '{row['pattern']}' could not run", f"{type(exc).__name__}: {exc}", tone="warning")
                 continue
             await self.app.db.execute("UPDATE intents SET fired_count = fired_count + 1, last_fired_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
             fired.append(row["id"])
-            await self._post("intent_fired", f"Standing intent fired: {row['pattern']}", row["action"][:500], severity="notice", session_id=session)
+            await self._post("intent_fired", f"Standing intent fired: {row['pattern']}", row["action"][:500], session_id=session)
         return folded if fold_into else fired
 
-    async def _post(self, kind: str, title: str, body: str = "", **kw: Any) -> None:
-        inbox = self.app.extensions.get("inbox")
-        if inbox is not None:
-            await inbox.post(kind, title, body, **kw)
+    async def _post(self, kind: str, title: str, body: str = "", *, tone: Tone = "info", quiet: bool = False, session_id: str | None = None, run_id: str | None = None) -> None:
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft("system", title, body, kind=kind, tone=tone, level="quiet" if quiet else None, session_id=session_id, run_id=run_id, source="inbound"))
 
     async def service(self, op: str, **kwargs: Any) -> Any:
         if op == "create":

@@ -23,6 +23,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.notifications import Draft
+
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -250,9 +252,8 @@ class Board:
                 continue
             await self.app.db.execute("UPDATE board_tasks SET status = 'todo', session_id = NULL, run_id = NULL, updated_at = ?, notes = substr(notes || ?, ?) WHERE id = ?", (_now(), f"\n[{_now()[:16].replace('T', ' ')}] handed back: no activity for {hours} h", -NOTES_MAX_CHARS, row["id"]))
             handed.append(row["id"])
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("board_stale", f"Task '{row['title']}' handed back", f"No activity for {hours} h; it is 'todo' again.", severity="notice", session_id=row["session_id"])
+            if self.app.notifications is not None:
+                await self.app.notifications.post(Draft("system", f"Task '{row['title']}' handed back", f"No activity for {hours} h; it is 'todo' again.", kind="board_stale", level="quiet", session_id=row["session_id"], source="board"))
         return handed
 
     async def touch(self, session_id: str) -> None:

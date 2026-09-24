@@ -179,8 +179,8 @@ async def test_grants_timing_and_subagent_spend_live_in_the_manager(settings, db
         state = await manager.create_session("policy")
         sid = state.session.id
         with pytest.raises(ValueError):
-            await manager.grant(sid, "not-a-key")
-        granted = await manager.grant(sid, "0123456789ab")
+            await manager.grant(sid, "not-a-key", via="app")
+        granted = await manager.grant(sid, "0123456789ab", via="app")
         assert granted["grants"] == ["0123456789ab"] and granted["approves"] is None
         gate = manager.policy_gate(sid, "run-1")
         decision = gate.decide("Exec", {"command": "curl https://x.example/"})
@@ -192,7 +192,7 @@ async def test_grants_timing_and_subagent_spend_live_in_the_manager(settings, db
         gate = manager.policy_gate(sid, "run-1")
         refused = gate.decide("Exec", {"command": "curl https://other.example/"})
         assert refused.action == "ask" and refused.key
-        granted = await manager.grant(sid, refused.key)
+        granted = await manager.grant(sid, refused.key, via="app")
         assert granted["approves"]["tool"] == "Exec" and "other.example" in granted["approves"]["text"]
         assert gate.decide("Exec", {"command": "curl https://other.example/"}).action == "allow"
         await manager.flush_background()
@@ -227,3 +227,26 @@ def test_the_policy_adapter_shapes_a_refusal_the_model_can_act_on() -> None:
     assert "refused by policy" in adapter.evaluate(T(), {}, None).reason
     adapter = PolicyAdapter(lambda tool, args: Decision("allow"))
     assert adapter.evaluate(T(), {}, None).allowed and json.dumps({}) == "{}"
+
+
+def test_the_terminal_daemons_run_directories_are_sealed_in_a_container_too(tmp_path: Path) -> None:
+    """The token in a daemon's run directory is a shell — on the host environment, a shell on the
+    operator's machine, outside the container the agent runs in. So unlike the rest of the sealed set,
+    which a container already walls off, a command naming the directory is refused there as well."""
+    run = "/run/daedalus-terminals"
+    host = "/run/daedalus-host-terminals"
+    policy = Policy(sealed_paths=[Path("/srv/state"), Path(run), Path(host)], sealed_everywhere=[Path(run), Path(host)])
+    assert policy.evaluate("Exec", {"command": f"cat {run}/token"}).action == DENY
+    assert policy.evaluate("Exec", {"command": f"python3 -c \"print(open('{host}/token').read())\""}).action == DENY
+    assert policy.evaluate("ServiceStart", {"command": f"socat - UNIX-CONNECT:{run}/ptyd.sock"}).action == DENY
+    # The rest of the sealed set keeps its container behaviour: the container is the wall there.
+    assert policy.evaluate("Exec", {"command": "ls /srv/state"}).action == "allow"
+    assert policy.evaluate("Exec", {"command": "ls /run"}).action == "allow"
+    # Natively everything sealed is refused by name, the terminal directories with it.
+    native = Policy(native=True, home_dir=str(tmp_path), sealed_paths=[Path(run)], sealed_everywhere=[Path(run)])
+    assert native.evaluate("Exec", {"command": f"cat {run}/token"}).action == DENY
+
+
+def test_a_terminal_daemons_hook_port_is_refused_like_the_apps_own() -> None:
+    policy = Policy(sealed_ports=[8765, 47003])
+    assert policy.evaluate("Exec", {"command": "curl -X POST http://127.0.0.1:47003/hook/x/stop"}).action == DENY

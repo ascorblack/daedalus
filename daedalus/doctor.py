@@ -26,6 +26,8 @@ from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
+from daedalus.terminals.client import PtydClient, Unavailable
+from daedalus.terminals.wire import RpcError
 from daedalus.tools.shell import bwrap_status, native_sandbox_note
 
 try:  # the core's compiled token estimator, which an older core does not carry
@@ -67,7 +69,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _components, _keyproxy, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _terminals, _components, _keyproxy, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -548,6 +550,53 @@ async def _native(ctx: DoctorContext) -> list[Check]:
     return out
 
 
+TERMINAL_FIXES = {
+    "not_installed": "bash deploy/setup.sh offers to install it",
+    "not_running": "start the terminal service: docker compose up -d terminals, or the host bridge's systemd unit",
+    "refused": "the token changed under the connection; it retries on its own — if it persists, restart the terminal service",
+    "unreachable": "read the terminal service's log; the host keeps retrying",
+    "protocol_mismatch": "recreate the terminals service from this build's image (docker compose up -d terminals), which ends its terminals",
+}
+
+
+async def _terminals(ctx: DoctorContext) -> list[Check]:
+    """Each configured terminal environment: whether its daemon answers, what it runs, and whether it
+    can sandbox. The running application's service when there is one; a one-off connection otherwise."""
+    run_dirs = {"container": ctx.settings.terminals_container_dir, "host": ctx.settings.terminals_host_dir}
+    if not any(run_dirs.values()):
+        return []
+    service = ctx.extensions.get("terminals")
+    out = []
+    for env, run_dir in run_dirs.items():
+        if run_dir is None:
+            continue
+        name = f"terminals ({env})"
+        if service is not None:
+            status = next(e for e in service.environments(await service.running_by_env()) if e.env == env)
+            available, reason, detail, info, running = status.available, status.reason, status.detail, service.links[env].info, status.running
+        else:
+            client = PtydClient(env, run_dir)
+            try:
+                await client.connect()
+                info = await client.call("daemon.info", timeout=_timeout(ctx))
+                available, reason, detail, running = True, "", "", int((info.get("counts") or {}).get("running") or 0)
+            except Unavailable as exc:
+                available, reason, detail, info, running = False, exc.reason, exc.detail, {}, 0
+            except RpcError as exc:
+                available, reason, detail, info, running = False, "unreachable", exc.message, {}, 0
+            finally:
+                await client.close()
+        if not available:
+            label = {"not_installed": "not installed", "not_running": "not running", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
+            severity = "info" if reason == "not_installed" and env == "host" else "warn"
+            out.append(Check(name, False, f"{label}: {detail}", severity, TERMINAL_FIXES.get(reason, "")))
+            continue
+        sandbox = (info.get("capabilities") or {}).get("sandbox")
+        out.append(Check(name, True, f"ptyd {info.get('version')} (protocol {info.get('protocol')}), {running} running", "ok"))
+        out.append(Check(f"terminal sandbox ({env})", sandbox == "ok", "available" if sandbox == "ok" else f"not available: {sandbox}", "ok" if sandbox == "ok" else "info", "terminals open unsandboxed until it is"))
+    return out
+
+
 async def _token_counter(ctx: DoctorContext) -> list[Check]:
     """Whether the core estimates tokens with its compiled extension or the pure-Python fallback.
 
@@ -589,10 +638,11 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
     if heartbeat is not None:
         hb = heartbeat.status()
         out.append(Check("heartbeat", True, "armed" if hb["armed"] else ("on, file empty" if hb["enabled"] else "off"), "ok" if hb["armed"] or not hb["enabled"] else "info"))
-    inbox = ctx.extensions.get("inbox")
-    if inbox is not None:
-        unread = await inbox.unread_count()
-        out.append(Check("inbox", True, f"{unread} unread", "ok" if unread == 0 else "info"))
+    notifications = ctx.extensions.get("notifications")
+    if notifications is not None:
+        summary = await notifications.summary()
+        open_requests = f", {summary['needs_you']} waiting for an answer" if summary["needs_you"] else ""
+        out.append(Check("notifications", True, f"{summary['unseen']} unseen{open_requests}", "ok" if summary["unseen"] == 0 else "info"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT count(*) c FROM schedules WHERE enabled = 0 AND failure_count > 0")
         if row and row["c"]:

@@ -39,6 +39,7 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured, RuntimeConfig, Settings
+from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment, SessionManager, SessionState
 from daedalus.speech.service import LocalSpeech, recogniser_available, transcribe_recording
@@ -419,6 +420,8 @@ class TelegramFront:
         """One merge buffer per (chat, thread, session): in the private chat two sessions share a
         chat, and their messages must not be merged into one submission."""
         self._question_state: dict[str, dict[str, Any]] = {}
+        self._answered_task: asyncio.Task[None] | None = None
+        """Listens for questions answered on another front, whose keyboards here must go."""
         self._current_session: str | None = None
         """The private chat's session, cached from kv; None until it is read the first time."""
         self._force_reply_targets: dict[int, str] = {}
@@ -455,13 +458,26 @@ class TelegramFront:
 
     # -- lifecycle ------------------------------------------------------------------
 
+    def listen(self) -> None:
+        """Subscribe to what the bus says about questions answered on another front."""
+        if self._answered_task is None:
+            self._answered_task = self.manager.bus.on(EventFilter(types=("ask.answered",)), self._on_answered_elsewhere, name="telegram-questions")
+
+    async def stop_listening(self) -> None:
+        task, self._answered_task = self._answered_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def start(self) -> None:
+        self.listen()  # before polling, which does not return until the front stops
         me = await self.bot.get_me()
         logger.warning("telegram: polling as @%s", me.username)
         await self.bot.delete_webhook(drop_pending_updates=False)
         await self.dp.start_polling(self.bot, handle_signals=False)
 
     async def stop(self) -> None:
+        await self.stop_listening()
         for task in list(self._topic_status_tasks.values()) + list(self._stale_notices.values()):
             task.cancel()
         for renderer in self._renderers.values():
@@ -1154,18 +1170,28 @@ class TelegramFront:
                 pass
 
     async def _on_policy_decision(self, query: CallbackQuery, data: list[str]) -> None:
-        """The operator lets a refused call through once, from the button under the refusal."""
-        if len(data) != 3:
-            await query.answer("stale button")
-            return
-        _, session_id, key = data
-        if key == "no":
+        """The operator lets a refused call through once, or leaves it refused, from the buttons under the refusal.
+
+        ``pa:<session>:<key>`` allows; ``pa:<session>:<key>:no`` refuses. The refusal carries the key
+        so the request is closed everywhere else it is shown, not only in this chat.
+        """
+        if len(data) == 4 and data[3] == "no":
+            _, session_id, key, _no = data
+            try:
+                await self.manager.refuse(session_id, key, via="telegram")
+            except (KeyError, ValueError) as exc:
+                await query.answer(str(exc)[:180])
+                return
             await query.answer("left refused")
             if query.message is not None:
                 await query.message.edit_text("Left refused.", reply_markup=None)
             return
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, session_id, key = data
         try:
-            result = await self.manager.grant(session_id, key)
+            result = await self.manager.grant(session_id, key, via="telegram")
         except (KeyError, ValueError) as exc:
             await query.answer(str(exc)[:180])
             return
@@ -1456,7 +1482,7 @@ class TelegramFront:
                 await message.answer("/allow works inside a session's topic or the private chat")
                 return
             try:
-                result = await self.manager.grant(state.session.id, command.args or "")
+                result = await self.manager.grant(state.session.id, command.args or "", via="telegram")
             except ValueError as exc:
                 await message.answer(f"usage: /allow <key> — {exc}")
                 return
@@ -1700,7 +1726,7 @@ class TelegramFront:
             text = "Files attached." if len(buffer.attachments) > 1 else "File attached."
         was_running = state.running and state.pending is None
         try:
-            await self.manager.submit(state.session.id, text, buffer.attachments)
+            await self.manager.submit(state.session.id, text, buffer.attachments, via="telegram")
         except NoModelConfigured as exc:
             # Not a failure: the installation has not been finished yet. Say so, without a stack trace.
             outbox = await self.outbox_for_session(state.session.id)
@@ -1915,6 +1941,25 @@ class TelegramFront:
         await query.answer(label)
         await self._advance_question(session_id, query)
 
+    ANSWERED_ELSEWHERE = {
+        "app": "Answered in the app.",
+        "notification": "Answered from a notification.",
+        "push": "Answered from a notification.",
+        "cli": "Answered from the command line.",
+        "orchestrator": "Answered by the orchestrator.",
+    }
+    """What the topic is told when its question was answered somewhere else. ``timeout`` is absent:
+    the scheduler closes the question itself, with a note that says why."""
+
+    async def _on_answered_elsewhere(self, event: AppEvent) -> None:
+        """A question answered in the app used to leave a live keyboard here, whose buttons then
+        answered a question that no longer existed."""
+        via = str(event.payload.get("via") or "")
+        note = self.ANSWERED_ELSEWHERE.get(via)
+        if note is None or event.session_id is None or event.session_id not in self._question_state:
+            return
+        await self.close_question(event.session_id, note)
+
     async def close_question(self, session_id: str, note: str) -> None:
         """Retire an open question's keyboard (someone else answered it) and say why in the topic."""
         state = self._question_state.pop(session_id, None)
@@ -1949,7 +1994,7 @@ class TelegramFront:
                 await self._send_question(session_id, outbox)
             return
         try:
-            await self.manager.answer(session_id, state["answers"])
+            await self.manager.answer(session_id, state["answers"], via="telegram")
         except RuntimeError as exc:
             outbox = await self.outbox_for_session(session_id)
             if outbox is not None:
@@ -2049,7 +2094,7 @@ class TelegramFront:
                 what = f"{pending['tool']}: {pending['text']}" if pending else "a call the policy wants approved"
                 if outbox is not None:
                     try:
-                        await self.send_choice(outbox, f"🛂 The policy stopped {what}\n\nAllow it once? The agent retries on its next step.", [[("✅ Allow once", f"pa:{session_id}:{match.group(1)}"), ("✖ Leave refused", f"pa:{session_id}:no")]])
+                        await self.send_choice(outbox, f"🛂 The policy stopped {what}\n\nAllow it once? The agent retries on its next step.", [[("✅ Allow once", f"pa:{session_id}:{match.group(1)}"), ("✖ Leave refused", f"pa:{session_id}:{match.group(1)}:no")]])
                     except Exception:  # noqa: BLE001
                         logger.warning("could not post the approval buttons", exc_info=True)
 

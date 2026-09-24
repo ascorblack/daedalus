@@ -16,6 +16,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.notifications import Draft
+
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -201,18 +203,20 @@ class Heartbeat:
         if session_id != self.session_id or status == "awaiting":
             return  # an awaiting run stays active; the scheduler's timeout sweep answers it and the run ends later
         self.active_run = None
-        inbox = self.app.extensions.get("inbox")
+        notifications = self.app.notifications
         manager = self.app.manager
         services = manager.locator_services(session_id) if manager else None
         quiet = services is not None and services.extra.get("silent_run") == run_id
-        if inbox is None:
+        if notifications is None:
             return
         if quiet:
-            await inbox.post("heartbeat", "Heartbeat: quiet", str(services.extra.get("silent_note") or ""), session_id=session_id, run_id=run_id)  # type: ignore[union-attr]
+            await notifications.post(Draft("reminder", "Heartbeat: quiet", str(services.extra.get("silent_note") or ""), kind="heartbeat", level="quiet", session_id=session_id, run_id=run_id, source="heartbeat"))  # type: ignore[union-attr]
         elif status == "completed":
-            await inbox.post("heartbeat", "Heartbeat reported something", "The reply is in the heartbeat topic.", severity="notice", session_id=session_id, run_id=run_id)
+            # The reply itself went to the heartbeat's topic when there is a chat to have one in.
+            handled = frozenset({"telegram"}) if self.app.front is not None else frozenset()
+            await notifications.post(Draft("reminder", "Heartbeat reported something", "The reply is in the heartbeat topic.", kind="heartbeat", session_id=session_id, run_id=run_id, source="heartbeat", handled=handled))
         else:
-            await inbox.post("heartbeat", f"Heartbeat run {status}", "", severity="warning", session_id=session_id, run_id=run_id)
+            await notifications.post(Draft("reminder", f"Heartbeat run {status}", "", kind="heartbeat", tone="warning", session_id=session_id, run_id=run_id, source="heartbeat"))
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
