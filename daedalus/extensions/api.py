@@ -61,6 +61,7 @@ from daedalus.host.config_validation import ConfigConflict, config_revision, val
 from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.events import EventFilter, event_stream, streamed_types
 from daedalus.host.policy import sealed_root
+from daedalus.host.presence import MAX_ID_LENGTH, MAX_PROJECTS, MAX_SESSIONS, MAX_TERMINALS, PresenceReport
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment, clip_title
@@ -250,6 +251,21 @@ class VoiceModelBody(BaseModel):
 
 class AnswerBody(BaseModel):
     answers: list[dict[str, Any]]
+
+
+class PresenceBody(BaseModel):
+    """One window's account of itself: whether it is seen, and what it shows."""
+
+    client: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    kind: Literal["browser", "pwa", "telegram", "window"] = "browser"
+    visible: bool
+    focused: bool
+    sessions: list[str] = []
+    terminals: list[str] = []
+    projects: list[str] = []
+    screen: str = Field("", max_length=64)
+    lang: str = Field("", max_length=16)
+    tz: str = Field("", max_length=64)
 
 
 class SpaFiles(StaticFiles):
@@ -1671,9 +1687,40 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             last = request.headers.get("last-event-id", "").strip()
             cursor = int(last) if last.isdigit() else None
         flt = EventFilter(types=wanted or streamed_types())
-        frames = event_stream(manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind)
+        presence = manager.presence
+
+        async def opened() -> None:
+            await presence.stream_opened(client, kind)
+
+        async def closed() -> None:
+            await presence.stream_closed(client, kind)
+
+        frames = event_stream(
+            manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind,
+            on_open=opened, on_close=closed,
+        )
         headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
         return StreamingResponse(frames, media_type="text/event-stream", headers=headers)
+
+    @api.post("/api/presence", status_code=204)
+    async def report_presence(body: PresenceBody, _: dict[str, Any] = Depends(auth)) -> Response:
+        """What one window shows, re-sent every 20 s while it is visible and whenever that changes.
+
+        Nothing is written to the database here except the language and time zone when they change:
+        every visible tab calls this three times a minute.
+        """
+        limits = (("sessions", body.sessions, MAX_SESSIONS), ("terminals", body.terminals, MAX_TERMINALS), ("projects", body.projects, MAX_PROJECTS))
+        for name, ids, most in limits:
+            if len(ids) > most or any(not item or len(item) > MAX_ID_LENGTH for item in ids):
+                raise HTTPException(400, f"{name}: at most {most} ids of at most {MAX_ID_LENGTH} characters")
+        await manager.presence.report(
+            PresenceReport(
+                client=body.client, kind=body.kind, visible=body.visible, focused=body.focused,
+                sessions=tuple(body.sessions), terminals=tuple(body.terminals), projects=tuple(body.projects),
+                screen=body.screen, lang=body.lang, tz=body.tz,
+            )
+        )
+        return Response(status_code=204)
 
     @api.get("/api/sessions/{session_id}/tool-results/{call_id}")
     async def tool_result(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2745,7 +2792,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            run_id = await manager.answer(session_id, body.answers)
+            run_id = await manager.answer(session_id, body.answers, via="app")
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id}
@@ -3281,12 +3328,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def policy_grant(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Let one refused call through: ``{"key": "<approval key from the refusal>"}``."""
         try:
-            grants = await manager.grant(session_id, str(body.get("key") or ""))
+            grants = await manager.grant(session_id, str(body.get("key") or ""), via="app")
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"grants": grants}
+
+    @api.post("/api/sessions/{session_id}/policy/refuse")
+    async def policy_refuse(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Leave one refused call refused: ``{"key": "<approval key>"}``. The request stops being open."""
+        try:
+            return await manager.refuse(session_id, str(body.get("key") or ""), via="app")
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.get("/api/sessions/{session_id}/egress")
     async def session_egress(session_id: str, limit: int = 200, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

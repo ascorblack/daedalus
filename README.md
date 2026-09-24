@@ -504,6 +504,18 @@ ahead of the stream, or more than 5,000 events behind gets one `resync` frame in
 client re-reads what it shows. The events are stored before they are sent, so a script that
 remembers the last number it handled never misses one across a restart of the agent.
 
+**What the operator is looking at.** Each window of the app reports itself with `POST
+/api/presence` — `{"client", "kind", "visible", "focused", "sessions", "terminals", "projects",
+"lang", "tz"}`, at most four sessions — every 20 seconds while it is visible and whenever that
+changes (**204**). A window that is visible, focused and shows a session is *attending* it: a run that
+ends there is marked as watched, and a result nobody attended, from a session whose answers do not go
+to Telegram, leaves `unread_result` on the session until someone opens it or writes to it. A report
+counts for a minute; a window that also holds `/api/events?client=<its id>` stops counting five
+seconds after that stream drops. `kind=launcher` on the stream marks a desktop launcher listening
+for notifications, which is never a presence. A refused tool call can be answered either way from
+any client: `POST /api/sessions/{id}/policy/grant` or `…/policy/refuse` with `{"key"}`, and the
+stream carries `permission.pending` and `permission.resolved` for it.
+
 ## Layout
 
 ```

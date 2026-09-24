@@ -28,7 +28,7 @@ from pathlib import Path
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folders  # noqa: E402
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 UNHANDLED = Unhandled()
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
@@ -148,8 +148,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         body = {"sessions": [], "projects": []}
     elif rel.startswith("/api/usage/provider/"):
         body = {"provider": "claude", "today": {"calls": 4}, "subscription": None, "balance": None}
-    elif rel in GATES:
-        body = GATES[rel]
+    elif fulfil_shared(route):
+        return
     else:
         UNHANDLED.record(rel)
         body = []
@@ -334,6 +334,20 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append(f"the approval did not spend the key ({granted})")
     if page.locator(".composer .dock.approval").count():
         problems.append("the dock stayed after the key was spent")
+
+    # Refusing tells the host as well, so the request is closed wherever else it is shown.
+    HOST.messages = HOST.messages[:2]
+    HOST.refuse("abcdef012345")
+    page.reload()
+    page.wait_for_selector(".composer .dock.approval", timeout=15000)
+    page.keyboard.press("n")
+    page.wait_for_timeout(500)
+    refused = posts("/policy/refuse")
+    print("refused:", refused)
+    if not refused or refused[-1][2] != {"key": "abcdef012345"}:
+        problems.append(f"refusing did not reach the host ({refused})")
+    if page.locator(".composer .dock.approval").count():
+        problems.append("the dock stayed after the call was refused")
 
     # The agent's question: a dock with the options; the circle reads Reply and sends the answer.
     HOST.messages = HOST.messages[:2]

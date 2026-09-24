@@ -84,7 +84,7 @@ async def _run(
     text = prompt or await asyncio.to_thread(input, "> ")
     while True:
         done.clear()
-        await manager.submit(state.session.id, text)
+        await manager.submit(state.session.id, text, via="cli")
         await done.wait()
         status = outcome.get("status")
         if status == "awaiting" and state.pending is not None:
@@ -95,7 +95,7 @@ async def _run(
                 labels = [o.get("label") for o in q.get("options", [])]
                 answers.append({"question": q.get("question"), "selected": [reply] if reply in labels else [], "custom": None if reply in labels else reply})
             done.clear()
-            await manager.answer(state.session.id, answers)
+            await manager.answer(state.session.id, answers, via="cli")
             await done.wait()
             status = outcome.get("status")
         print(f"\n[run {status}]")
