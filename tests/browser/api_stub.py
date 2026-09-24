@@ -89,6 +89,24 @@ SHARED_WRITES: dict[tuple[str, str], tuple[int, str, str]] = {
 }
 
 
+EVENTS = "/api/events"
+
+
+def event_stream_hello() -> str:
+    """The host's event stream as a stub gives it: one comment line, and then the end.
+
+    No ``hello`` on purpose. The app counts a stream as up only once the host has greeted it, and
+    while it is up the lists stop polling every few seconds and wait for events instead. A stub
+    cannot send those events, so a harness that changes its own answers and waits for the list to
+    follow (``check_conversation_search.py`` does) would wait a minute. Without the greeting the app
+    stays on its polls, exactly as it behaves when the host is unreachable, and reconnects on its
+    backoff (one, two, four seconds and up to fifteen), which costs a harness a request now and then.
+    Finite rather than held open, so it never occupies one of the browser's six connections. A
+    harness that tests the stream itself (``check_event_stream.py``) serves its own.
+    """
+    return ": no events from a stub\n\n"
+
+
 def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
     """The answer every harness gives the same way: ``(status, content type, body)``, or ``None``.
 
@@ -98,6 +116,8 @@ def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
     """
     path = path.split("?", 1)[0]
     path = path[path.index("/api/"):] if "/api/" in path else path
+    if method.upper() == "GET" and path == EVENTS:
+        return 200, "text/event-stream", event_stream_hello()
     write = SHARED_WRITES.get((method.upper(), path))
     if write is not None:
         return write
@@ -177,7 +197,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "expect_app", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent

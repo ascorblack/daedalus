@@ -14,6 +14,7 @@ import { Screen, navigate, pathFor, sessionPath } from "./router";
 import { SelfDevMode } from "./capabilities";
 import { Counts, go } from "./shell";
 import { useQuery } from "./store";
+import { useStreamUp } from "./events";
 import { t } from "./i18n";
 import { agentName } from "./grouping";
 
@@ -94,7 +95,9 @@ export function Sidebar(p: SidebarProps) {
 
 /** The strip's view of the list: one dot per agent that is working or waiting, the open one marked. */
 function LiveDots({ current, onOpen }: { current: string | null; onOpen: (id: string) => void }) {
-  const { data } = useQuery<SessionList>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
+  // Every change of state arrives as an event while the stream is up; the slow poll is the net.
+  const streaming = useStreamUp();
+  const { data } = useQuery<SessionList>("/api/sessions", { pollMs: streaming ? 60000 : 5000, staleMs: 3000 });
   const live = (data?.sessions ?? []).filter((s) => s.status === "running" || s.status === "waiting").slice(0, 8);
   if (live.length === 0) return null;
   return (

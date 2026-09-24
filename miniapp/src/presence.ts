@@ -113,7 +113,8 @@ function timeZone(): string {
   }
 }
 
-function kindHere(): PresenceKind {
+/** This window's kind, as the host is told it in a report and on the event stream. */
+export function currentKind(): PresenceKind {
   let standalone = false;
   try {
     standalone = window.matchMedia?.("(display-mode: standalone)").matches ?? false;
@@ -127,7 +128,7 @@ function kindHere(): PresenceKind {
 export function currentBody(): PresenceBody {
   return {
     client: clientId(),
-    kind: kindHere(),
+    kind: currentKind(),
     visible: document.visibilityState === "visible",
     focused: document.hasFocus(),
     ...mergeScopes(scopes.values()),
