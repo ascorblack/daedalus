@@ -352,7 +352,8 @@ def navigation(browser, problems: list[str]) -> None:  # type: ignore[no-untyped
         if cards and max(cards) > 390 - 16:
             problems.append(f"a card is wider than the phone allows: {cards}")
         page.locator("[data-terminal='k1tests00000'] .term-card-open").tap()
-        page.wait_for_selector(".term-page .term-view[data-terminal-view='k1tests00000']", timeout=10000)
+        # On a phone the full-screen address shows the phone's terminal, with its keys (mobile.tsx).
+        page.wait_for_selector(".term-phone .term-view[data-terminal-view='k1tests00000']", timeout=10000)
         if page.locator(".tabbar").count():
             problems.append("the tab bar stays under a terminal shown full screen on a phone")
     phone.close()
