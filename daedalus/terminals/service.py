@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -41,6 +42,8 @@ from daedalus.terminals.model import (
     EnvStatus,
     EnvUnavailable,
     InvalidRequest,
+    LiveTerminals,
+    NoRebuilder,
     NotFound,
     Origin,
     OutputChunk,
@@ -56,6 +59,7 @@ from daedalus.terminals.model import (
 )
 from daedalus.terminals.owners import Owners
 from daedalus.terminals.sidechannels import SideChannels
+from daedalus.terminals.update import BY_HAND, DaemonUpdate
 
 if TYPE_CHECKING:
     from daedalus.config import TerminalsConfig
@@ -201,8 +205,11 @@ class Terminals(SideChannels):
         bus: EventBus | None = None,
         public_host: str = "",
         port_ranges: dict[str, str] | None = None,
+        daemon_update: DaemonUpdate | None = None,
     ) -> None:
         self.db = db
+        self.daemon_update = daemon_update
+        """The container environment's daemon as the image holds it; None where no image does."""
         self.config = config
         self.owners = owners
         self.bus = bus
@@ -362,13 +369,15 @@ class Terminals(SideChannels):
         for env, link in self.links.items():
             info = link.info if link.available else {}
             capabilities = info.get("capabilities") or {}
+            version = str(info.get("version") or "")
+            image_version = self.daemon_update.image_version if self.daemon_update is not None and env == "container" else ""
             out.append(
                 EnvStatus(
                     env=env,
                     available=link.available,
                     reason="" if link.available else link.reason,
                     detail="" if link.available else link.detail,
-                    version=str(info.get("version") or ""),
+                    version=version,
                     sandbox=capabilities.get("sandbox") == "ok",
                     shell=str(info.get("shell") or ""),
                     home=str(info.get("home") or ""),
@@ -376,9 +385,35 @@ class Terminals(SideChannels):
                     public_host=self.public_host,
                     preview_poll_ms=cfg.preview_poll_ms,
                     running=(running or {}).get(env, 0),
+                    image_version=image_version,
+                    update_available=bool(link.available and version and image_version and version != image_version),
                 )
             )
         return out
+
+    async def request_update(self, env: str, *, confirm: bool, actor: str = "operator") -> dict[str, Any]:
+        """Ask for the terminals service to be recreated from the image: the daemon is updated, and
+        every terminal it runs ends. Refused with the count until the operator confirms, whenever one
+        is running — the count is taken here rather than trusted from the page that asked."""
+        if env != "container":
+            raise InvalidRequest("only the container's terminal service is updated from here; the host's is updated where it is installed")
+        if self.daemon_update is None or not self.daemon_update.image_version:
+            raise Unsupported("this installation has no terminals service image to update from")
+        running = (await self.running_by_env()).get(env, 0)
+        if running and not confirm:
+            raise LiveTerminals(f"updating the terminal service ends {running} running terminal(s)", running=running)
+        if not self.daemon_update.rebuilder_alive():
+            raise NoRebuilder(f"no rebuilder is running to recreate the terminals service; on the server run: {BY_HAND}", command=BY_HAND, running=running)
+        job = self.daemon_update.request()
+        link = self.links[env]
+        await self.audit("", env, actor, "daemon_update", {"job": job, "running": running, "from": str(link.info.get("version") or "") if link.available else "", "to": self.daemon_update.image_version})
+        return {"job": job, "running": running, "image_version": self.daemon_update.image_version}
+
+    def update_result(self, env: str, job: str) -> dict[str, str]:
+        # The job names a file in the trigger directory, so it is exactly what request() makes.
+        if env != "container" or self.daemon_update is None or not re.fullmatch(r"[0-9a-f]{32}", job):
+            raise NotFound("no update of this environment's terminal service was asked for")
+        return self.daemon_update.result(job)
 
     def _client(self, env: str) -> PtydClient:
         link = self.links.get(env)

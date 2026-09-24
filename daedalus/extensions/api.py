@@ -1024,6 +1024,11 @@ class TerminalTicketBody(BaseModel):
     read_only: bool = False
 
 
+class TerminalDaemonUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
+
+
 class TerminalSocket:
     """The framework's WebSocket as the terminal relay's ``FrameSocket``."""
 
@@ -3220,6 +3225,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def terminals_load(cap: int | None = Query(default=None, ge=1, le=100_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """What the running terminals cost, and what the machine would carry at ``cap`` of them."""
         return await terminal_service().load(cap=cap)
+
+    @api.post("/api/terminals/envs/{env}/update", status_code=202)
+    async def terminals_daemon_update(env: str, body: TerminalDaemonUpdateBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Recreate the terminals service from the image, which updates its daemon and ends its
+        terminals: 409 ``live_terminals`` with the count until repeated with ``confirm``."""
+        return await terminal_service().request_update(env, confirm=body.confirm if body is not None else False)
+
+    @api.get("/api/terminals/envs/{env}/update/{job}")
+    async def terminals_daemon_update_result(env: str, job: str, _: dict[str, Any] = Depends(auth)) -> dict[str, str]:
+        return terminal_service().update_result(env, job)
 
     @api.post("/api/terminals", status_code=201)
     async def terminals_create(body: TerminalCreateBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
