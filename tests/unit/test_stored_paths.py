@@ -19,7 +19,7 @@ import pytest
 from daedalus import doctor
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions import install_all
-from daedalus.extensions.inbox import Inbox
+from daedalus.extensions.notifications import NotificationService
 from daedalus.extensions.scheduler import Scheduler
 from daedalus.extensions.services import Services
 from daedalus.host.session_runner import SessionManager
@@ -32,7 +32,7 @@ async def app(settings: Settings, db: Database) -> Any:
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     app = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={}, extension_failures={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = NotificationService(db, manager.bus)
     yield app
     await manager.close()
 
@@ -71,7 +71,7 @@ async def test_a_service_pointing_into_another_sessions_folder_is_reported_not_f
     assert stranded["status"] == "dead"
     assert str(neighbour.workspace / "test-site") in stranded["note"] and str(owner.workspace) in stranded["note"]
     assert "left as it is" in stranded["note"]
-    titles = [e["title"] for e in await app.db.fetchall("SELECT title FROM inbox WHERE session_id = ?", (owner.session.id,))]
+    titles = [e["title"] for e in await app.db.fetchall("SELECT title FROM notifications WHERE session_id = ?", (owner.session.id,))]
     assert "Service 'test-site-lan' was not restarted" in titles
     checks = await doctor.run_checks(doctor.DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager))
     assert any(c.name == "services" and "may not reach" in c.message for c in checks)
@@ -131,7 +131,7 @@ async def test_a_schedule_whose_folder_is_gone_records_a_failure_instead_of_maki
     assert not gone.exists()
     row = await app.db.fetchone("SELECT failure_count, last_error FROM schedules WHERE id = ?", (created["id"],))
     assert row["failure_count"] == 1 and "is not there" in row["last_error"]
-    titles = [e["title"] for e in await app.extensions["inbox"].list()]
+    titles = [e["title"] for e in (await app.notifications.list())["entries"]]
     assert any("could not start" in t for t in titles)
 
 
@@ -152,14 +152,15 @@ async def test_a_failing_extension_is_isolated_reported_and_the_rest_still_insta
     extensions = importlib.import_module("daedalus.extensions")
     for name, fails in (("daedalus.extensions.broken", True), ("daedalus.extensions.working", False)):
         monkeypatch.setitem(sys.modules, name, _extension(name, fails=fails))
-    monkeypatch.setattr(extensions, "EXTENSIONS", ("daedalus.extensions.inbox", "daedalus.extensions.broken", "daedalus.extensions.working"))
+    monkeypatch.setattr(extensions, "EXTENSIONS", ("daedalus.extensions.notifications", "daedalus.extensions.broken", "daedalus.extensions.working"))
     app.extensions.clear()
 
     await install_all(app)
 
     assert "working" in app.extensions and "broken" not in app.extensions
     assert app.extension_failures == {"broken": "RuntimeError: the port it wanted is taken"}
-    entries = await app.extensions["inbox"].list()
+    entries = (await app.notifications.list())["entries"]
+    assert "notifications" in app.extensions
     assert any(e["title"] == "The broken subsystem did not start" and "port it wanted is taken" in e["body"] for e in entries)
     checks = await doctor.run_checks(doctor.DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager, extension_failures=app.extension_failures))
     assert any(c.name == "extensions" and "broken" in c.message for c in checks)
@@ -167,7 +168,7 @@ async def test_a_failing_extension_is_isolated_reported_and_the_rest_still_insta
 
 async def test_the_channel_the_failures_are_reported_through_is_deliberately_fatal(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     extensions = importlib.import_module("daedalus.extensions")
-    monkeypatch.setitem(sys.modules, "daedalus.extensions.inbox", _extension("daedalus.extensions.inbox", fails=True))
-    monkeypatch.setattr(extensions, "EXTENSIONS", ("daedalus.extensions.inbox", "daedalus.extensions.working"))
+    monkeypatch.setitem(sys.modules, "daedalus.extensions.notifications", _extension("daedalus.extensions.notifications", fails=True))
+    monkeypatch.setattr(extensions, "EXTENSIONS", ("daedalus.extensions.notifications", "daedalus.extensions.working"))
     with pytest.raises(RuntimeError, match="the port it wanted is taken"):
         await install_all(app)

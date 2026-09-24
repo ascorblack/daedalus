@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from daedalus.config import NO_MODEL_MESSAGE, REASONING_EFFORTS
 from daedalus.doctor import DoctorContext, render_text, run_checks
-from daedalus.extensions.inbox import format_entries
+from daedalus.extensions.notifications import format_entries
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.security import redact
 from daedalus.transport.telegram.front import SESSION_LIST_LIMIT
@@ -329,18 +329,18 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
             return str(exc)
         return "Loop started: " + loops.note(loop).lstrip("- ")
     if name == "inbox":
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            return "The inbox is not installed."
+        notifications = app.notifications
+        if notifications is None:
+            return "Notifications are not installed."
         if args.lower() == "clear":
-            n = await inbox.mark_read()  # type: ignore[attr-defined]
+            n = await notifications.mark_seen(everything=True)
             return f"marked {n} entr{'y' if n == 1 else 'ies'} as read"
-        entries = await inbox.list(limit=15, unread_only=args.lower() != "all")  # type: ignore[attr-defined]
+        entries = (await notifications.list("all" if args.lower() == "all" else "unseen", limit=15))["entries"]
         if not entries:
             return "Inbox: nothing unread." if args.lower() != "all" else "Inbox is empty."
         text = format_entries(entries)
         if args.lower() != "all":
-            await inbox.mark_read([int(e["id"]) for e in entries])  # type: ignore[attr-defined]
+            await notifications.mark_seen([e["id"] for e in entries])
         return text
     if name == "board":
         board = app.extensions.get("board")

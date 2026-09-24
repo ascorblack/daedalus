@@ -9,10 +9,10 @@ from typing import Any
 import pytest
 
 from daedalus.config import RuntimeConfig, Settings
-from daedalus.extensions.inbox import Inbox
 from daedalus.extensions.services import Services, parse_range, pid_alive
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.notifications import RecordingNotifications
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ async def app(settings: Settings, db: Database) -> Any:
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     app = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = RecordingNotifications()
     yield app
     await manager.close()
 
@@ -76,8 +76,7 @@ async def test_reconcile_restarts_or_reports_after_a_rebuild(app: Any) -> None:
     rows = {r["name"]: r for r in await services.list(sid)}
     assert rows["keep"]["status"] == "running" and rows["keep"]["pid"] != kept["pid"]
     assert rows["gone"]["status"] == "dead" and "not running after the restart" in rows["gone"]["note"]
-    entries = await app.db.fetchall("SELECT title FROM inbox WHERE session_id = ?", (sid,))
-    assert any("gone" in e["title"] for e in entries)
+    assert any("gone" in d.title for d in app.notifications.drafts if d.session_id == sid)
     await services.stop_all(sid)
     await asyncio.sleep(0)
 

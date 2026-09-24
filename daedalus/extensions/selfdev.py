@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daedalus import supervisor_client
+from daedalus.extensions.notifications import Draft
 from daedalus.host import reachability
 from daedalus.security import redact
 
@@ -766,9 +767,8 @@ class SelfDevelopment:
         (self.selfdev_dir / RESULT_FILE).write_text(json.dumps(record, indent=2))
         (self.selfdev_dir / PENDING_FILE).unlink(missing_ok=True)
         if outcome["status"] != "applied":
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("selfdev", f"The change '{pending.get('summary')}' was not applied", outcome["detail"], severity="warning")
+            if self.app.notifications is not None:
+                await self.app.notifications.post(Draft("system", f"The change '{pending.get('summary')}' was not applied", outcome["detail"], kind="selfdev", tone="warning", source="selfdev"))
         await self._notify_session(
             pending.get("session_id"),
             f"Your change '{pending.get('summary')}' — {outcome['status']}. {outcome['detail']}",
@@ -834,24 +834,27 @@ class SelfDevelopment:
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
         front = self.app.front
         outbox = front._general_outbox() if front is not None else None
-        if outbox is None:
-            # No chat to put the buttons in: the proposal is decided on the Changes screen, and the
-            # inbox is what tells the operator there is one waiting.
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("change_proposal", f"Change proposal ({repo}): {title}", f"{summary[:1500]}\n\n{pr_url}", severity="notice")
-            return
-        assert front is not None
-        text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
-        message_id = await front.send_choice(
-            outbox,
-            text,
-            [
-                [("✅ Approve", f"cp:{proposal_id}:approve"), ("❌ Reject", f"cp:{proposal_id}:reject")],
-                [("✍️ Reject with reason", f"cp:{proposal_id}:reason")],
-            ],
-        )
-        await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (message_id, proposal_id))
+        sent = False
+        if outbox is not None:
+            assert front is not None
+            text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
+            message_id = await front.send_choice(
+                outbox,
+                text,
+                [
+                    [("✅ Approve", f"cp:{proposal_id}:approve"), ("❌ Reject", f"cp:{proposal_id}:reject")],
+                    [("✍️ Reject with reason", f"cp:{proposal_id}:reason")],
+                ],
+            )
+            await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (message_id, proposal_id))
+            sent = True
+        # Recorded either way: without a chat to put the buttons in, this entry is what tells the
+        # operator a proposal waits on the Changes screen; with one, it is the record of the card.
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft(
+                "system", f"Change proposal ({repo}): {title}", f"{summary[:1500]}\n\n{pr_url}", kind="change_proposal",
+                link=f"/app/changes/{proposal_id}", source="selfdev", handled=frozenset({"telegram"}) if sent else frozenset(),
+            ))
 
     async def decide(self, proposal_id: str, decision: str, *, reason: str = "") -> str:
         row = await self.app.db.fetchone("SELECT * FROM change_proposals WHERE id = ?", (proposal_id,))
@@ -926,9 +929,8 @@ class SelfDevelopment:
             while manager.running_run_ids() and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(5)
             outcome = await self.rebuild(reason)
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("rebuild", f"Rebuild: {reason}", outcome, severity="notice")
+            if self.app.notifications is not None:
+                await self.app.notifications.post(Draft("system", f"Rebuild: {reason}", outcome, kind="rebuild", source="selfdev"))
 
         task = asyncio.create_task(_wait_then_rebuild(), name="rebuild-when-idle")
         self._background.add(task)

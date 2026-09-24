@@ -2,7 +2,7 @@
 
 Telegram used to be a precondition — ``start()`` refused without a token, and a notice with no chat
 to go to was simply lost. These tests pin the other shape: the front is absent, the API and the
-extensions are there, and what would have been a chat line is an inbox entry.
+extensions are there, and a line meant for the chat is recorded as a notification.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ async def app(tmp_path: Path):  # type: ignore[no-untyped-def]
 async def test_the_application_starts_and_installs_its_extensions_without_a_front(app: Application) -> None:
     assert app.front is None
     assert app.manager is not None
-    for name in ("inbox", "scheduler", "loops", "board", "api_token"):
+    for name in ("notifications", "scheduler", "loops", "board", "api_token"):
         assert name in app.extensions, name
 
 
@@ -51,13 +51,15 @@ async def test_a_token_without_an_owner_id_is_still_refused(tmp_path: Path) -> N
     await application.shutdown()
 
 
-async def test_notify_lands_in_the_inbox_when_there_is_no_chat(app: Application) -> None:
-    await app.notify("💸 Daily budget exceeded (openrouter).\nNew runs are refused until tomorrow.", kind="budget", severity="warning")
-    entries = await app.extensions["inbox"].list(limit=10)  # type: ignore[attr-defined]
+async def test_a_notice_is_recorded_when_there_is_no_chat(app: Application) -> None:
+    assert app.notifications is not None
+    await app.notice("💸 Daily budget exceeded (openrouter).\nNew runs are refused until tomorrow.", kind="budget", tone="warning")
+    entries = (await app.notifications.list(limit=10))["entries"]
     entry = next(e for e in entries if e["kind"] == "budget")
     assert entry["title"].startswith("💸 Daily budget exceeded")
     assert entry["body"] == "New runs are refused until tomorrow."
-    assert entry["severity"] == "warning"
+    assert (entry["category"], entry["level"], entry["tone"]) == ("system", "normal", "warning")
+    assert entry["delivered"] == {}  # no chat, so nothing was sent anywhere
 
 
 async def test_create_session_makes_a_plain_session(app: Application) -> None:

@@ -1,9 +1,9 @@
 """Application composition: stores → sessions → API (+ Telegram, scheduler, monitors).
 
 Telegram is one front among the ways in, not the way in: with no bot token the same
-installation runs on its API and its app alone. Everything that used to speak to the chat
-goes through :meth:`Application.notify` and :meth:`Application.create_session`, which fall
-back to the inbox and to a plain session when there is no front to speak to.
+installation runs on its API and its app alone. What the operator must hear about is posted to
+:attr:`Application.notifications`, which records it whether or not there is a chat to say it in,
+and :meth:`Application.create_session` falls back to a plain session when there is no front.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.extensions.notifications import Draft, NotificationService, Tone
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
 from daedalus.host.config_validation import ConfigConflict, config_revision
@@ -39,6 +40,8 @@ class Application:
         self.front: TelegramFront | None = None
         self.background: list[asyncio.Task[None]] = []
         self.extensions: dict[str, object] = {}
+        self.notifications: NotificationService | None = None
+        """Where everything the operator must hear about is recorded; set when the extensions install."""
         self.extension_failures: dict[str, str] = {}
         """Subsystems that raised while installing, by name. Empty on a healthy start; see
         :data:`daedalus.extensions.FATAL` for why a failure here is survivable."""
@@ -119,13 +122,15 @@ class Application:
             )
             if self.front is not None:
                 await self.front.notify(note, markdown=False)  # the chat is the alarm; the entry below is the record
-            inbox = self.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("boot_guard", "Boot recovery skipped after repeated crashes", note, severity="error")  # type: ignore[attr-defined]
+            if self.notifications is not None:
+                await self.notifications.post(Draft(
+                    "system", "Boot recovery skipped after repeated crashes", note, kind="boot_guard", level="urgent", tone="error",
+                    handled=frozenset({"telegram"}) if self.front is not None else frozenset(),
+                ))
             return
         resumed = await self.manager.resume_unfinished()
         if resumed:
-            await self.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False, kind="startup")
+            await self.notice(f"Resumed {len(resumed)} run(s) after restart.", kind="startup", quiet=True)
         if stale := self.manager.stale_runs:
             # Natively the agent is a process under the launcher, so closing the window is a stop.
             # A run that was working when it happened is worth a line: the operator's question the
@@ -135,7 +140,7 @@ class Application:
                 if self.settings.native
                 else ""
             )
-            await self.notify(f"{len(stale)} run(s) were interrupted by the last stop and could not be resumed.{why}", markdown=False, kind="startup", severity="notice")
+            await self.notice(f"{len(stale)} run(s) were interrupted by the last stop and could not be resumed.{why}", kind="startup")
         if self.front is not None:
             resent = await self.front.redeliver_pending()
             if resent:
@@ -152,21 +157,23 @@ class Application:
             *(probe(provider_id, provider) for provider_id, provider in self.config.providers.items() if provider.kind == "llamacpp")
         )
 
-    async def notify(self, text: str, *, markdown: bool = True, kind: str = "notice", severity: str = "info") -> None:
-        """Say something to the operator: the chat when Telegram is configured, the inbox when it is not.
+    async def notice(self, text: str, *, kind: str, tone: Tone = "info", quiet: bool = False) -> None:
+        """Record a line about the installation itself and send it to the General topic, as it always was.
 
-        Without a front the inbox is the only channel the operator reads, so a message that would have
-        been a chat line becomes an entry there rather than disappearing into the log.
+        The first line is the title and the rest the body. Before the extensions are installed there
+        is nowhere to record it, so it goes to the chat alone, or to the log when there is no chat.
         """
-        if self.front is not None:
-            await self.front.notify(text, markdown=markdown)
-            return
-        inbox = self.extensions.get("inbox")
-        if inbox is None:  # before the extensions are installed there is nowhere to put it but the log
-            logger.warning("%s", text)
+        if self.notifications is None:
+            if self.front is not None:
+                await self.front.notify(text, markdown=False)
+            else:
+                logger.warning("%s", text)
             return
         headline, _, body = text.partition("\n")
-        await inbox.post(kind, headline.strip().strip("*_ ") or kind, body.strip(), severity=severity)  # type: ignore[attr-defined]
+        await self.notifications.post(Draft(
+            "system", headline.strip().strip("*_ ") or kind, body.strip(), kind=kind, tone=tone,
+            level="quiet" if quiet else None, telegram_general=True,
+        ))
 
     async def create_session(self, title: str, *, metadata: dict[str, Any] | None = None, workspace: Path | None = None, project_id: str | None = None, own_directory: bool = False) -> SessionState:
         """A session with its chat topic where Telegram is configured, a plain session where it is not."""
@@ -183,20 +190,20 @@ class Application:
         failed = self.settings.state_dir / "good" / "FAILED"
         if failed.exists():
             text = failed.read_text(encoding="utf-8")
-            await self.notify("❌ The last rebuild failed preflight and was rolled back:\n\n" + text[-3000:], markdown=False, kind="rebuild", severity="error")
+            await self.notice("❌ The last rebuild failed preflight and was rolled back:\n\n" + text[-3000:], kind="rebuild", tone="error")
             failed.rename(failed.with_suffix(".reported"))
         last = self.settings.state_dir / "good" / "LAST_REBUILD"
         if last.exists():
-            await self.notify("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], markdown=False, kind="rebuild", severity="notice")
+            await self.notice("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], kind="rebuild")
             last.rename(last.with_suffix(".reported"))
         if self.extension_failures:
-            # The inbox already holds one entry per subsystem; this is the line in the chat, because a
-            # bot that came up without its scheduler looks entirely healthy until something does not happen.
+            # The notifications already hold one entry per subsystem; this is the line in the chat, because
+            # a bot that came up without its scheduler looks entirely healthy until something does not happen.
             broken = ", ".join(f"{name} ({reason.split(':')[0]})" for name, reason in self.extension_failures.items())
-            await self.notify(f"⚠️ The bot started without {len(self.extension_failures)} subsystem(s): {broken}. The inbox has the error for each.", markdown=False, kind="extension", severity="error")
+            await self.notice(f"⚠️ The bot started without {len(self.extension_failures)} subsystem(s): {broken}. The inbox has the error for each.", kind="extension", tone="error")
         exceeded = self.manager.budget_exceeded() if self.manager else None
         if exceeded:
-            await self.notify(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", markdown=False, kind="budget", severity="warning")
+            await self.notice(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", kind="budget", tone="warning")
 
     async def _install_extensions(self) -> None:
         """Scheduler, balance monitor, self-development, API — each attaches here."""

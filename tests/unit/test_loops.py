@@ -9,10 +9,10 @@ from typing import Any
 import pytest
 
 from daedalus.config import RuntimeConfig, Settings
-from daedalus.extensions.inbox import Inbox
 from daedalus.extensions.loops import Loops, fmt_interval
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.notifications import RecordingNotifications
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ async def app(settings: Settings, db: Database) -> Any:
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     app = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = RecordingNotifications()
     submitted: list[tuple[str, str, str]] = []
 
     async def fake_submit(session_id: str, text: str, attachments=(), *, steer=False, as_answer=True, origin="operator") -> str:  # type: ignore[no-untyped-def]
@@ -73,8 +73,7 @@ async def test_dynamic_loop_ends_without_loop_next_and_continues_with_it(app: An
     await loops.on_run_finished(sid, "r2", "completed")
     loop = await loops.get(sid)
     assert loop["status"] == "done" and "without LoopNext" in loop["stop_reason"]
-    entries = await app.db.fetchall("SELECT kind, body FROM inbox WHERE session_id = ?", (sid,))
-    assert any(e["kind"] == "loop" for e in entries)
+    assert any(d.kind == "loop" and d.category == "agent_notify" and d.session_id == sid for d in app.notifications.drafts)
     # Resume runs an iteration at once.
     await loops.resume(sid)
     assert (await loops.get(sid))["status"] == "active" and app.submitted[-1][2] == "loop"

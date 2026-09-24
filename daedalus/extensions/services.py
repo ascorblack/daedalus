@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.notifications import Draft
 from daedalus.tools.shell import sandbox_argv, shell_environment
 
 if TYPE_CHECKING:
@@ -371,7 +372,7 @@ class Services:
         """After a restart: what the table calls running either still runs, is restarted, or is reported dead."""
         manager = self.app.manager
         assert manager is not None
-        inbox = self.app.extensions.get("inbox")
+        notifications = self.app.notifications
         for row in await self.rows():
             if row["status"] != "running":
                 continue
@@ -384,8 +385,8 @@ class Services:
                 if refusal := self.directory_refusal(sid, row["cwd"]):
                     await self._mark_dead(sid, name, f"not restarted after the rebuild: {refusal}")
                     logger.warning("service %s/%s not restarted: %s", sid, name, refusal)
-                    if inbox is not None:
-                        await inbox.post("service", f"Service '{name}' was not restarted", refusal, severity="warning", session_id=sid)
+                    if notifications is not None:
+                        await notifications.post(Draft("system", f"Service '{name}' was not restarted", refusal, kind="service", tone="warning", session_id=sid, source="services"))
                     continue
                 try:
                     await self.start(sid, name=name, command=row["command"], cwd=row["cwd"], port=row.get("port") or None, restart=True)
@@ -396,12 +397,12 @@ class Services:
                     # session may no longer reach. The row is what the operator reads afterwards, and
                     # the remaining services still get their turn.
                     await self._mark_dead(sid, name, f"could not restart after the rebuild: {exc}")
-                    if inbox is not None:
-                        await inbox.post("service", f"Service '{name}' did not come back", str(exc)[:400], severity="warning", session_id=sid)
+                    if notifications is not None:
+                        await notifications.post(Draft("system", f"Service '{name}' did not come back", str(exc)[:400], kind="service", tone="warning", session_id=sid, source="services"))
                     continue
             await self.app.db.execute("UPDATE services SET status = 'dead', note = 'not running after the restart', stopped_at = ? WHERE session_id = ? AND name = ?", (_now(), sid, name))
-            if inbox is not None:
-                await inbox.post("service", f"Service '{name}' is not running", "It did not survive the restart; ServiceStart runs it again.", severity="notice", session_id=sid)
+            if notifications is not None:
+                await notifications.post(Draft("system", f"Service '{name}' is not running", "It did not survive the restart; ServiceStart runs it again.", kind="service", session_id=sid, source="services"))
 
     # -- service hook for the tools ---------------------------------------------------
 

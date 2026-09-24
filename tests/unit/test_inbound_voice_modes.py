@@ -18,6 +18,7 @@ from daedalus.host.engine_factory import runtime_constants
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.voice import TranscriptionError, transcribe
+from tests.support.notifications import RecordingNotifications
 
 KEYPROXY_DIR = Path(__file__).resolve().parents[2] / "deploy" / "keyproxy"
 
@@ -74,7 +75,7 @@ async def app(settings: Settings, db: Database) -> Any:
 
     manager.submit = fake_submit  # type: ignore[method-assign]
     # Without a front Application.create_session is the manager's, so the stand-in hands it straight over.
-    app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={}, submitted=submitted, create_session=manager.create_session)
+    app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={}, notifications=RecordingNotifications(), submitted=submitted, create_session=manager.create_session)
     yield app
     await manager.close()
 

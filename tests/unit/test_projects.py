@@ -760,8 +760,8 @@ async def test_a_service_started_in_a_project_cannot_choose_a_directory_outside_
     """Every other path-taking tool goes through the session's resolve; ``ServiceStart`` took its cwd
     raw, which made it the one way into the filesystem the project's containment did not judge — and
     a service is the one thing here that outlives the turn."""
-    from daedalus.extensions.inbox import Inbox
     from daedalus.extensions.services import Services
+    from tests.support.notifications import RecordingNotifications
 
     settings.services_port_range = "18140-18142"
     manager = SessionManager(settings, config, db=db)
@@ -769,7 +769,7 @@ async def test_a_service_started_in_a_project_cannot_choose_a_directory_outside_
     root = tmp_path / "repo"
     (root / "site").mkdir(parents=True)
     app = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = RecordingNotifications()
     try:
         services = Services(app)  # type: ignore[arg-type]
         project = await manager.projects.create("Repo", str(root))

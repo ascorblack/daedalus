@@ -504,6 +504,17 @@ ahead of the stream, or more than 5,000 events behind gets one `resync` frame in
 client re-reads what it shows. The events are stored before they are sent, so a script that
 remembers the last number it handled never misses one across a restart of the agent.
 
+**Notifications.** Everything that wants your attention — a failed run, a scheduled task's result, a
+loop that needs an answer, a service that did not come back — is one row of the notification centre
+(the Inbox screen, and `/inbox` in Telegram). `GET /api/notifications?view=all|unseen|problems|needs_you`
+lists them newest first, with `before=<id>` and `limit=` for paging, and answers
+`{"entries", "next_before", "summary"}`; the summary is `{"unseen", "needs_you"}`, also at
+`GET /api/notifications/summary` and in `/api/status`. `POST /api/notifications/seen` takes one of
+`{"ids": [...]}`, `{"all": true}` or `{"session_id": "..."}`, and `DELETE /api/notifications/{id}`
+removes one. Each new or repeated notification is also a `notify` event on `/api/events`, and each
+change of what was seen a `notify.seen` event, so a client can keep its badge without polling. A
+quiet notification is kept as a record and never counts as unseen.
+
 ## Layout
 
 ```
@@ -515,7 +526,7 @@ daedalus/
   security/     redaction of secrets in what the model and the chat see
   transport/    Telegram (aiogram 3): topics, rich messages, voice, files
   extensions/   HTTP API + app, self-development, scheduler, loops, subagents,
-                services, board, peers, inbox, heartbeat, balance, voice, MCP
+                services, board, peers, notifications, heartbeat, balance, voice, MCP
   bench/        headless task runner and the Harbor adapter
 launcher/       the supervisor (PID 1, never edited by the agent)
 miniapp/        Vite + React app (Telegram Mini App and browser); src/router.ts, shell.tsx,
