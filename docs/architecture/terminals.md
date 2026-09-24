@@ -710,7 +710,12 @@ because the token in them is a shell.
   terminal. `Terminals.commands()` and `GET /api/terminals/{id}/commands` ask the daemon for the
   records.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
-  /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+  /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled. "Used now"
+  (`used.rss_bytes`) is the terminals' process trees plus each daemon's own memory
+  (`used.daemon_rss_bytes`), because the daemon holds every terminal's emulator and output ring and
+  no terminal process shows that memory. The cap is set in Settings → Terminals, whose bar redoes the
+  projection in the page as the value is typed and warns, without refusing, past what the estimate
+  carries.
 - **The event bus.** Every terminal event on the bus carries `terminal_id`, `project_id`, and
   `session_id` or `staff_id` from the owner. The host publishes `terminal.created` and
   `terminal.exited` itself (`lost: true` when the daemon went with it), and retells the daemon's

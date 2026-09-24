@@ -1070,7 +1070,7 @@ class Terminals(SideChannels):
         target = cap if cap is not None else configured
         rows = await self.db.fetchall("SELECT id, env, profile FROM terminals WHERE status = 'running'")
         running_profiles = [r["profile"] for r in rows]
-        envs, used_rss, used_cpu = [], 0, 0.0
+        envs, used_rss, used_cpu, daemons_rss = [], 0, 0.0, 0
         machine: dict[str, Any] = {}
         for env in ENVS:
             link = self.links[env]
@@ -1084,11 +1084,18 @@ class Terminals(SideChannels):
             terminals = [t for t in stats.get("terminals") or [] if isinstance(t, dict)]
             rss = sum(int(t.get("rss_bytes") or 0) for t in terminals)
             cpu = sum(float(t.get("cpu_percent") or 0) for t in terminals)
-            used_rss += rss
-            used_cpu += cpu
+            # The daemon itself holds every terminal's emulator and output ring, and none of the
+            # terminals' own processes shows that memory; leaving it out made "used now" smaller
+            # than what the terminals really cost.
+            daemon = stats.get("daemon") if isinstance(stats.get("daemon"), dict) else {}
+            daemon_rss = int(daemon.get("rss_bytes") or 0)
+            daemon_cpu = float(daemon.get("cpu_percent") or 0)
+            used_rss += rss + daemon_rss
+            used_cpu += cpu + daemon_cpu
+            daemons_rss += daemon_rss
             env_machine = stats.get("machine") or {}
             total, available = load_math.effective_memory(env_machine)
-            envs.append({"env": env, "supported": bool(stats.get("supported")), "terminals": len(terminals), "rss_bytes": rss, "cpu_percent": round(cpu, 1), "mem_total_bytes": total, "mem_available_bytes": available, "cpus": load_math.effective_cpus(env_machine)})
+            envs.append({"env": env, "supported": bool(stats.get("supported")), "terminals": len(terminals), "rss_bytes": rss, "cpu_percent": round(cpu, 1), "daemon_rss_bytes": daemon_rss, "mem_total_bytes": total, "mem_available_bytes": available, "cpus": load_math.effective_cpus(env_machine)})
             # The host environment is the machine itself; a container's view is the same machine
             # seen through its limits. Both environments on one server are one machine, so its
             # memory is counted once: from the host daemon when there is one.
@@ -1100,7 +1107,7 @@ class Terminals(SideChannels):
             "cap": configured,
             "running": len(rows),
             "queued": self.queue(),
-            "used": {"rss_bytes": used_rss, "cpu_percent": round(used_cpu, 1), "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": round(float(machine.get("cpu_percent") or 0), 1)},
+            "used": {"rss_bytes": used_rss, "daemon_rss_bytes": daemons_rss, "cpu_percent": round(used_cpu, 1), "cpus": load_math.effective_cpus(machine), "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": round(float(machine.get("cpu_percent") or 0), 1)},
             "profiles": {name: c.view() for name, c in self.costs.profiles().items()},
             "likely": {**cost.view(), "basis": basis},
             "projection": load_math.project(cap=target, running=len(rows), used_rss=used_rss, used_cpu=used_cpu, machine=machine, cost=cost),

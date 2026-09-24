@@ -146,7 +146,8 @@ def desktop(playwright, problems: list[str]) -> None:  # type: ignore[no-untyped
             page.wait_for_selector(".push-test-result li", timeout=5000)
             lines = page.eval_on_selector_all(".push-test-result li", "els => els.map(e => e.textContent)")
             print("test:", lines)
-            if lines != [f"{posted[0]['device']}: sent"]:
+            # One line per channel; the push line names the device that was just subscribed.
+            if lines != ["In app: shown here", f"Push: {posted[0]['device']}, sent"]:
                 problems.append(f"the test result reads {lines}")
             page.get_by_role("button", name="Turn off push").click()
             card_state(page, "off", problems, "desktop after turning off")

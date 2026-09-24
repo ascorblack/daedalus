@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
+import { invalidate } from "./store";
 
 export type PushState = "unsupported" | "telegram" | "needs-home-screen" | "unavailable" | "denied" | "off" | "on";
 
@@ -109,6 +110,15 @@ async function currentSubscription(): Promise<PushSubscription | null> {
   return reg ? reg.pushManager.getSubscription() : null;
 }
 
+/** This browser's push endpoint, so a list of devices can mark this one; null when it has none. */
+export async function currentEndpoint(): Promise<string | null> {
+  try {
+    return (await currentSubscription())?.endpoint ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function post(subscription: PushSubscription): Promise<void> {
   await api.post("/api/push/subscriptions", { ...subscription.toJSON(), device: deviceName(navigator.userAgent) });
 }
@@ -205,6 +215,8 @@ export function usePush(enabled = true): { state: PushState | null; busy: boolea
       setError((e as Error).message);
     } finally {
       setBusy(false);
+      // The list of devices in Settings gains or loses this one.
+      invalidate("/api/push/subscriptions");
     }
   }, []);
   return { state, busy, error, enable: () => run(enablePush), disable: () => run(disablePush) };
