@@ -382,6 +382,24 @@ because the token in them is a shell.
   attach and detach of a host terminal. What a person types is never recorded, only how much.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
   /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+- **The event bus.** Every terminal event on the bus carries `terminal_id`, `project_id`, and
+  `session_id` or `staff_id` from the owner. The host publishes `terminal.created` and
+  `terminal.exited` itself (`lost: true` when the daemon went with it), and retells the daemon's
+  (`daedalus/terminals/bus.py`) in the bus registry's shapes:
+
+  | Bus type | From the daemon's | Payload |
+  |---|---|---|
+  | `terminal.title` | `terminal.title`, only when the title changed | `{title}`, at most 500 characters |
+  | `terminal.cwd` | `terminal.cwd`, only when the directory changed | `{cwd}` |
+  | `terminal.command` | `terminal.command` | `{exit_code, command?, mark_seq?, duration_ms?}`; the command line at most 2000 characters |
+  | `terminal.bell` | `terminal.bell` | `{}` |
+  | `terminal.notify` | `terminal.notify` | `{title, body}`; OSC 9 has one text, which becomes the title |
+  | `terminal.progress` | `terminal.progress` | `{state: remove\|set\|error\|indeterminate\|pause, percent?}`; live only, never stored |
+
+  `terminal.mode`, `terminal.stats` and the harnesses' hook posts never reach the bus: they are
+  control traffic, and every subscriber would wake for them. A bell or a progress value more than
+  30 s old is dropped, because the host replays the daemon's events from its saved cursor after a
+  restart and an old bell would ring now for nothing.
 
 | Route | |
 |---|---|

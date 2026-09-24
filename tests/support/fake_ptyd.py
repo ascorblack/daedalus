@@ -137,8 +137,8 @@ class FakePtyd:
 
     # -- scripting --------------------------------------------------------------------------
 
-    def emit(self, kind: str, terminal_id: str | None, data: dict[str, Any]) -> dict[str, Any]:
-        event = {"seq": len(self.events) + 1, "at": stamp(), "type": kind, "data": data}
+    def emit(self, kind: str, terminal_id: str | None, data: dict[str, Any], *, at: str | None = None) -> dict[str, Any]:
+        event = {"seq": len(self.events) + 1, "at": at or stamp(), "type": kind, "data": data}
         if terminal_id:
             event["terminal_id"] = terminal_id
         self.events.append(event)

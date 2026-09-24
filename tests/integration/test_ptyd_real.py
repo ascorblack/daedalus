@@ -20,7 +20,9 @@ from typing import Any
 import pytest
 
 from daedalus.config import TerminalsConfig
+from daedalus.host.events import EventBus, EventFilter
 from daedalus.stores.database import Database
+from daedalus.terminals.bus import BusBridge
 from daedalus.terminals.model import Origin, Owner, TerminalSpec
 from daedalus.terminals.service import Terminals
 
@@ -153,3 +155,31 @@ async def test_an_exit_is_seen_as_an_event(db: Database, base: Path, daemon: sub
         assert row["exit_code"] == 4
     finally:
         await service.close()
+
+
+async def test_a_real_programs_marks_reach_the_event_bus(db: Database, base: Path, daemon: subprocess.Popen[bytes]) -> None:
+    bus = EventBus(db)
+    await bus.start()
+    cfg = TerminalsConfig()
+    service = Terminals(db, run_dirs={"container": base / "run", "host": None}, config=lambda: cfg, owners=FreeOnly(), bus=bus)
+    service.subscribe(BusBridge(service))
+    await service.start()
+    try:
+        assert await service.wait_available("container", timeout=15)
+        async with bus.subscribe(EventFilter(types=("terminal.",)), name="test") as sub:
+            marks = r"\033]2;building\007\033]7;file://box/srv/app\007\007\033]9;Build finished\007\033]133;D;3\007"
+            view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(base), argv=["/bin/sh", "-c", f"printf '{marks}'; sleep 1"]))
+            seen: dict[str, dict[str, Any]] = {}
+            async with asyncio.timeout(20):
+                while "terminal.exited" not in seen:
+                    event = await anext(sub)
+                    assert event.terminal_id == view["id"]
+                    seen.setdefault(event.type, dict(event.payload))
+        assert seen["terminal.title"] == {"title": "building"}
+        assert seen["terminal.cwd"] == {"cwd": "/srv/app"}
+        assert seen["terminal.bell"] == {}
+        assert seen["terminal.notify"] == {"title": "Build finished", "body": ""}
+        assert seen["terminal.command"]["exit_code"] == 3
+    finally:
+        await service.close()
+        await bus.close()

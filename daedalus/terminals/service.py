@@ -822,6 +822,16 @@ class Terminals:
         await self._publish("terminal.exited", payload, row)
         return True
 
+    async def publish_event(self, terminal_id: str, event_type: str, payload: dict[str, Any]) -> bool:
+        """Publish an event about a terminal with the ids its row names: the project, and the session
+        or staff member that owns it. False when the host has no row for it — a terminal it neither
+        created nor adopted is nobody's, and an event without an owner would reach no filter."""
+        row = await self.db.fetchone("SELECT id, project_id, owner_kind, owner_id FROM terminals WHERE id = ?", (terminal_id,))
+        if row is None:
+            return False
+        await self._publish(event_type, payload, dict(row))
+        return True
+
     async def _publish(self, event_type: str, payload: dict[str, Any], row: dict[str, Any]) -> None:
         if self.bus is None:
             return
