@@ -501,3 +501,27 @@ func TestACrashedDaemonIsStartedAgain(t *testing.T) {
 		t.Fatalf("the daemon's output was not kept: %v", err)
 	}
 }
+
+// The launcher gives the daemon a moment before the supervisor, and no more than that.
+func TestTheLauncherWaitsBrieflyForTheDaemon(t *testing.T) {
+	run := t.TempDir()
+	start := time.Now()
+	if waitForPtyd(context.Background(), run, 200*time.Millisecond) {
+		t.Fatal("an empty directory was waited into an answer")
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("waited %s past the limit", waited)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(run, "endpoint"), []byte("tcp:"+ln.Addr().String()), 0o600)
+	}()
+	if !waitForPtyd(context.Background(), run, 5*time.Second) {
+		t.Fatal("a daemon that came up was not found")
+	}
+}

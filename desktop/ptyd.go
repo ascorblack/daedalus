@@ -7,6 +7,7 @@ package main
 // stops it, and with it every host terminal, as quitting stops the agent.
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -107,6 +108,24 @@ func ptydAnswers(runDir string) bool {
 	}
 	conn.Close()
 	return true
+}
+
+// waitForPtyd waits until the daemon answers, for at most limit.
+func waitForPtyd(ctx context.Context, runDir string, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for {
+		if ptydAnswers(runDir) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // parseEndpoint reads "unix:<name>" (relative to the run directory) or "tcp:127.0.0.1:<port>".

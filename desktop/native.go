@@ -646,9 +646,12 @@ func (n *Native) Start(ctx context.Context) error {
 	if n.ptyd == nil {
 		n.ptyd = n.newPtyd()
 	}
-	// The terminal daemon first, so the agent finds it on its first look rather than on a retry.
+	// The terminal daemon first, and a few seconds to come up, so the agent finds it on its first
+	// look rather than on its next retry. Start only launches the process; without the wait the
+	// supervisor was the first of the two to run. A daemon that is slower than that is found later.
 	if n.ptyd != nil {
 		n.ptyd.Start(ctx)
+		waitForPtyd(ctx, ptydRunDir(n.paths), 5*time.Second)
 	}
 	n.keyproxy.Start(ctx)
 	n.supervisor.Start(ctx)
