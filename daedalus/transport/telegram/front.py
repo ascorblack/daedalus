@@ -190,6 +190,18 @@ class TelegramRefused(RuntimeError):
         self.session_id = session_id
 
 
+def is_subagent(metadata: dict[str, Any] | None) -> bool:
+    """Whether a session is a subagent, which never speaks in Telegram, whatever its leader does.
+
+    A subagent's work reaches the operator through its leader, which reads the result and decides
+    what to say. Copying the leader's ``telegram_detached`` at spawn time was not enough: a leader
+    muted or detached after the spawn left its workers in the private chat, and the worker of a
+    Telegram-bound leader spoke there in its own right, or opened a topic of its own in a group.
+    So the question is asked of the session itself, at every delivery, not inherited once.
+    """
+    return bool((metadata or {}).get("subagent_of"))
+
+
 def _telegram_media(source: Path | str) -> FSInputFile | str:
     """Telegram fetches a link itself. A workspace file is still uploaded."""
     return source if isinstance(source, str) else FSInputFile(source)
@@ -592,7 +604,7 @@ class TelegramFront:
         state = await self.manager.get_state(session_id)
         # Detachment is a per-session delivery veto, not merely the absence of a topic.
         # It must win over the global private-chat mode or background output leaks into DMs.
-        if state is not None and state.metadata.get("telegram_detached"):
+        if state is not None and (state.metadata.get("telegram_detached") or is_subagent(state.metadata)):
             return None
         binding = await self.binding_for_session(session_id)
         if binding is not None:
@@ -638,6 +650,9 @@ class TelegramFront:
         forum = chat_id or self.config.telegram.forum_chat_id
         if not forum:
             return None
+        state = await self.manager.get_state(session_id)
+        if state is not None and is_subagent(state.metadata):
+            return None  # a subagent speaks through its leader, so a topic of its own would only ever be empty
         try:
             topic = await tg_call(self.bot.create_forum_topic, forum, title[:128], attempts=2, flood_chat=forum)
         except TelegramRetryAfter as exc:
@@ -658,7 +673,7 @@ class TelegramFront:
         for session in await self.manager.list_sessions():
             # A session started on the site has no topic on purpose. Binding the group must
             # not pull it into the forum: that is the leak the flag exists to stop.
-            if (session.get("metadata") or {}).get("telegram_detached"):
+            if (session.get("metadata") or {}).get("telegram_detached") or is_subagent(session.get("metadata")):
                 continue
             if await self.binding_for_session(session["id"]) is not None:
                 continue
@@ -707,7 +722,9 @@ class TelegramFront:
         """
         state = await self.manager.create_session(title, metadata=metadata, project_id=project_id, own_directory=own_directory)
         forum_id = chat_id or self.config.telegram.forum_chat_id
-        if self.private_mode() and not (force_topic and forum_id):
+        # Neither a topic nor the private chat's binding: binding a subagent to the private chat
+        # would make it the session the operator's next message goes to.
+        if is_subagent(metadata) or (self.private_mode() and not (force_topic and forum_id)):
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = forum_id if (topic or force_topic) else 0
         binding = await self.ensure_topic(state.session.id, title, chat_id=forum) if forum else None
@@ -891,6 +908,10 @@ class TelegramFront:
             )
         if chosen is None:
             await message.answer(f"No session matches {arg!r}; /sessions lists them.")
+            return
+        if is_subagent(chosen.get("metadata")):
+            # Its answers would go nowhere: a subagent never writes here, so the chat would fall silent.
+            await message.answer(f"'{chosen['title']}' is a subagent; it answers through the session that started it.")
             return
         await self.set_current_session(str(chosen["id"]))
         await message.answer(f"Writing to '{chosen['title']}' ({chosen['id']}). What the others say still arrives here, under their names.")

@@ -29,6 +29,7 @@ from croniter import croniter
 from protocore.contracts.types import MessageRole, TextBlock
 
 from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured
+from daedalus.transport.telegram.front import is_subagent
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -400,6 +401,11 @@ class Scheduler:
         front = self.app.front
         text = f"⏰ **{schedule['name']}**\n\n{schedule['prompt']}"
         delivered = False
+        target = await self.app.manager.get_state(schedule["target_session"]) if schedule.get("target_session") and self.app.manager is not None else None
+        # A subagent's reminder stays off Telegram: the operator channel would be the chat by the
+        # back door, and a subagent speaks only through its leader. The inbox entry below records it.
+        if target is not None and is_subagent(target.metadata):
+            front = None
         if front is not None:
             outbox = await front.outbox_for_session(schedule["target_session"]) if schedule.get("target_session") else None
             try:

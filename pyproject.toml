@@ -80,6 +80,7 @@ ignore = ["B008", "E501"]
 [tool.ruff.lint.per-file-ignores]
 "tests/unit/test_run_polish.py" = ["F811"]  # pytest fixtures imported from a sibling test module
 "tests/unit/test_private_chat.py" = ["F811"]
+"tests/unit/test_subagent_telegram.py" = ["F811"]
 
 [tool.mypy]
 python_version = "3.12"
