@@ -1,18 +1,20 @@
 """A stand-in for the terminal daemon's ``team-mcp`` command: a stdio MCP server with the two team
-tools, ``Report`` and ``AskOrchestrator``, posting to the launch's hook ingress.
+tools, ``Report`` and ``AskOrchestrator``, posting to the launch's hook listener.
 
-It keeps the wire contract the real bridge keeps, so the host side can be built and tested before
-that command exists and against the same shapes after:
+The unit tests run it because the real command is a Go binary they do not build; the integration
+tests run the real one (``Rig(ptyd_bin=…)``). It keeps the real command's wire contract, described in
+``docs/architecture/terminals.md`` ("The team tools"):
 
-- ``Report(kind, note, artifacts?)`` → ``POST $DAEDALUS_HOOK_URL/team`` with ``{"tool": "report",
-  kind, note, artifacts}``, answered at once with ``recorded``.
-- ``AskOrchestrator(question, options?)`` → the same endpoint with ``{"tool": "ask", question,
-  options, "daedalus_hold_ms": $DAEDALUS_ASK_HOLD_MS}``: the ingress holds the post until the host
-  replies. The reply's ``answer`` (or its text) is the tool's result; a hold that expires (an empty
-  204) gives the fixed advice to carry on or report ``needs_input``.
+- ``Report(kind, note, artifacts?, remember?)`` → ``POST $DAEDALUS_HOOK_URL/team?wait_ms=…`` with
+  ``{"tool": "report", kind, note, artifacts[, remember]}``, held ``$DAEDALUS_REPORT_HOLD_MS``
+  (15 s); the host's reply is the result, and silence means ``recorded``.
+- ``AskOrchestrator(question, options?, context?)`` → the same with ``{"tool": "ask", question,
+  options[, context]}``, held ``$DAEDALUS_ASK_HOLD_MS`` (5 minutes); silence gives the fixed advice
+  to carry on or report ``needs_input``.
+- A reply ``{"text": …, "error"?: bool}``, a JSON string or plain text is the tool's result.
 
-Messages are one JSON object per line, as MCP's stdio transport has them. Any protocol version the
-client proposes is accepted, since the tools do not depend on it.
+Messages are one JSON object per line, as MCP's stdio transport has them. Argument checking is left
+to the real command; this one only fills the shape.
 """
 
 from __future__ import annotations
@@ -28,31 +30,37 @@ EXPIRED = "No answer yet. Continue with what the brief allows, or call Report wi
 TOOLS = [
     {
         "name": "Report",
-        "description": "Tell the orchestrator where the work stands.",
+        "description": "Tell your team how your task stands.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": ["checkpoint", "needs_input", "stuck", "done"]},
                 "note": {"type": "string"},
                 "artifacts": {"type": "array", "items": {"type": "string"}},
+                "remember": {"type": "string"},
             },
             "required": ["kind", "note"],
         },
     },
     {
         "name": "AskOrchestrator",
-        "description": "Ask the orchestrator a question and wait for the answer.",
+        "description": "Ask your project's orchestrator a question you cannot settle yourself.",
         "inputSchema": {
             "type": "object",
-            "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}},
+            "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}, "context": {"type": "string"}},
             "required": ["question"],
         },
     },
 ]
 
 
-def post(body: dict[str, Any], timeout: float) -> tuple[int, bytes]:
-    url = os.environ.get("DAEDALUS_HOOK_URL", "").rstrip("/") + "/team"
+def hold_ms(name: str, default: int) -> int:
+    return int(os.environ.get(name) or default)
+
+
+def post(body: dict[str, Any], hold: int) -> tuple[int, bytes]:
+    url = os.environ.get("DAEDALUS_HOOK_URL", "").rstrip("/") + f"/team?wait_ms={hold}"
+    timeout = hold / 1000 + 10
     request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
         "Content-Type": "application/json", "Authorization": "Bearer " + os.environ.get("DAEDALUS_HOOK_TOKEN", ""),
     })
@@ -65,25 +73,35 @@ def post(body: dict[str, Any], timeout: float) -> tuple[int, bytes]:
         return 0, b""
 
 
+def result(raw: bytes) -> tuple[str, bool]:
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.decode("utf-8", "replace"), False
+    if isinstance(body, dict) and isinstance(body.get("text"), str):
+        return body["text"], body.get("error") is True
+    return (body, False) if isinstance(body, str) else (json.dumps(body), False)
+
+
 def call(name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
     if name == "Report":
-        status, _ = post({"tool": "report", "kind": arguments.get("kind", "checkpoint"), "note": arguments.get("note", ""), "artifacts": arguments.get("artifacts") or []}, 10)
-        return ("recorded", False) if 200 <= status < 300 else (f"the report was not delivered ({status or 'no answer'})", True)
-    if name == "AskOrchestrator":
-        hold_ms = int(os.environ.get("DAEDALUS_ASK_HOLD_MS") or 300_000)
-        status, raw = post({"tool": "ask", "question": arguments.get("question", ""), "options": arguments.get("options") or [], "daedalus_hold_ms": hold_ms}, hold_ms / 1000 + 30)
-        if status == 200 and raw.strip():
-            try:
-                body = json.loads(raw)
-            except json.JSONDecodeError:
-                return raw.decode("utf-8", "replace"), False
-            if isinstance(body, dict) and "answer" in body:
-                return str(body["answer"]), False
-            return json.dumps(body), False
-        if status in (200, 204):
-            return EXPIRED, False
-        return f"the question was not delivered ({status or 'no answer'})", True
-    return f"no tool {name}", True
+        body: dict[str, Any] = {"tool": "report", "kind": arguments.get("kind", "checkpoint"), "note": arguments.get("note", ""), "artifacts": arguments.get("artifacts") or []}
+        if arguments.get("remember"):
+            body["remember"] = arguments["remember"]
+        silence, hold = "recorded", hold_ms("DAEDALUS_REPORT_HOLD_MS", 15_000)
+    elif name == "AskOrchestrator":
+        body = {"tool": "ask", "question": arguments.get("question", ""), "options": arguments.get("options") or []}
+        if arguments.get("context"):
+            body["context"] = arguments["context"]
+        silence, hold = EXPIRED, hold_ms("DAEDALUS_ASK_HOLD_MS", 300_000)
+    else:
+        return f"no tool {name}", True
+    status, raw = post(body, hold)
+    if 200 <= status < 300:
+        return result(raw) if raw.strip() else (silence, False)
+    if status in (401, 410):
+        return "this session is no longer connected to its team; nobody received the call", True
+    return f"the team refused the call ({status or 'no answer'})", True
 
 
 def main() -> None:

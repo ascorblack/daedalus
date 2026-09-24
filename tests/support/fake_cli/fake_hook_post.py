@@ -4,6 +4,9 @@ It reads a hook payload on stdin, posts it to ``$DAEDALUS_HOOK_URL/<name>`` with
 prints the reply body, and exits 0 on a 2xx, 2 when the launch is unknown or the token wrong (401,
 410), and 1 otherwise — including when nothing answers, so a dead host never blocks a CLI's hook for
 longer than its timeout.
+
+Called with ``--always-zero`` first it is ``ptyd hook <source>``: the same post, and exit 0 whatever
+happens, because a CLI reads exit 2 from a command hook as a refusal.
 """
 
 from __future__ import annotations
@@ -16,6 +19,10 @@ import urllib.request
 
 def main() -> int:
     args = sys.argv[1:]
+    if args[:1] == ["--always-zero"]:
+        sys.argv = sys.argv[:1] + args[1:]
+        main()
+        return 0
     if not args:
         sys.stderr.write("usage: hook-post <name> [--wait-ms N]\n")
         return 1
