@@ -321,18 +321,43 @@ export type MemoryRecord = { id: string; scope: string; scope_key: string; kind:
 export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
 export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };
 
-export type Project = {
+/** One folder of a project, as the host stores it. */
+export type ProjectDir = {
   id: string;
-  name: string;
-  /** The folder, as the operator gave it. Shown, never edited in place: moving a project is a deliberate act. */
-  root: string;
-  created_at: string;
-  settings: { snapshots: boolean; system?: string };
-  /** Non-empty on a project the installation made for itself: "voice" is the concierge's. It cannot be moved or removed. */
-  system?: string;
+  /** The absolute path, as the operator gave it. Shown, never edited in place. */
+  path: string;
+  label: string;
+  /** Where the folder lives: inside the container the bot runs in, or on the machine around it. */
+  env: "container" | "host";
+  is_git: boolean;
+  readonly: boolean;
+  position: number;
+  /** A scratch folder the installation made for itself rather than one the operator pointed at. */
+  managed: boolean;
   /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
   reachable: boolean;
   writable: boolean;
+};
+
+export type OrchestratorSettings = {
+  enabled: boolean;
+  session_id: string;
+  model: string;
+  autonomy: "ask" | "normal" | "full";
+  concurrency: number;
+  concurrency_cap: number;
+  telegram_topic_id: number;
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  created_at: string;
+  settings: { snapshots: boolean; system?: string; ephemeral?: boolean; default_env?: "container" | "host"; orchestrator?: OrchestratorSettings };
+  /** Non-empty on a project the installation made for itself: "voice" is the concierge's. It cannot be moved or removed. */
+  system?: string;
+  /** In order; the first is the primary folder, where an agent works unless it is given another. */
+  folders: ProjectDir[];
   sessions: { id: string; title: string; running?: boolean }[];
 };
 

@@ -360,7 +360,7 @@ async def test_the_manager_builds_the_policy_from_the_installation_it_is_in(tmp_
         assert runtime in set(manager.protected_paths())
         project_root = tmp_path / "code" / "atlas"
         project_root.mkdir(parents=True)
-        await manager.projects.create("Atlas", str(project_root))
+        await manager.projects.create("Atlas", [str(project_root)])
         # The policy is built inside a tool call, so the roots it compares against are read ahead of it.
         assert manager.projects.roots == (project_root,)
         policy = manager.policy()

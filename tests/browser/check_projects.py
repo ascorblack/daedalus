@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folders  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -31,14 +31,14 @@ def run() -> int:
         if path == "/api/projects" and request.method == "POST":
             payload = request.post_data_json
             created.append(payload)
-            project = {"id": f"p{len(projects) + 1}", "name": payload["name"], "root": payload.get("root", f"/managed/p{len(projects) + 1}"), "created_at": "2026-09-19T00:00:00Z", "settings": {"snapshots": True, "system": ""}, "system": "", "reachable": True, "writable": True, "sessions": []}
+            project = {"id": f"p{len(projects) + 1}", "name": payload["name"], "folders": folders(payload.get("root", f"/managed/p{len(projects) + 1}")), "created_at": "2026-09-19T00:00:00Z", "settings": {"snapshots": True, "system": ""}, "system": "", "sessions": []}
             projects.append(project)
             return answer(route, project)
         if path == "/api/projects":
             return answer(route, projects)
         if path == "/api/sessions":
-            folders = [{**project, "total": 0, "active": 0, "loops": 0, "last_message_at": ""} for project in projects]
-            return answer(route, {"sessions": [], "projects": folders})
+            listed = [{**project, "total": 0, "active": 0, "loops": 0, "last_message_at": ""} for project in projects]
+            return answer(route, {"sessions": [], "projects": listed})
         if path == "/api/settings":
             # The start canvas reads the default model before a chat exists.
             return answer(route, {"presets": {}, "model": {}})

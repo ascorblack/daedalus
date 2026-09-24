@@ -32,7 +32,16 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, FILE_TEXT, GATES, Unhandled, expect_app, file_entries, file_search  # noqa: E402
+from api_stub import (  # noqa: E402
+    DEFAULT_APP,
+    FILE_TEXT,
+    GATES,
+    Unhandled,
+    expect_app,
+    file_entries,
+    file_search,
+    folders,
+)
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 # The app is bilingual, and so is this set: LANG_UI=ru opens every page with ?lang=ru and the words
@@ -62,20 +71,21 @@ LOOP = {"mode": "interval", "interval_seconds": 5400, "status": "active", "run_c
 P1, P2, P3, P4, PV = "9f3c2a1b7d40", "2e7b5c9a1f88", "4c6d8e0f2a13", "6e8f0a2b4c35", "7c1e4d9f2a06"
 
 PROJECTS = [
-    {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site", "running": True}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos", "running": False}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)", "running": False}]},
-    {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker", "running": False}]},
-    {"id": P3, "name": "Support", "root": "/home/operator/work/support", "created_at": ago(days=6), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": S3, "title": "Support inbox", "running": False}]},
-    {"id": P4, "name": "Weekly digest", "root": "/home/operator/work/digest", "created_at": ago(days=5), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": S4, "title": "Weekly digest", "running": True}]},
+    {"id": P1, "name": "Bakery site", "folders": folders("/home/operator/work/bakery"), "created_at": ago(days=9), "settings": {"snapshots": True}, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site", "running": True}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos", "running": False}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)", "running": False}]},
+    {"id": P2, "name": "Expenses", "folders": folders("/home/operator/work/expenses"), "created_at": ago(days=4), "settings": {"snapshots": False}, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker", "running": False}]},
+    {"id": P3, "name": "Support", "folders": folders("/home/operator/work/support"), "created_at": ago(days=6), "settings": {"snapshots": True}, "sessions": [{"id": S3, "title": "Support inbox", "running": False}]},
+    {"id": P4, "name": "Weekly digest", "folders": folders("/home/operator/work/digest"), "created_at": ago(days=5), "settings": {"snapshots": True}, "sessions": [{"id": S4, "title": "Weekly digest", "running": True}]},
     # A folder added but not mounted yet: in Docker that is a restart away, and the app says so.
-    {"id": "5a8d1c0b6e22", "name": "Courier rates", "root": "/home/operator/documents/courier", "created_at": ago(hours=2), "settings": {"snapshots": False}, "reachable": False, "writable": False, "sessions": []},
+    {"id": "5a8d1c0b6e22", "name": "Courier rates", "folders": folders("/home/operator/documents/courier", reachable=False), "created_at": ago(hours=2), "settings": {"snapshots": False}, "sessions": []},
     # The installation's own: the concierge and what it started by being spoken to.
-    {"id": PV, "name": "Voice", "root": "/home/operator/.daedalus/workspaces/voice", "created_at": ago(days=12), "settings": {"snapshots": False, "system": "voice"}, "system": "voice", "reachable": True, "writable": True, "sessions": []},
+    {"id": PV, "name": "Voice", "folders": folders("/home/operator/.daedalus/workspaces/voice"), "created_at": ago(days=12), "settings": {"snapshots": False, "system": "voice"}, "system": "voice", "sessions": []},
 ]
 
 
 def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, own: bool = False, meta: dict | None = None, project: str) -> dict:
     row = next(p for p in PROJECTS if p["id"] == project)
-    path = f"{row['root']}/.agents/{id_}" if own else row["root"]
+    root = row["folders"][0]["path"]
+    path = f"{root}/.agents/{id_}" if own else root
     return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": path.rsplit("/", 1)[-1], "workspace_path": path, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": row["name"]}
 
 

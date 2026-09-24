@@ -1,10 +1,11 @@
 package main
 
-// Projects, in Docker mode. A project is a folder of the operator's own that the agents started in
-// it work inside. Natively there is nothing to do: the bot is a process of the operator's user and
-// the folder is simply there. In a container it is not — the agent sees only what is mounted — so a
-// project whose folder is not mounted is a row the app reports with "reachable": false, and this is
-// what closes that gap.
+// Projects, in Docker mode. A project is one or more folders of the operator's own that the agents
+// started in it work inside. Natively there is nothing to do: the bot is a process of the operator's
+// user and the folders are simply there. In a container they are not — the agent sees only what is
+// mounted — so a folder that is not mounted is one the app reports with "reachable": false, and this
+// is what closes that gap. Only folders of the container environment are mounted: a host folder is
+// reached through the host terminal bridge, never through the container's filesystem.
 //
 // The entry written is the folder mapped to itself, the same absolute path inside the container as
 // outside, because the project stores the path the operator gave and that one string has to name the
@@ -32,9 +33,33 @@ func mountsFile(p Paths) string { return filepath.Join(p.Data, "project-mounts")
 
 // Project is the part of the app's answer this file needs.
 type Project struct {
-	Name      string `json:"name"`
-	Root      string `json:"root"`
+	Name    string          `json:"name"`
+	Folders []ProjectFolder `json:"folders"`
+}
+
+// ProjectFolder is one folder of a project, as the app reports it.
+type ProjectFolder struct {
+	Path      string `json:"path"`
+	Env       string `json:"env"`
 	Reachable bool   `json:"reachable"`
+}
+
+// foldersToMount picks, out of the app's projects, the container folders the agent cannot see yet,
+// and says why any of them cannot be mounted at all.
+func foldersToMount(projects []Project) (wanted []string, refused []string) {
+	for _, project := range projects {
+		for _, folder := range project.Folders {
+			if folder.Reachable || folder.Env != "container" {
+				continue
+			}
+			if reason := refuseMount(folder.Path); reason != "" {
+				refused = append(refused, fmt.Sprintf("%s (%s) cannot be mounted: %s", project.Name, folder.Path, reason))
+				continue
+			}
+			wanted = append(wanted, folder.Path)
+		}
+	}
+	return wanted, refused
 }
 
 // Projects asks the running app which folders the operator has added and which of them it can see.
@@ -84,16 +109,9 @@ func (a *App) mountProjects(ctx context.Context) {
 		explainByHand(p, nil, log)
 		return
 	}
-	var wanted []string
-	for _, project := range projects {
-		if project.Reachable {
-			continue
-		}
-		if reason := refuseMount(project.Root); reason != "" {
-			log("%s cannot be mounted: %s", project.Name, reason)
-			continue
-		}
-		wanted = append(wanted, project.Root)
+	wanted, refused := foldersToMount(projects)
+	for _, reason := range refused {
+		log("%s", reason)
 	}
 	if len(wanted) == 0 {
 		return

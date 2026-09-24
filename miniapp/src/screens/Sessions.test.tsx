@@ -12,7 +12,7 @@ vi.mock("../store", () => ({ useQuery: () => ({ data: listing.data, loading: fal
 vi.mock("../projects", () => ({ ProjectChip: () => null, useProjects: () => ({ data: [] }), ProjectSettingsSheet: () => <div data-settings /> }));
 vi.mock("../shell", () => ({ PageHeader: ({ children }: { children: React.ReactNode }) => <header>{children}</header>, screenTitle: () => "Agents" }));
 
-const project: ProjectFolder = { id: "p", name: "Garden", root: "/projects/garden", created_at: "2026-01-01T00:00:00Z", settings: { snapshots: false }, reachable: true, writable: true, total: 1, members: 1, active: 0, loops: 0, last_message_at: "2026-09-18T00:00:00Z" };
+const project: ProjectFolder = { id: "p", name: "Garden", created_at: "2026-01-01T00:00:00Z", settings: { snapshots: false }, folders: [{ id: "f-p", path: "/projects/garden", label: "", env: "container", is_git: false, readonly: false, position: 0, managed: false, reachable: true, writable: true }], total: 1, members: 1, active: 0, loops: 0, last_message_at: "2026-09-18T00:00:00Z" };
 const agent: SessionSummary = { id: "a", title: "Plan the planting", project_id: "p", project: "Garden", model: "Local model", status: "waiting", created_at: project.created_at, last_message_at: project.last_message_at, run_id: null };
 let host: HTMLDivElement;
 let root: Root;

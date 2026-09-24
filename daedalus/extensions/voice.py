@@ -601,8 +601,8 @@ class Voice:
                 raise ValueError(f"no project has the id {project_id!r}; Projects lists the ones there are")
             if workspace == "own":
                 raise ValueError(f"an agent in {project.name} works in the project's own folder; leave workspace out when you name a project")
-            if not await manager.projects.ensure_reachable(project):
-                raise ValueError(f"the folder of {project.name} ({project.root}) is not reachable from here; it has to be mounted first")
+            if not await manager.projects.ensure_reachable(project.primary):
+                raise ValueError(f"the folder of {project.name} ({project.primary.path}) is not reachable from here; it has to be mounted first")
         else:
             # Under the same lock the session takes: the concierge is told to fan several errands
             # out at once, and each of them wants the Voice project the first time anything does.
@@ -659,7 +659,7 @@ class Voice:
             return []
         counts = await manager.projects.summary()
         return [
-            {"id": p.id, "name": p.name, "root": str(p.root), "reachable": p.reachable, "agents": counts.get(p.id, {}).get("total", 0)}
+            {"id": p.id, "name": p.name, "root": str(p.primary.path), "reachable": p.primary.reachable, "agents": counts.get(p.id, {}).get("total", 0)}
             for p in await manager.projects.list()
             if not p.settings.system
         ]

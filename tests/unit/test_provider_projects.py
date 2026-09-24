@@ -70,7 +70,7 @@ async def test_discovered_llamacpp_preset_runs_and_reports_refusal_inside_a_proj
                 assert row is not None and row["project_id"] == state.project.id
                 if project_args:
                     assert state.project.id == project["id"]
-                assert state.workspace == state.project.root
+                assert state.workspace == state.project.primary.path
                 waiter = asyncio.create_task(_wait_finished(manager))
                 submitted = await client.post(f"/api/sessions/{sid}/messages", json={"text": "hello"})
                 assert submitted.status_code == 200, submitted.text

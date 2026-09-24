@@ -44,7 +44,7 @@ async def test_non_object_session_metadata_is_normalised(tmp_path: Path, metadat
     db = Database(path, workspaces_dir=tmp_path / "workspaces")
     try:
         await db.open()
-        row = await db.fetchone("SELECT s.metadata, p.root FROM sessions s JOIN projects p ON p.id = s.project_id")
+        row = await db.fetchone("SELECT s.metadata, f.path AS root FROM sessions s JOIN projects p ON p.id = s.project_id JOIN project_folders f ON f.project_id = p.id AND f.position = 0")
         assert json.loads(row["metadata"]) == {}
         assert Path(row["root"]) == tmp_path / "workspaces" / "agent"
         assert not await db.fetchall("PRAGMA foreign_key_check")
@@ -69,7 +69,7 @@ async def test_duplicate_project_roots_merge_memberships(tmp_path: Path, system:
         assert [r["project_id"] for r in await db.fetchall("SELECT project_id FROM sessions")] == [keeper, keeper]
         assert not await db.fetchall("PRAGMA foreign_key_check")
         with pytest.raises(sqlite3.IntegrityError):
-            await db.execute("INSERT INTO projects SELECT 'duplicate', name, root, created_at, settings, system FROM projects")
+            await db.execute("INSERT INTO project_folders(id, project_id, path, env, created_at) SELECT 'duplicate', project_id, path, env, created_at FROM project_folders")
     finally:
         await db.close()
 
@@ -109,7 +109,7 @@ async def test_directory_grouping_is_case_sensitive(tmp_path: Path, existing: bo
     db = Database(path)
     try:
         await db.open()
-        rows = await db.fetchall("SELECT s.id, s.metadata, p.root FROM sessions s JOIN projects p ON p.id = s.project_id")
+        rows = await db.fetchall("SELECT s.id, s.metadata, f.path AS root FROM sessions s JOIN projects p ON p.id = s.project_id JOIN project_folders f ON f.project_id = p.id AND f.position = 0")
         assert {r["id"]: Path(r["root"]) / json.loads(r["metadata"]).get("directory", "") for r in rows} == {"lower": lower, "upper": upper}
         assert len(await db.fetchall("SELECT id FROM projects")) == 2
     finally:
@@ -132,7 +132,7 @@ async def test_existing_project_preserves_effective_directory_and_cleans_metadat
     db = Database(path)
     try:
         await db.open()
-        row = await db.fetchone("SELECT s.project_id, s.metadata, p.root FROM sessions s JOIN projects p ON p.id = s.project_id")
+        row = await db.fetchone("SELECT s.project_id, s.metadata, f.path AS root FROM sessions s JOIN projects p ON p.id = s.project_id JOIN project_folders f ON f.project_id = p.id AND f.position = 0")
         cleaned = json.loads(row["metadata"])
         assert Path(row["root"]) / cleaned.get("directory", "") == expected
         assert "workspace" not in cleaned and "own_workspace" not in cleaned
@@ -160,7 +160,7 @@ async def test_voice_agents_keep_their_directories(tmp_path: Path, existing: boo
     db = Database(path)
     try:
         await db.open()
-        rows = await db.fetchall("SELECT s.id, s.metadata, p.root, p.system FROM sessions s JOIN projects p ON p.id = s.project_id")
+        rows = await db.fetchall("SELECT s.id, s.metadata, f.path AS root, p.system FROM sessions s JOIN projects p ON p.id = s.project_id JOIN project_folders f ON f.project_id = p.id AND f.position = 0")
         assert {r["id"]: Path(r["root"]) / json.loads(r["metadata"]).get("directory", "") for r in rows} == expected
         assert {r["id"] for r in rows if r["system"] == "voice"} == {"voice-first", "delegate", "voice-nested"}
         assert all("workspace" not in json.loads(r["metadata"]) and "own_workspace" not in json.loads(r["metadata"]) for r in rows)

@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, LoopView, ProviderUsage, Schedule, SessionDetail } from "./api";
+import { projectPath } from "./folders";
 import { Dot, ServiceRow, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "./components";
 import { readLayout, writeLayout } from "./layout";
 import { clock, shortDateTime, untilShort } from "./format";
@@ -137,13 +138,13 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
       </Section>
 
       <Section ids={ids} id="workspace" label={t("session.workspace")}>
-        <button className="aside-row link" onClick={on.openFiles} title={detail.project ? detail.project.root : detail.workspace}>
+        <button className="aside-row link" onClick={on.openFiles} title={detail.project ? projectPath(detail.project) : detail.workspace}>
           <Icon name="folder" size={16} />
           <span className="grow name">{detail.project ? t("session.aside.project", { name: detail.project.name }) : detail.workspace_own === false ? t("session.aside.workspace", { name: detail.workspace_name ?? "" }) : t("session.aside.own")}</span>
           <span className="sub">{t("panel.tab.files")}</span>
         </button>
         <div className="dt-row sub path" title={detail.workspace}>
-          <span className="mono grow">{detail.project ? detail.project.root : detail.workspace}</span>
+          <span className="mono grow">{detail.project ? projectPath(detail.project) : detail.workspace}</span>
           {detail.project && (
             <span className="badge" title={t(detail.project.settings.snapshots ? "session.aside.snapshots.title" : "session.aside.nosnapshots.title")}>
               {t(detail.project.settings.snapshots ? "project.snapshots.badge" : "session.aside.nosnapshots")}
@@ -165,7 +166,7 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
         )}
         <div className="dt-row sub">
           <span className="dt-key">{t("session.project")}</span>
-          <span className="grow truncate" title={detail.project.root}>
+          <span className="grow truncate" title={projectPath(detail.project)}>
             {t("session.project.inside", { name: detail.project.name })}
           </span>
           <button className="linkbtn" onClick={on.move}>{t("session.project.move")}</button>

@@ -419,7 +419,7 @@ async def test_an_auto_created_chat_is_named_from_its_first_message(settings: Se
     assert renamed is not None and renamed.session.title == "summary"
     project = await manager.projects.get(state.project.id)  # type: ignore[union-attr]
     assert project is not None and project.name == "summary"
-    kept = await db.fetchone("SELECT json_extract(settings, '$.auto_created') AS auto FROM projects WHERE id = ?", (project.id,))
+    kept = await db.fetchone("SELECT json_extract(settings, '$.ephemeral') AS auto FROM projects WHERE id = ?", (project.id,))
     assert kept["auto"] in (1, True)
     await manager.close()
 

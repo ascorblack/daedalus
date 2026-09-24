@@ -157,7 +157,7 @@ class Scheduler:
         elif kind == "agent" and project is not None:
             # The files are already in the folder the task will run in; copying them into a directory
             # of the task's own would take the operator's files out of the project they chose.
-            workspace = project.root
+            workspace = project.primary.path
             copied = [str(Path(f)) for f in files or [] if Path(f).is_file()]
         elif kind == "agent":
             (workspace / "inbox").mkdir(parents=True, exist_ok=True)
@@ -466,7 +466,7 @@ class Scheduler:
                         self.root / f"lazy-{row['id']}",
                         {"lazy_note_id": row["id"], "unattended": True},
                         origin="reminder",
-                        project_id=note_project.id if note_project is not None and note_project.reachable else None,
+                        project_id=note_project.id if note_project is not None and note_project.primary.reachable else None,
                     )
             except Exception as exc:  # noqa: BLE001
                 attempts = int(row["promote_attempts"] or 0) + 1
@@ -528,9 +528,9 @@ class Scheduler:
             if fired is not None:
                 return fired
         project = await self._project_of(schedule.get("target_session") or schedule.get("created_by_session"))
-        if project is not None and not await manager.projects.ensure_reachable(project):
-            raise RuntimeError(f"the folder of the project {project.name} ({project.root}) is not reachable; the task cannot run in it")
-        workspace = project.root if project is not None else Path(schedule["workspace"])
+        if project is not None and not await manager.projects.ensure_reachable(project.primary):
+            raise RuntimeError(f"the folder of the project {project.name} ({project.primary.path}) is not reachable; the task cannot run in it")
+        workspace = project.primary.path if project is not None else Path(schedule["workspace"])
         if project is None and not workspace.is_dir():
             # The stored folder of a schedule whose project is gone. ``mkdir(parents=True)`` would make
             # the whole path and adopt the empty result as a project, so a task that used to run over the
