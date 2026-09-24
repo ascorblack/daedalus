@@ -15,9 +15,11 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from daedalus.host.containment import walls_for
 from daedalus.host.worktrees import (
     EXCLUDE_MARKER,
     StaffWorktrees,
@@ -29,7 +31,8 @@ from daedalus.host.worktrees import (
     slug,
     staff_slug,
 )
-from daedalus.stores.projects import ProjectFolder
+from daedalus.stores.projects import Project, ProjectFolder
+from daedalus.tools import shell
 
 
 @pytest.fixture(autouse=True)
@@ -407,12 +410,9 @@ async def test_a_failing_host_command_is_reported_with_its_exit_code(tmp_path: P
 
 
 async def test_a_sandboxed_commit_in_a_worktree_needs_only_the_paths_the_walls_open(request: pytest.FixtureRequest) -> None:
-    """The opt-in sandbox proof: a commit inside bubblewrap, with only ``worktree_writable_paths`` bound
-    writable, lands on the staff branch. Skipped where unprivileged namespaces are not allowed."""
-    from types import SimpleNamespace
-
-    from daedalus.host.session_runner import worktree_writable_paths
-    from daedalus.tools import shell
+    """The opt-in sandbox proof: a commit inside bubblewrap, with only the writable walls of a staff
+    session in its worktree bound, lands on the staff branch, and a write into the folder the worktree
+    was made from does not. Skipped where unprivileged namespaces are not allowed."""
 
     if await asyncio.to_thread(shell.bwrap_status) != "ok":
         pytest.skip("bubblewrap cannot create namespaces here")
@@ -424,10 +424,13 @@ async def test_a_sandboxed_commit_in_a_worktree_needs_only_the_paths_the_walls_o
     trees = StaffWorktrees("container")
     tree = await trees.prepare(_folder(repo), "Anna", "1", "one")
     before = _git(repo, "rev-parse", tree.branch).strip()
-    writable = worktree_writable_paths(tree.path)
+    project = Project(id="p-1", name="Atlas", created_at=datetime.now(UTC), folders=(_folder(repo),))
+    walls = walls_for(project, folder_id=None, directory=None, local_env="container", isolation="worktree", worktree=tree.path)
+    assert repo not in walls.writable and walls.writable[0] == tree.path
+    writable = list(walls.writable)
     config = SimpleNamespace(sandbox="workspace", sandbox_extra_writable=[])
     command = "echo sandboxed > sandboxed.txt && git add -A && git commit -qm 'from the sandbox' && touch ../../../outside.txt"
-    argv, sandboxed = await shell.sandbox_argv(command, tree.path, tree.path, config, writable=writable)
+    argv, sandboxed = await shell.sandbox_argv(command, config, writable=writable)
     assert sandboxed
 
     proc = await asyncio.create_subprocess_exec(*argv, cwd=str(tree.path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
