@@ -108,18 +108,27 @@ export function availability(harness: Harness, catalog: Catalog | null): Unavail
   return "";
 }
 
-/** A name as it appears in a branch: lowercase, letters, digits, dot, dash and underscore.
+const CYRILLIC_FROM = "абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґ";
+const CYRILLIC_TO = ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya", "i", "yi", "ye", "g"];
+const CYRILLIC: Record<string, string> = Object.fromEntries(Array.from(CYRILLIC_FROM).map((ch, i) => [ch, CYRILLIC_TO[i]]));
+
+/** A name as it appears in a branch and a worktree folder.
  *
- *  The same rule the host's worktrees use, so the preview is the branch that will be made. A name
- *  with nothing left in it (written in another alphabet) becomes "staff" rather than an empty segment. */
+ *  The host's rule, step for step (`slug` in daedalus/host/worktrees.py), so the preview is the branch
+ *  that will be made: Cyrillic transliterated, accents dropped, anything outside `[a-z0-9._-]` one
+ *  dash, no `..`, at most `max` characters, no leading or trailing `.` or `-` and no trailing `.lock`.
+ *  A name with nothing left becomes "staff". */
 export function branchSlug(name: string, max = 32): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .slice(0, max)
-    .replace(/^[-._]+|[-._]+$/g, "");
-  return slug || "staff";
+  let text = Array.from(name.toLowerCase()).map((ch) => CYRILLIC[ch] ?? ch).join("");
+  text = text.normalize("NFKD").replace(/[^\x00-\x7f]/g, "");
+  text = text.replace(/[^a-z0-9._-]+/g, "-").replace(/\.{2,}/g, ".").replace(/-{2,}/g, "-").slice(0, max);
+  for (;;) {
+    let trimmed = text.replace(/^[.-]+|[.-]+$/g, "");
+    if (trimmed.endsWith(".lock")) trimmed = trimmed.slice(0, -".lock".length);
+    if (trimmed === text) break;
+    text = trimmed;
+  }
+  return text || "staff";
 }
 
 /** The branch a staff member in its own worktree works on, with the task left as a placeholder. */

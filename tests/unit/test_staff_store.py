@@ -352,3 +352,19 @@ async def test_what_a_request_refuses(db: Database, tmp_path: Path) -> None:
 
 def test_a_typed_short_id_is_read_the_way_it_was_meant() -> None:
     assert normalise_short_id(" QO1L2 ") == "q0112"
+
+
+async def test_two_names_that_share_a_worktree_slug_are_refused(db: Database, tmp_path: Path) -> None:
+    _, pid = await _project(db, tmp_path)
+    store = _store(db)
+    anna = await store.hire(pid, name="Anna")
+    with pytest.raises(StaffError, match="share the worktree and branch name 'anna' with Anna"):
+        await store.hire(pid, name="Анна")
+    with pytest.raises(StaffError, match="with Anna"):
+        await store.hire(pid, name="anna!")
+    # Racing hires of two names with one slug: exactly one lands.
+    results = await asyncio.gather(store.hire(pid, name="Ivan"), store.hire(pid, name="Иван"), return_exceptions=True)
+    assert sorted(type(r).__name__ for r in results) == ["Staff", "StaffError"]
+    # Dismissal frees the slug as it frees the name.
+    await store.archive(anna.id)
+    assert (await store.hire(pid, name="Анна")).name == "Анна"

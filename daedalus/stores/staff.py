@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from daedalus.config import REASONING_EFFORTS, StaffConfig
+from daedalus.host.worktrees import staff_slug
 from daedalus.stores.database import Database
 
 HARNESSES = ("daedalus", "claude", "codex", "grok", "opencode", "pi")
@@ -592,8 +593,18 @@ class StaffStore:
         staff = Staff(id=f"st-{uuid.uuid4().hex[:12]}", project_id=project_id, one_off=bool(one_off), created_by=created_by, created_at=_now(), archived_at=None, **fields)
         who = "The operator" if created_by == "operator" else "The orchestrator"
         text = f"{who} hired {staff.name} ({HARNESS_NAMES[staff.harness]}{', one-off' if staff.one_off else ''}){': ' + staff.role if staff.role else ''}"
+        slug = staff_slug(staff.name)
         try:
             async with self._db.transaction() as conn:
+                # The slug names the member's worktree and branch, and two names can share one ("Anna"
+                # and "Анна"). Checked inside the write transaction, so a second hire cannot slip in
+                # between the check and the insert.
+                cursor = await conn.execute("SELECT name FROM staff WHERE project_id = ? AND archived_at IS NULL", (project_id,))
+                taken = [r["name"] for r in await cursor.fetchall()]
+                await cursor.close()
+                clash = next((n for n in taken if staff_slug(n) == slug and n.lower() != label.lower()), None)
+                if clash is not None:
+                    raise StaffError(f"{label} would share the worktree and branch name {slug!r} with {clash}; choose another name")
                 await conn.execute(
                     "INSERT INTO staff(id, project_id, name, color, role, harness, agent, model, effort, permission_mode, env, default_folder_id, isolation, instructions, notes, one_off, created_by, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

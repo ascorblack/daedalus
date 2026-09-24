@@ -38,8 +38,19 @@ describe("the branch preview", () => {
 
   it("stays within its length and never goes empty", () => {
     expect(branchSlug("x".repeat(80)).length).toBe(32);
-    expect(branchSlug("Ада")).toBe("staff");
     expect(branchSlug("")).toBe("staff");
+    expect(branchSlug("!!!")).toBe("staff");
+  });
+
+  // The same cases the host's worktree tests pin, so the two rules cannot drift apart unnoticed.
+  it("transliterates and cleans the way the host does", () => {
+    expect(branchSlug("Анна")).toBe("anna");
+    expect(branchSlug("Щукин Ёж")).toBe("shchukin-ezh");
+    expect(branchSlug("Café Noël")).toBe("cafe-noel");
+    expect(branchSlug("a..b")).toBe("a.b");
+    expect(branchSlug("release.lock")).toBe("release");
+    expect(branchSlug("_under_")).toBe("_under_");
+    expect(branchSlug(".-dots-.")).toBe("dots");
   });
 });
 
