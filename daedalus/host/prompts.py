@@ -187,6 +187,15 @@ purpose is achieved, LoopPause when only the operator can unblock it, StaySilent
 report; a dynamically paced loop ends its turn with LoopNext(delay_seconds, reason) or LoopStop.
 """
 
+NOTIFY = """Reaching the operator: Notify(title, body, level, link, key) reaches them outside this chat — a \
+toast, their phone, the desktop. Use it only for what they would want to know now while not watching: a long \
+job finished or failed, a decision you are blocked on that is not a question to them, a service they rely on \
+is down. Not for progress and not for your answer: a finished run already tells them when they are away, and \
+AskUser is how you ask. One thing, one notification — pass the same key to update it instead of sending \
+another. "urgent" breaks through their quiet hours: only for what cannot wait until morning. Each session has \
+a small budget of notifications; a refused one says when the next is possible.
+"""
+
 
 STAFF_BRIEF = """You are {name}, a member of the team of the project {project}.{role} You take tasks from \
 the project's orchestrator (or from the operator directly) and do them in the project's files. Your identity \
@@ -284,7 +293,10 @@ review card. You never merge and never move such a task to done.
 but the operator can tell you to grant, change the brief, hire or set these rules aside.
 13. With the operator: short and concrete here. ProjectReport at moments that matter — a task done, a decision, a \
 blocker — which also reach their phone; not a running commentary. AskOperator for decisions only they can make, \
-with options. When events need nothing from you, StaySilent with a one-line note.
+with options. Notify only for what cannot wait for a report and is no decision of theirs — a service the \
+project relies on is down, all work is blocked by something outside the project; pass a key to update it rather \
+than send another, and "urgent" (it breaks through quiet hours) only for what cannot wait until morning. When \
+events need nothing from you, StaySilent with a one-line note.
 """
 """The whole standing brief of a project orchestrator. It names no project and no number, so it is the
 same bytes for every orchestrator on every turn and stays in the provider's cache; everything that
@@ -535,4 +547,4 @@ def governance_section(path: Path) -> str:
     return ""
 
 
-__all__ = ["BOARD", "CONCIERGE", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "ORCHESTRATOR", "ORCHESTRATOR_COMPACTION", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "SELF_DEVELOPMENT_LOCAL", "concierge_sections", "environment_section", "governance_section", "language_section", "orchestrator_sections", "rules_section", "self_development_section", "split_headline", "turn_context", "without_turn_context"]
+__all__ = ["BOARD", "CONCIERGE", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "NOTIFY", "ORCHESTRATOR", "ORCHESTRATOR_COMPACTION", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "SELF_DEVELOPMENT_LOCAL", "concierge_sections", "environment_section", "governance_section", "language_section", "orchestrator_sections", "rules_section", "self_development_section", "split_headline", "turn_context", "without_turn_context"]

@@ -3,7 +3,7 @@
 // terminal; leaving the view unmounts them, and a terminal nobody shows never sends a size.
 //
 // The header acts on the pane that was touched last: its title, its environment, its owner as a link,
-// its search and its End. The font size is the device's, shared with the dock.
+// copying its last command's output, its search and its End. The font size is the device's, shared with the dock.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, TerminalList, TerminalView as TerminalRow } from "../api";
@@ -19,7 +19,7 @@ import type { TerminalState } from "../terminal/instance";
 import { fontSizeStep } from "../terminal/instance";
 import { gridIds, ownerPath } from "../terminal/preview";
 import { instanceFor, setTerminalEnvs, terminals } from "../terminal/terminals";
-import { TerminalView } from "../terminal/view";
+import { CopyOutputButton, TerminalView } from "../terminal/view";
 
 const LIST_POLL_MS = 5000;
 
@@ -119,6 +119,7 @@ export function TerminalFullScreen({ id, beside, toast }: { id: string; beside: 
               <Icon name="close" size={16} />
             </button>
           )}
+          <CopyOutputButton id={current} state={states[current]} />
           <button className="iconbtn small flat" onClick={() => instanceFor(current)?.openSearch()} aria-label={t("term.search")} title={`${t("term.search")} (Ctrl+Shift+F)`}>
             <Icon name="search" size={16} />
           </button>

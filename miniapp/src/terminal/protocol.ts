@@ -44,6 +44,41 @@ export type HelloEvent = {
   modes: Modes;
 };
 
+/**
+ * A shell's mark, as the daemon reports it. Rows are absolute: counted from the terminal's start, so a
+ * row keeps its number while older ones leave the history. `seq` is the output offset just after the
+ * mark; the event can arrive ahead of those bytes, and the connection holds it until they are drawn.
+ */
+export type CommandEvent = {
+  type: "command";
+  /** `prompt`: a prompt starts at `abs_row`. `start`: command `n` runs, its output from `abs_row`. `end`: it ended. */
+  phase: "prompt" | "start" | "end";
+  n?: number;
+  command?: string;
+  exit_code?: number | null;
+  abs_row: number;
+  prompt_row?: number | null;
+  /** One past the last row of the output, once the command has ended. */
+  end_row?: number | null;
+  duration_ms?: number | null;
+  seq?: number;
+  at?: string;
+};
+
+/** One command as the daemon lists it after a snapshot, so a client can place its marks again. */
+export type MarkItem = {
+  n: number;
+  command: string;
+  exit_code: number | null;
+  prompt_row: number | null;
+  output_row: number;
+  end_row: number | null;
+  running: boolean;
+};
+
+/** Right after a SNAPSHOT: every command whose rows reach the snapshot's first row, and the current prompt. */
+export type MarksEvent = { type: "marks"; list: MarkItem[]; first_abs_row: number; prompt_row: number | null };
+
 /** Every EVENT the daemon sends, by its `type`. Unknown types are passed through, not dropped. */
 export type EventMessage =
   | HelloEvent
@@ -59,8 +94,8 @@ export type EventMessage =
   | { type: "clients"; count: number; others: unknown[] }
   | ({ type: "mode" } & Modes)
   | { type: "resync"; reason: string; first_abs_row: number }
-  | { type: "marks"; list: unknown[] }
-  | { type: "command"; phase: string; n: number; exit_code?: number; command?: string; abs_row: number; at: string }
+  | MarksEvent
+  | CommandEvent
   | { type: "ping"; at: number }
   | { type: "error"; code: string; message: string }
   | { type: "unknown"; raw: Record<string, unknown> };

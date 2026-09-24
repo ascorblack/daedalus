@@ -22,8 +22,9 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from daedalus.harness.contract import Environment, ExecResult, HookPost
-from daedalus.terminals.client import PtydClient
+from daedalus.harness.contract import Environment, EnvironmentUnavailable, ExecResult, HookPost, ProgramNotFound
+from daedalus.terminals import wire
+from daedalus.terminals.client import PtydClient, Unavailable
 from tests.support import fake_cli
 from tests.support.live_ptyd import LivePtyd
 
@@ -98,13 +99,18 @@ class PtydTerminalPort:
 class PtydEnvironmentPort:
     """``EnvironmentPort`` for the daemon's environment."""
 
-    def __init__(self, client: PtydClient, *, env: Environment = "container") -> None:
+    def __init__(self, client: PtydClient, *, env: Environment = "container", home: str = "") -> None:
         self.client = client
         self._env = env
+        self._home = home
 
     @property
     def name(self) -> Environment:
         return self._env
+
+    @property
+    def home(self) -> str:
+        return self._home
 
     async def run(self, argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float = 30.0) -> ExecResult:
         params: dict[str, Any] = {"argv": list(argv), "timeout_ms": int(timeout * 1000)}
@@ -112,8 +118,17 @@ class PtydEnvironmentPort:
             params["cwd"] = cwd
         if env:
             params["env"] = dict(env)
-        result = await self.client.call("exec.run", params, timeout=timeout + 15)
-        return ExecResult(exit_code=int(result["exit_code"]), stdout=str(result["stdout"]), stderr=str(result["stderr"]), timed_out=bool(result["timed_out"]))
+        try:
+            result = await self.client.call("exec.run", params, timeout=timeout + 15)
+        except wire.RpcError as exc:
+            if exc.code == wire.NOT_FOUND:
+                raise ProgramNotFound(exc.message) from None
+            raise
+        except Unavailable as exc:
+            raise EnvironmentUnavailable(str(exc)) from None
+        return ExecResult(
+            exit_code=int(result["exit_code"]), stdout=str(result["stdout"]), stderr=str(result["stderr"]), timed_out=bool(result["timed_out"]), path=str(result.get("path") or ""),
+        )
 
     async def read(self, path: str, *, offset: int = 0, limit: int = 1 << 20) -> bytes:
         out = bytearray()
@@ -157,7 +172,7 @@ class Rig:
         self._event = asyncio.Event()
         self._launch_hooks: dict[str, list[asyncio.Queue[HookPost | None]]] = {}
         self.client = PtydClient("container", self.root / "run", on_notification=self._on_event)
-        self.env_port = PtydEnvironmentPort(self.client)
+        self.env_port = PtydEnvironmentPort(self.client, home=str(self.home))
 
     async def __aenter__(self) -> Rig:
         await self.ptyd.start()
