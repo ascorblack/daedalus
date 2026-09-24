@@ -951,7 +951,6 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "inbox.open.session": { en: "Open session", ru: "Открыть сессию" },
   "inbox.actions": { en: "Entry actions", ru: "Действия с записью" },
   "inbox.markunread": { en: "Mark unread", ru: "Отметить непрочитанным" },
-  "inbox.delete.many": { en: "Delete {n} entries", ru: "Удалить записи: {n}" },
   "inbox.reject.title": { en: "Reject this change", ru: "Отклонить изменение" },
   "inbox.reason": { en: "Reason (sent to the agent)", ru: "Причина (её увидит агент)" },
   "inbox.reason.placeholder": { en: "What is wrong, or what to do instead", ru: "Что не так или что сделать вместо этого" },

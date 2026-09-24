@@ -1,4 +1,4 @@
-"""Inbox entries, heartbeat gating, schedule kinds (reminder, lazy note, agent) and failure accounting."""
+"""Heartbeat gating, schedule kinds (reminder, lazy note, agent) and failure accounting."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.heartbeat import Heartbeat, in_active_hours
-from daedalus.extensions.inbox import Inbox, format_entries
+from daedalus.extensions.notifications import NotificationService
 from daedalus.extensions.scheduler import Scheduler
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
@@ -47,24 +47,9 @@ async def app(settings: Settings, db: Database) -> Any:
         app.config = config
 
     app.save_config = save_config
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = NotificationService(db, manager.bus, front=lambda: app.front)
     yield app
     await manager.close()
-
-
-async def test_inbox_post_list_and_read(app: Any) -> None:
-    inbox: Inbox = app.extensions["inbox"]
-    first = await inbox.post("heartbeat", "Heartbeat: quiet", "checked mail", severity="bogus")
-    await inbox.post("schedule_failed", "Task failed", "boom", severity="error")
-    assert await inbox.unread_count() == 2
-    entries = await inbox.list(unread_only=True)
-    assert [e["title"] for e in entries] == ["Task failed", "Heartbeat: quiet"]
-    assert entries[1]["severity"] == "info"  # an unknown severity falls back
-    assert await inbox.mark_read([first]) == 1
-    assert await inbox.unread_count() == 1
-    assert await inbox.mark_read() == 1
-    text = format_entries(await inbox.list())
-    assert "❌" in text and "Task failed" in text
 
 
 def test_active_hours_windows() -> None:
@@ -98,8 +83,11 @@ async def test_message_reminder_is_delivered_without_a_model_call(app: Any) -> N
     row = await app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (created["id"],))
     await scheduler.fire(dict(row))
     assert app.front.outbox.sent and "take the pills" in app.front.outbox.sent[0]
-    inbox: Inbox = app.extensions["inbox"]
-    assert [e["kind"] for e in await inbox.list()] == ["reminder"]
+    [entry] = (await app.notifications.list())["entries"]
+    assert (entry["kind"], entry["category"]) == ("reminder", "reminder")
+    assert entry["delivered"] == {"telegram": "handled"}  # the chat already carried it
+    fired = await app.manager.bus.replay(0, None, limit=10)
+    assert [(e.type, e.payload["name"]) for e in fired if e.type == "schedule.fired"] == [("schedule.fired", "pills")]
     row = await app.db.fetchone("SELECT enabled, next_run_at FROM schedules WHERE id = ?", (created["id"],))
     assert row["enabled"] == 0 and row["next_run_at"] is None  # a one-shot is done
 
@@ -143,8 +131,7 @@ async def test_failed_recurring_task_is_switched_off_after_max_failures(app: Any
         row = await app.db.fetchone("SELECT failure_count, enabled FROM schedules WHERE id = ?", (created["id"],))
         assert row["failure_count"] == n
     assert row["enabled"] == 0
-    inbox: Inbox = app.extensions["inbox"]
-    titles = [e["title"] for e in await inbox.list()]
+    titles = [e["title"] for e in (await app.notifications.list())["entries"]]
     assert any("switched off" in t for t in titles)
     await scheduler.set_enabled(created["id"], True)
     row = await app.db.fetchone("SELECT failure_count, enabled FROM schedules WHERE id = ?", (created["id"],))

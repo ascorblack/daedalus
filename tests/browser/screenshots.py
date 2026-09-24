@@ -279,13 +279,23 @@ BOARD = [
     {"id": "51c8aa", "title": "Gallery: six square photos", "status": "done", "priority": 3, "acceptance": "Six photos in photos/gallery, 800×800.", "checklist": [{"text": "pick", "done": True}, {"text": "crop", "done": True}], "depends_on": [], "session_id": S2, "origin_session_id": S2, "notes": "", "created_at": ago(hours=1), "updated_at": ago(minutes=12)},
 ]
 
+
+def notification(id: int, at: str, kind: str, category: str, level: str, tone: str, title: str, body: str, session_id: str | None, seen: bool, count: int = 1) -> dict:
+    return {
+        "id": id, "at": at, "updated_at": at, "category": category, "kind": kind, "level": level, "tone": tone, "title": title, "body": body,
+        "link": f"/app/agents/{session_id}" if session_id else "", "session_id": session_id, "run_id": None, "project_id": None, "staff_id": None,
+        "terminal_id": None, "source": "system", "dedupe_key": None, "count": count, "actions": [], "seen": seen, "resolved": None, "needs_you": False, "delivered": {},
+    }
+
+
 INBOX = [
-    {"id": 31, "at": ago(minutes=4), "kind": "ask_user", "severity": "notice", "title": "Weekly digest asks: keep it to the usual 8?", "body": "The digest has 14 items this week.", "session_id": S4, "run_id": "r4", "read": 0},
-    {"id": 30, "at": ago(minutes=20), "kind": "self_change", "severity": "notice", "title": "Pull request #57 is waiting for your decision", "body": "WebSearch: retry a backend that timed out once before falling back", "session_id": None, "run_id": None, "read": 0},
-    {"id": 29, "at": ago(minutes=52), "kind": "loop", "severity": "info", "title": "Support inbox: 6 answered, 2 on the board", "body": "Two delivery questions wait for the courier's rates.", "session_id": S3, "run_id": "r3", "read": 1},
-    {"id": 28, "at": ago(hours=3), "kind": "service", "severity": "warning", "title": "digest-api restarted after the rebuild", "body": "It was running before the rebuild and is running again on :8101.", "session_id": S4, "run_id": None, "read": 1},
-    {"id": 27, "at": ago(hours=20), "kind": "balance", "severity": "warning", "title": "DeepSeek balance below $5", "body": "$4.62 left; the next threshold is $2.", "session_id": None, "run_id": None, "read": 1},
+    notification(31, ago(minutes=4), "ask_user", "question", "normal", "info", "Weekly digest asks: keep it to the usual 8?", "The digest has 14 items this week.", S4, False),
+    notification(30, ago(minutes=20), "change_proposal", "system", "normal", "info", "Pull request #57 is waiting for your decision", "WebSearch: retry a backend that timed out once before falling back", None, False),
+    notification(29, ago(minutes=52), "loop", "agent_notify", "quiet", "info", "Support inbox: 6 answered, 2 on the board", "Two delivery questions wait for the courier's rates.", S3, True),
+    notification(28, ago(hours=3), "service", "system", "normal", "warning", "digest-api restarted after the rebuild", "It was running before the rebuild and is running again on :8101.", S4, True),
+    notification(27, ago(hours=20), "balance", "system", "normal", "warning", "DeepSeek balance below $5", "$4.62 left; the next threshold is $2.", None, True, count=2),
 ]
+INBOX_SUMMARY = {"unseen": 2, "needs_you": 0}
 
 PROPOSALS = [{"id": "p57", "repo": "daedalus", "branch": "bot/websearch-retry", "pr_number": 57, "pr_url": "https://github.com/example/daedalus/pull/57", "title": "WebSearch: retry a backend that timed out once before falling back", "summary": "A backend that answers 504 once is tried again after a second; only a second failure falls through to the next backend. Unit test added.", "status": "pending", "reason": None, "created_at": ago(minutes=20)}]
 
@@ -628,10 +638,14 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, MEMORY)
     if rel == "/api/board":
         return respond(route, BOARD)
-    if rel == "/api/inbox/unread":
-        return respond(route, {"unread": 2})
-    if rel == "/api/inbox":
-        return respond(route, {"entries": INBOX, "unread": 2})
+    if rel == "/api/notifications/summary":
+        return respond(route, INBOX_SUMMARY)
+    if rel == "/api/notifications":
+        view = params.get("view", ["all"])[0]
+        shown = [e for e in INBOX if not e["seen"] and e["level"] != "quiet"] if view == "unseen" else [e for e in INBOX if e["tone"] in ("warning", "error")] if view == "problems" else INBOX
+        return respond(route, {"entries": shown, "next_before": None, "summary": INBOX_SUMMARY})
+    if rel == "/api/notifications/seen":
+        return respond(route, {"marked": 0, "summary": INBOX_SUMMARY})
     if rel == "/api/proposals":
         return respond(route, PROPOSALS)
     if rel == "/api/schedules":

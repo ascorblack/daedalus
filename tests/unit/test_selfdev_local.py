@@ -22,6 +22,7 @@ from daedalus.extensions.api import build_app
 from daedalus.extensions.selfdev import GitError, SelfDevelopment
 from daedalus.host import capabilities
 from daedalus.stores.database import Database
+from tests.support.notifications import RecordingNotifications
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -62,7 +63,7 @@ def _settings(tmp_path: Path, repo: Path) -> Settings:
 
 
 def _app(settings: Settings, db: Database) -> SimpleNamespace:
-    return SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=None, front=None, extensions={}, guard=None)
+    return SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=None, front=None, extensions={}, notifications=RecordingNotifications(), guard=None)
 
 
 async def _receipt(db: Database, session_id: str, command: str, *, tests_run: int = 4) -> None:
