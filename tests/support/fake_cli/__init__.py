@@ -30,15 +30,18 @@ HELPERS = {
     "hook-post": "fake_hook_post.py",
 }
 """Stand-ins for the terminal daemon's ``hook-post`` command (and, through the ``ptyd`` script
-``install`` writes, for ``ptyd team-mcp`` and ``ptyd hook-post``)."""
+``install`` writes, for ``ptyd team-mcp``, ``ptyd hook`` and ``ptyd hook-post``)."""
 
 
-def install(bin_dir: Path, *, python: str | None = None) -> dict[str, Path]:
+def install(bin_dir: Path, *, python: str | None = None, ptyd: Path | None = None) -> dict[str, Path]:
     """Write one executable per fake (and helper) into ``bin_dir`` and return them by name.
 
     Each is a two-line shell script running the fake with this interpreter, so the name a launch
     plan uses resolves on ``PATH`` exactly as the real CLI's would, and ``exec.run``'s allowlist,
     which goes by the program's name, sees the real name too.
+
+    ``ptyd`` names a built daemon: ``ptyd`` and ``hook-post`` are then links to it (the daemon runs
+    as ``hook-post`` when called by that name), so the fakes use the real bridge commands.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     interpreter = python or sys.executable
@@ -48,20 +51,28 @@ def install(bin_dir: Path, *, python: str | None = None) -> dict[str, Path]:
         path.write_text(f"#!/bin/sh\nexec {shlex.quote(interpreter)} {shlex.quote(str(HERE / script))} \"$@\"\n")
         path.chmod(0o755)
         out[name] = path
+    if ptyd is not None:
+        for name in ("ptyd", "hook-post"):
+            (bin_dir / name).unlink(missing_ok=True)
+            (bin_dir / name).symlink_to(ptyd.resolve())
+            out[name] = bin_dir / name
+        return out
     # The daemon's own binary, as far as a launch uses it: ``<ptyd> team-mcp`` in an MCP entry and
-    # ``<ptyd> hook-post <name>`` in a command hook.
-    ptyd = bin_dir / "ptyd"
+    # ``<ptyd> hook <source>`` in a command hook.
+    stand_in = bin_dir / "ptyd"
     py = shlex.quote(interpreter)
-    ptyd.write_text(
+    hook_post = shlex.quote(str(HERE / "fake_hook_post.py"))
+    stand_in.write_text(
         "#!/bin/sh\n"
         'case "$1" in\n'
         f'  team-mcp) shift; exec {py} {shlex.quote(str(HERE / "fake_team_mcp.py"))} "$@" ;;\n'
-        f'  hook-post|hook) shift; exec {py} {shlex.quote(str(HERE / "fake_hook_post.py"))} "$@" ;;\n'
-        '  *) echo "the fake ptyd knows only team-mcp and hook-post" >&2; exit 2 ;;\n'
+        f'  hook-post) shift; exec {py} {hook_post} "$@" ;;\n'
+        f'  hook) shift; exec {py} {hook_post} --always-zero "$@" ;;\n'
+        '  *) echo "the fake ptyd knows only team-mcp, hook and hook-post" >&2; exit 2 ;;\n'
         "esac\n"
     )
-    ptyd.chmod(0o755)
-    out["ptyd"] = ptyd
+    stand_in.chmod(0o755)
+    out["ptyd"] = stand_in
     return out
 
 

@@ -259,9 +259,10 @@ async def test_claude_team_tools_go_through_the_launchs_mcp_server() -> None:
         )
         report = await rig.event("hook", where={"name": "team"})
         assert report["data"]["body"] == {"tool": "report", "kind": "done", "note": "the task is finished", "artifacts": []}
+        await rig.client.call("hooks.reply", {"reply_id": report["data"]["reply_id"], "status": 200, "body": {"text": "recorded"}})
         ask = await rig.event("hook", where={"name": "team"}, after=rig.events.index(report) + 1)
         assert ask["data"]["body"]["tool"] == "ask" and ask["data"]["body"]["options"] == ["main", "dev"] and ask["data"]["reply_id"]
-        await rig.client.call("hooks.reply", {"reply_id": ask["data"]["reply_id"], "status": 200, "body": {"answer": "dev"}})
+        await rig.client.call("hooks.reply", {"reply_id": ask["data"]["reply_id"], "status": 200, "body": {"text": "dev"}})
         await rig.screen_until(term, "AskOrchestrator: dev")
         assert not log_events(rig, "dialog_opened")  # allowed by rule: no permission dialog
 

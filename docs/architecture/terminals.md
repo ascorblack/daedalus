@@ -538,6 +538,47 @@ or whose `launch_id` differs, is `1001`. The event's `body` is the post's JSON, 
 URL and token from its environment and prints a successful reply's body. It exits 0 on 2xx, 2 on
 401 or 410, and 1 on anything else, including no listener.
 
+`ptyd hook <source> [--wait-ms N]` is the same post for a CLI's **command hook**, and it always exits
+0: a wrong token, an ended launch, no listener or a bad argument are said on stderr, and stdout stays
+empty. Claude Code reads exit 2 from a command hook as a refusal and feeds stderr to the model, so a
+failing bridge would otherwise stop the work it only observes. It gives up ten seconds past its hold.
+
+### The team tools: `ptyd team-mcp`
+
+A Model Context Protocol server on stdio (one JSON object per line) that a CLI starts from its
+per-launch MCP entry, `{"command": "$DAEDALUS_PTYD_BIN", "args": ["team-mcp"]}`, under the server
+name `daedalus_team`. It answers `initialize` (echoing a revision it knows — 2024-11-05, 2025-03-26,
+2025-06-18, 2025-11-25 — and the newest for any other, logged on stderr), `ping`, `tools/list`,
+`tools/call` and `notifications/cancelled`; calls run concurrently (at most 16), and a cancelled
+call is not answered and releases its held post. Its two tools carry the names and arguments a
+Daedalus staff member has:
+
+- `Report {kind: checkpoint|needs_input|stuck|done, note, artifacts?[], remember?}`
+- `AskOrchestrator {question, options?[], context?}`
+
+Arguments are checked before anything is posted; a wrong one is a tool result marked as an error.
+The call is posted to the launch's hook listener as `team` with the body `{"tool": "report"|"ask",
+…the arguments}` (optional strings left out when empty, lists always present), held for the host's
+reply: `DAEDALUS_REPORT_HOLD_MS` (default 15 s) for a report, `DAEDALUS_ASK_HOLD_MS` (default 5 min)
+for a question, both capped by the launch's `hold_max_ms`. The host answers with `hooks.reply`:
+
+| Reply body | Tool result |
+|---|---|
+| `{"text": "…"}` | the text |
+| `{"text": "…", "error": true}` | the text, marked as an error (a report refused: "commit first") |
+| a JSON string, or plain text | that text |
+| none in time (204) | a report: `recorded` (it was published when posted); a question: "No answer yet. Continue with what the brief allows, or call Report with kind needs_input and stop." |
+
+401 or 410 tells the worker its session is no longer connected to its team. When the launch
+environment names `DAEDALUS_TEAM_URL` and `DAEDALUS_TEAM_TOKEN`, the calls go instead to
+`<DAEDALUS_TEAM_URL>/report|ask` with `X-Daedalus-Team-Token`, the host's own team route; that
+reaches the host only where the CLI can reach its port, which a CLI in the `terminals` container
+cannot.
+
+The server inherits its environment from the CLI. A CLI that gives its MCP servers a filtered
+environment (Codex) must be told to pass `DAEDALUS_HOOK_URL`, `DAEDALUS_HOOK_TOKEN` and the two
+holds through.
+
 ### `net.dial`
 
 `{target, launch_id}` → `{channel}`: a byte stream on its own channel. `unix:<name>` is a socket in
