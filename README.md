@@ -596,7 +596,8 @@ command-line member, which is a terminal session — while the machine already r
 sessions as its cap allows or the terminals service is not there. Each member in
 `GET /api/projects/{id}/staff` carries what it waits for under `queued`, and the listing the whole
 queue under `queue`. `POST /api/staff/{id}/tell` (`{"text", "mode": "queue" | "steer" |
-"interrupt"}`) answers with the message's receipt; `…/interrupt`, `…/pause` (finish the turn, commit
+"interrupt"}`) answers with the message's receipt, and `GET /api/staff/{id}/messages` lists what was
+sent, newest first, each with its delivery state; `…/interrupt`, `…/pause` (finish the turn, commit
 what is uncommitted, start nothing new) and `…/release` (`{"keep_worktree"}`) control the live
 session. What staff ask — a question, or a call the policy refused — is a request:
 `GET /api/asks?project=<id>&routed_to=operator` lists the ones waiting for you, and
@@ -615,7 +616,10 @@ seconds (at once for a question, a permission, an error or a stuck report); ever
 project as it is now, which `GET /api/projects/{id}/state` shows as it sees it. Its questions never
 pause it: they are requests you answer like a staff member's, and the answer wakes it. Its model is
 the project's own choice, else the default for project orchestrators in Settings → Models, else the
-strongest preset; the model chip in its chat changes the project's choice.
+strongest preset; the model chip in its chat changes the project's choice. In `GET /api/sessions`
+such a project carries `orchestrator: {"enabled", "session_id", "staff", "working", "needs_you"}`
+(null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
+project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
 
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the

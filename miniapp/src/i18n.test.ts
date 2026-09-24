@@ -186,6 +186,21 @@ describe("the keys the code asks for", () => {
       ["pboard.none.", listed("./board/board.ts", "COLUMNS")],
       ["pboard.brief.", listed("./board/board.ts", "BRIEF_FIELDS")],
       ["pboard.need.kind.", ["question", "permission", "folder"]],
+      // A project's focus mode: the panel's project tabs, the orchestrator's steps, why a launch
+      // waits, the pages, the colours of a member's dot, the brief's sections, the journal's kinds
+      // and authors, and a message's receipt all name a word from a list.
+      ["panel.tab.", listed("./panel.ts", "PROJECT_TABS")],
+      ["focus.step.", listed("./project/focus.ts", "STEP_KEYS")],
+      ["focus.wait.", listed("./project/focus.ts", "WAIT_REASONS")],
+      ["focus.page.", listed("./project/focus.ts", "FOCUS_PAGES")],
+      ["focus.autonomy.", listed("./project/focus.ts", "AUTONOMIES")],
+      ["focus.tone.", ["working", "review", "waiting", "free", "silent", "error"]],
+      ["focus.brief.section.", listed("./project/pages.tsx", "BRIEF_SECTIONS")],
+      ["focus.kind.", listed("./project/pages.tsx", "JOURNAL_KINDS")],
+      ["focus.author.", ["operator", "orchestrator", "staff", "system"]],
+      ["focus.ask.who.", ["operator", "orchestrator", "system"]],
+      ["focus.msg.state.", ["queued", "written", "submitted", "acknowledged", "failed"]],
+      ["focus.msg.from.", ["orchestrator", "operator"]],
       // A notification's category and the way its request ended come from the host by name.
       ["notice.cat.", listed("./notifications.tsx", "NOTICE_CATEGORIES")],
       ["notice.resolution.", listed("./notifications.tsx", "NOTICE_RESOLUTIONS")],
@@ -199,7 +214,8 @@ describe("the keys the code asks for", () => {
       .filter((k) => !(k in DICT));
     const isolation = listed("./team/team.ts", "ISOLATIONS").flatMap((i) => [`team.isolation.${i}.short`, `team.isolation.${i}.hint`]).filter((k) => !(k in DICT));
     const placeholders = listed("./board/board.ts", "BRIEF_FIELDS").map((f) => `pboard.brief.${f}.placeholder`).filter((k) => !(k in DICT));
-    expect([...missing, ...hints, ...verbs, ...isolation, ...placeholders]).toEqual([]);
+    const autonomy = listed("./project/focus.ts", "AUTONOMIES").map((a) => `focus.autonomy.${a}.hint`).filter((k) => !(k in DICT));
+    expect([...missing, ...hints, ...verbs, ...isolation, ...placeholders, ...autonomy]).toEqual([]);
   });
 });
 

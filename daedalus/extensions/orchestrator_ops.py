@@ -370,7 +370,7 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
             tone="warning" if kind == "blocked" else "ok" if kind == "done" else "info",
             project_id=project.id,
             session_id=session_id,
-            link=f"/app/agents/{session_id}",
+            link=f"/app/project/{project.id}",
             source="project_report",
         ))
     await orch._changed(project.id, "journal", "orchestrator")

@@ -230,7 +230,7 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
 /** A user message that is not the operator's own words, and what it is instead. */
 export type SystemNote = {
   /** Who wrote it: the loop, a schedule, a reminder, the core, or a source named by its prefix. */
-  kind: "loop" | "schedule" | "reminder" | "intent" | "core" | "heartbeat" | "context" | "other";
+  kind: "loop" | "schedule" | "reminder" | "intent" | "core" | "heartbeat" | "context" | "events" | "other";
   origin: string;
   /** For a loop wake-up: the run number and the cadence, read off the host's own header line. */
   iteration?: number;
@@ -262,8 +262,64 @@ export function systemNote(m: Pick<MessageView, "role" | "text" | "origin" | "in
   const ctx = CONTEXT_RE.exec(text);
   if (ctx) return { kind: ctx[1] === "heartbeat" ? "heartbeat" : "context", origin: origin || ctx[1], body: ctx[2] };
   if (!origin || origin === "operator" || origin.startsWith("inbound")) return null;
-  const kind = origin === "schedule" || origin === "reminder" || origin === "intent" || origin === "core" || origin === "heartbeat" ? origin : "other";
+  const kind = origin === "schedule" || origin === "reminder" || origin === "intent" || origin === "core" || origin === "heartbeat" || origin === "events" ? origin : "other";
   return { kind, origin, body: text };
+}
+
+// ── a project's events, as its orchestrator was woken with them ────────────────────────────
+
+/** How an event line reads to the operator: something finished, something waits for a decision,
+ *  something broke, or plain news. */
+export type EventTone = "ok" | "warn" | "bad" | "info";
+
+export type EventLine = { time: string; text: string; tone: EventTone; ask: string | null };
+
+/** A batch of the project's events: `[events · <project> · <n> since <HH:MM>]` and one `- HH:MM …`
+ *  line per event, written by the host for the orchestrator (daedalus/extensions/orchestrator.py). */
+export type EventBatch = { project: string; count: number; since: string; lines: EventLine[]; more: number };
+
+const EVENTS_HEAD_RE = /^\[events · (.*) · (\d+) since ([^\]]*)\]\s*$/;
+const EVENT_LINE_RE = /^- (\d{1,2}:\d{2}) (.*)$/;
+const MORE_RE = /^- … and (\d+) more\b/;
+// What the host adds for the orchestrator's sake — the tool that reads the whole reply, whose move
+// the request is — is advice to the model, not news for the operator.
+const FOR_THE_MODEL_RE = / — (?:ReadStaff\("[^"]*"\) for the whole reply|yours to answer or escalate|the operator decides; you are told)$/;
+const ASK_RE = /\[(q[0-9a-z]{4,8})\]/i;
+
+/** The tone of one line, read from the host's own wording. The host writes these sentences in one
+ *  place and in English; a line this does not recognise is plain news, never a false alarm. */
+export function eventTone(text: string): EventTone {
+  if (/ stopped with an error| error\b|merge failed|crashed/.test(text)) return "bad";
+  if (/ needs permission| asks\b|reported (?:stuck|needs_input)| has gone silent/.test(text)) return "warn";
+  if (/ finished a turn| reported done|answered your request| accepted\b/.test(text)) return "ok";
+  return "info";
+}
+
+/** A batch read back out of the message it was delivered as; null for anything else. */
+export function parseEvents(text: string): EventBatch | null {
+  const [head, ...rest] = text.split("\n");
+  const m = EVENTS_HEAD_RE.exec(head.trim());
+  if (!m) return null;
+  const lines: EventLine[] = [];
+  let more = 0;
+  for (const raw of rest) {
+    const row = raw.trimEnd();
+    if (!row.trim()) continue;
+    const extra = MORE_RE.exec(row);
+    if (extra) {
+      more = Number(extra[1]);
+      continue;
+    }
+    const line = EVENT_LINE_RE.exec(row);
+    if (line) {
+      const body = line[2].replace(FOR_THE_MODEL_RE, "");
+      lines.push({ time: line[1], text: body, tone: eventTone(body), ask: ASK_RE.exec(body)?.[1] ?? null });
+    } else if (lines.length) {
+      // A line the host wrapped: it belongs to the event above it.
+      lines[lines.length - 1].text += `\n${row}`;
+    }
+  }
+  return { project: m[1], count: Number(m[2]), since: m[3], lines, more };
 }
 
 /** The families a run's steps fall into, most frequent first, as the folded line names them. */

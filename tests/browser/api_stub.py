@@ -222,7 +222,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -452,3 +452,312 @@ def file_search(path: str, query: str, limit: int = 200) -> dict | None:
         hits = [{"path": name, "line": i, "text": line} for name, body in FILE_TEXT.items() for i, line in enumerate(body.splitlines(), 1) if query.lower() in line.lower()]
         return {"query": query, "hits": hits[:limit], "truncated": len(hits) > limit}
     return None
+
+
+class FocusStub:
+    """A project with its orchestrator switched on, as focus mode reads it, kept between requests.
+
+    Everything the focus column, the orchestrator's chat and the project's pages ask for is answered
+    here: the project list and the agents listing with the orchestrated entry, the sessions of the
+    orchestrator and of a Daedalus staff member, the project's requests (answered once, the second
+    answer refused as the host refuses it), the brief, the journal in pages, the wake-ups, the
+    terminals, what was sent to a member and the member's controls. The team and the board are the
+    two stubs above. What the page sent is recorded, so a check can assert the exact request.
+
+    ``bakery(lang)`` invents the one project the check and the pictures share; the operator's words and
+    the orchestrator's answers are in the page's language, and the lines the host writes for the
+    orchestrator stay in English, as the host writes them.
+    """
+
+    def __init__(self, *, projects: list[dict], listing: dict, details: dict[str, dict], team: TeamStub, board: BoardStub, others: list[TeamStub | BoardStub] | None = None, asks: list[dict], brief: list[dict], journal: list[dict], schedules: list[dict], terminals: list[dict], messages: dict[str, list[dict]]) -> None:
+        self.projects = projects
+        self.listing = listing
+        self.details = details
+        self.team = team
+        self.board = board
+        self.others = others or []
+        self.asks = asks
+        self.brief = brief
+        self.journal = journal
+        self.schedules = schedules
+        self.terminals = terminals
+        self.messages = messages
+        self.answers: list[tuple[str, dict]] = []
+        self.enabled: list[tuple[str, dict]] = []
+        self.notes: list[str] = []
+        self.briefed: list[dict] = []
+        self.controls: list[tuple[str, str]] = []
+
+    def project(self, pid: str) -> dict | None:
+        return next((p for p in self.projects if p["id"] == pid), None)
+
+    def answer(self, method: str, path: str, query: str, body: dict | None) -> tuple[int, object] | None:
+        """``(status, body)`` for a route of focus mode, or None for anything else."""
+        params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+        if path == "/api/projects" and method == "GET":
+            return 200, self.projects
+        if path == "/api/sessions" and method == "GET":
+            return 200, self.listing
+        if path.startswith("/api/sessions/") and method == "GET" and path.count("/") == 3:
+            sid = path.split("/")[3]
+            if sid in self.details:
+                return 200, self.details[sid]
+        if path == "/api/asks" and method == "GET":
+            rows = [a for a in self.asks if a["project_id"] == params.get("project")]
+            if params.get("open") != "0":
+                rows = [a for a in rows if not a["resolved_at"]]
+            return 200, {"asks": rows}
+        if path.startswith("/api/asks/") and path.endswith("/answer") and method == "POST":
+            ref = path.split("/")[3]
+            ask = next((a for a in self.asks if ref in (a["id"], a["short_id"])), None)
+            if ask is None:
+                return 404, {"detail": "no such request"}
+            if ask["resolved_at"]:
+                return 409, {"detail": f"request {ask['short_id']} was already answered by the {ask['resolved_by']}"}
+            payload = dict(body or {})
+            self.answers.append((ask["id"], payload))
+            ask.update(resolved_at="2026-09-24T10:00:00Z", resolved_by="operator", resolution={"allow": payload.get("allow"), "text": payload.get("text") or "", "selected": payload.get("selected") or [], "via": "app"})
+            return 200, {"state": "answered", "delivered": True, "error": "", "ask": ask}
+        if path.startswith("/api/projects/") and path.endswith("/orchestrator") and method == "POST":
+            pid = path.split("/")[3]
+            project = self.project(pid)
+            if project is None:
+                return 404, {"detail": "no such project"}
+            payload = dict(body or {})
+            self.enabled.append((pid, payload))
+            sid = f"orch-{pid}"
+            project["settings"]["orchestrator"] = {"enabled": True, "session_id": sid, "model": payload.get("model", ""), "autonomy": payload.get("autonomy", "normal"), "concurrency": 6, "concurrency_cap": payload.get("concurrency_cap", 10), "telegram_topic_id": 0}
+            self.details[sid] = FocusStub.session_detail(sid, f"Orchestrator · {project['name']}", project, [], orchestrator_of=pid)
+            return 200, {**project["settings"]["orchestrator"], "effective_model": "strong", "project_id": pid}
+        if path.startswith("/api/projects/") and path.endswith("/brief"):
+            if method == "PUT":
+                payload = dict(body or {})
+                self.briefed.append(payload)
+                section = next((s for s in self.brief if s["section"] == payload.get("section")), None)
+                if section is not None:
+                    section.update(body=payload.get("body", ""), updated_by="operator", updated_at="2026-09-24T10:00:00Z")
+                return 200, section or {}
+            return 200, {"sections": self.brief}
+        if path.startswith("/api/projects/") and path.endswith("/journal"):
+            if method == "POST":
+                text = str((body or {}).get("text", ""))
+                self.notes.append(text)
+                entry = {"id": max((e["id"] for e in self.journal), default=0) + 1, "at": "2026-09-24T10:00:00Z", "author": "operator", "kind": "note", "text": text, "refs": {}}
+                self.journal.insert(0, entry)
+                return 200, entry
+            limit = int(params.get("limit", "50"))
+            before = int(params["before"]) if params.get("before") else None
+            rows = [e for e in self.journal if before is None or e["id"] < before][:limit]
+            return 200, {"entries": rows, "next_before": rows[-1]["id"] if len(rows) == limit else None}
+        if path == "/api/schedules" and method == "GET":
+            return 200, self.schedules
+        if path == "/api/terminals" and method == "GET" and params.get("project_id"):
+            rows = [term for term in self.terminals if term["project_id"] == params["project_id"]]
+            return 200, {**GATES["/api/terminals"], "terminals": rows}  # type: ignore[dict-item]
+        if path.startswith("/api/staff/"):
+            parts = path.split("/")
+            if len(parts) == 5 and parts[4] == "messages" and method == "GET":
+                return 200, self.messages.get(parts[3], [])
+            if len(parts) == 5 and parts[4] in ("interrupt", "pause", "release") and method == "POST":
+                self.controls.append((parts[3], parts[4]))
+                member = next((m for m in self.team.staff if m["id"] == parts[3]), None)
+                if member is not None and member["live"] and parts[4] == "pause":
+                    member["live"]["pause_requested"] = True
+                return 200, {"ok": True} if parts[4] != "pause" else {"state": "pausing"}
+        for part in (self.team, self.board, *self.others):
+            answered = part.answer(method, path, query, body)
+            if answered is not None:
+                return answered
+        return None
+
+    @staticmethod
+    def session_detail(sid: str, title: str, project: dict, messages: list[dict], *, orchestrator_of: str | None = None, staff: dict | None = None, status: str = "idle") -> dict:
+        root = project["folders"][0]["path"]
+        return {
+            "id": sid, "title": title, "status": status, "run_id": None, "compacting": None, "housekeeping": False, "error": "",
+            "workspace": root, "workspace_name": root.rsplit("/", 1)[-1], "workspace_own": False, "workspace_sessions": [],
+            "project": {k: v for k, v in project.items() if k != "sessions"}, "folder_id": project["folders"][0]["id"], "folders": [],
+            "pending": None, "model": "Claude Opus 5", "provider": "claude", "thinking": True, "reasoning_effort": "high",
+            "messages": messages, "mode": "", "usd_cap": None, "brief": "", "spawned_by": None, "tools_off": [], "loop": None, "services": [], "subagents": [],
+            "subagent_of": None, "subagent_name": None, "leader_title": None, "orchestrator_of": orchestrator_of, "staff": staff, "telegram_linked": False,
+            "verifications": {}, "first_seq": messages[0]["seq"] if messages else 0, "has_older": False,
+            "context": {"tokens": 18400, "window": 200000, "messages": len(messages), "summaries": 0, "operator_turns": 1},
+            "usage": {"c": 12, "i": 184000, "o": 9100, "ch": 150000, "usd": 0.84},
+        }
+
+    @classmethod
+    def bakery(cls, lang: str = "en", *, others: list[dict] | None = None, other_sessions: list[dict] | None = None) -> FocusStub:
+        pid, garden = "b4k3ry20f0c5", "9a4d3e2f1c0b"
+        words = FOCUS_WORDS[lang]
+        project_folders = [
+            folder("/home/operator/work/bakery-site", is_git=True),
+            folder("/home/operator/work/bakery-api", position=1, is_git=True),
+            folder("/home/operator/work/bakery-bot", position=2, env="host", reach="terminals", reachable=False),
+        ]
+        orchestration = {"enabled": True, "session_id": "orch-bakery", "model": "", "autonomy": "normal", "concurrency": 6, "concurrency_cap": 10, "telegram_topic_id": 0}
+        bakery = {"id": pid, "name": "Bakery 2.0", "folders": project_folders, "created_at": "2026-09-20T00:00:00Z", "settings": {"snapshots": True, "system": "", "ephemeral": False, "default_env": "container", "orchestrator": orchestration}, "system": "", "sessions": [{"id": "orch-bakery", "title": "Orchestrator · Bakery 2.0", "running": False}]}
+        garden_project = {"id": garden, "name": "Garden", "folders": [folder("/home/operator/work/garden")], "created_at": "2026-09-22T00:00:00Z", "settings": {"snapshots": True, "system": "", "ephemeral": False}, "system": "", "sessions": []}
+        projects = [bakery, garden_project, *(others or [])]
+
+        def live(sid: str, status: str, task: str | None, session_id: str | None = None, **extra: object) -> dict:
+            return {"id": sid, "session_id": session_id, "terminal_id": None, "status": status, "waiting_for": "", "task_id": task, "started_at": "2026-09-24T09:00:00Z", "ended_at": None, "branch": None, "worktree_path": None, "pause_requested": False, **extra}
+
+        machine = [{"staff_id": "st-olga", "task_id": "t-hours", "priority": 2, "position": 1, "reason": "machine", "detail": "20 of the machine's 20 terminal sessions are running", "since": 1_727_164_800, "by": "orchestrator"}]
+        staff = [
+            TeamStub.member("st-ira", "Ira", harness="claude", status="working", sessions=9, color="orange", role=words["ira.role"], model="opus", permission_mode="acceptEdits"),
+            TeamStub.member("st-max", "Max", harness="codex", status="turn_done_unseen", sessions=5, color="blue", role="API"),
+            TeamStub.member("st-naya", "Naya", harness="opencode", status="permission", sessions=3, color="green", role=words["naya.role"], env="host", isolation="shared"),
+            TeamStub.member("st-lev", "Lev", status="working", sessions=4, color="teal", role=words["lev.role"], agent="reviewer", model="strong"),
+            TeamStub.member("st-olga", "Olga", harness="claude", sessions=1, color="violet", role=words["olga.role"], queued=machine),
+            TeamStub.member("st-link", words["link.name"], status="working", sessions=1, color="rose", one_off=True, isolation="shared"),
+        ]
+        staff[0]["live"] = live("ss-ira", "working", "t-checkout", branch="agent/ira/checkout")
+        staff[1]["live"] = live("ss-max", "turn_done_unseen", "t-endpoint", branch="agent/max/endpoint")
+        staff[2]["live"] = live("ss-naya", "permission", "t-bot")
+        staff[3]["live"] = live("ss-lev", "working", "t-photos", session_id="sess-lev", branch="agent/lev/photos", worktree_path="/home/operator/work/bakery-site/.agents/worktrees/lev")
+        staff[5]["live"] = live("ss-link", "working", None)
+        for member in staff:
+            member["project_id"] = pid
+        team = TeamStub({**bakery}, staff=staff)
+        team.project["orchestrator"] = True
+
+        ira = BoardStub.assignee("st-ira", "Ira", harness="claude", color="orange", status="working", on_task=True)
+        tasks = [
+            BoardStub.task("t-checkout", words["task.checkout"], status="doing", priority=1, assignee=ira, checklist=[{"text": "cart", "done": True}, {"text": "promo", "done": True}, {"text": "payment", "done": False}]),
+            BoardStub.task("t-bot", words["task.bot"], status="doing", assignee=BoardStub.assignee("st-naya", "Naya", harness="opencode", color="green", status="permission", on_task=True)),
+            BoardStub.task("t-endpoint", words["task.endpoint"], status="review", assignee=BoardStub.assignee("st-max", "Max", harness="codex"), branch="agent/max/endpoint"),
+            BoardStub.task("t-photos", words["task.photos"], status="doing", assignee=BoardStub.assignee("st-lev", "Lev", color="teal", status="working", on_task=True, session_id="sess-lev")),
+            BoardStub.task("t-hours", words["task.hours"], status="todo", priority=2, assignee=BoardStub.assignee("st-olga", "Olga", harness="claude", color="violet")),
+        ]
+        needs = [{
+            "id": "ask-spring", "short_id": "q4r8tz", "origin": "orchestrator", "kind": "question", "text": words["ask.spring"], "suggestion": "",
+            "created_at": "2026-09-24T09:55:00Z", "task_id": "t-checkout", "task_title": words["task.checkout"], "staff": None, "session_id": "orch-bakery",
+        }]
+        board = BoardStub({**bakery}, staff=[{k: m[k] for k in ("id", "name", "color", "harness")} for m in staff], tasks=tasks, needs_you=needs)
+
+        asks = [
+            {"id": "ask-spring", "short_id": "q4r8tz", "project_id": pid, "origin": "orchestrator", "kind": "question", "staff_id": None, "staff_session_id": None, "task_id": "t-checkout", "request_ref": "", "text": words["ask.spring"], "detail": {"options": [words["ask.before"], words["ask.after"]]}, "routed_to": "operator", "suggestion": "", "created_at": "2026-09-24T09:55:00Z", "routed_at": "2026-09-24T09:55:00Z", "resolved_at": None, "resolved_by": None, "resolution": {}},
+            {"id": "ask-grammy", "short_id": "qk7m2x", "project_id": pid, "origin": "staff", "kind": "permission", "staff_id": "st-naya", "staff_session_id": "ss-naya", "task_id": "t-bot", "request_ref": "", "text": "Exec: npm install grammy", "detail": {}, "routed_to": "orchestrator", "suggestion": "", "created_at": "2026-09-24T09:53:00Z", "routed_at": "2026-09-24T09:53:00Z", "resolved_at": "2026-09-24T09:54:00Z", "resolved_by": "orchestrator", "resolution": {"allow": True, "text": "", "selected": [], "via": "orchestrator"}},
+        ]
+
+        def call(cid: str, name: str, **arguments: object) -> dict:
+            return {"id": cid, "name": name, "arguments": arguments}
+
+        def result(cid: str, content: str, error: bool = False) -> dict:
+            return {"id": cid, "content": content, "is_error": error}
+
+        events = (
+            "[events · Bakery 2.0 · 3 since 09:51]\n"
+            '- 09:51 Max (Codex) finished a turn on "Notify: endpoint" (t-endpoint): "3 files, tests green" — ReadStaff("Max") for the whole reply\n'
+            "- 09:53 Naya needs permission [qk7m2x]: Exec: npm install grammy (in bakery-bot) (autonomy normal) — yours to answer or escalate\n"
+            "- 09:54 Ira asks [q9w2e1]: SPRING10: before delivery or after? — options: before / after — yours to answer or escalate"
+        )
+        transcript = [
+            {"role": "user", "seq": 10, "origin": "operator", "text": words["op.ask"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:40:00Z"},
+            {"role": "assistant", "seq": 11, "text": "", "thinking": "", "tool_calls": [
+                call("c1", "Folders", op="add", path="/home/operator/work/bakery-bot", env="host"),
+                call("c2", "Tasks", op="create", title=words["task.endpoint"], objective="POST /orders/notify", deliverable="endpoint + tests", boundaries="api/ only", done_when="tests green", assignee="Max"),
+                call("c3", "Tasks", op="create", title=words["task.bot"], objective="grammy bot", deliverable="bot", boundaries="bakery-bot/", done_when="a test order reaches the chat", depends_on=["t-endpoint"], assignee="Naya"),
+                call("c4", "Assign", staff="Max", task_id="t-endpoint"),
+                call("c5", "Watch", when={"event": "staff_finished", "staff": "Max"}, then={"action": "wake"}, note=words["watch.note"]),
+            ], "tool_results": [], "created_at": "2026-09-24T09:40:10Z"},
+            {"role": "tool", "seq": 12, "text": "", "thinking": "", "tool_calls": [], "tool_results": [
+                result("c1", "added /home/operator/work/bakery-bot (host)"), result("c2", "created t-endpoint"), result("c3", "created t-bot"), result("c4", "started Max on t-endpoint"), result("c5", "watch w1 set"),
+            ], "created_at": "2026-09-24T09:40:12Z"},
+            {"role": "assistant", "seq": 13, "text": words["orch.plan"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:40:20Z"},
+            {"role": "user", "seq": 14, "origin": "events", "text": events, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:54:10Z"},
+            {"role": "assistant", "seq": 15, "text": "", "thinking": "", "tool_calls": [
+                call("c6", "ReadStaff", staff="Max", what="last"),
+                call("c7", "Answer", request_id="qk7m2x", allow=True, basis="installing dependencies in the bot folder"),
+                call("c8", "AskOperator", question=words["ask.spring"], options=[words["ask.before"], words["ask.after"]], task_id="t-checkout"),
+            ], "tool_results": [], "created_at": "2026-09-24T09:54:20Z"},
+            {"role": "tool", "seq": 16, "text": "", "thinking": "", "tool_calls": [], "tool_results": [
+                result("c6", "3 files changed, tests green"), result("c7", "answered qk7m2x: allowed"), result("c8", "asked the operator as [q4r8tz]; do not wait — the answer arrives as an event in a later wake-up"),
+            ], "created_at": "2026-09-24T09:54:22Z"},
+            {"role": "assistant", "seq": 17, "text": words["orch.after"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:55:00Z"},
+        ]
+        lev = [
+            {"role": "user", "seq": 3, "origin": "orchestrator", "text": words["lev.task"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:30:00Z"},
+            {"role": "assistant", "seq": 4, "text": words["lev.reply"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-24T09:36:00Z"},
+        ]
+        details = {
+            "orch-bakery": cls.session_detail("orch-bakery", "Orchestrator · Bakery 2.0", bakery, transcript, orchestrator_of=pid),
+            # Between turns, so its composer offers to write to it rather than to steer a run.
+            "sess-lev": cls.session_detail("sess-lev", f"Lev · {words['task.photos']}", bakery, lev, staff={"id": "st-lev", "session_id": "ss-lev"}),
+        }
+        brief = [
+            {"section": "goals", "body": words["brief.goals"], "updated_at": "2026-09-22T10:00:00Z", "updated_by": "operator"},
+            {"section": "constraints", "body": words["brief.constraints"], "updated_at": "2026-09-22T10:00:00Z", "updated_by": "operator"},
+            {"section": "preferences", "body": "", "updated_at": None, "updated_by": None},
+            {"section": "done_when", "body": words["brief.done"], "updated_at": "2026-09-22T10:00:00Z", "updated_by": "operator"},
+            {"section": "allowed_without_operator", "body": "installing dependencies in the bot folder\nrunning the test suites", "updated_at": "2026-09-22T10:00:00Z", "updated_by": "operator"},
+            {"section": "notes", "body": words["brief.notes"], "updated_at": "2026-09-24T09:41:00Z", "updated_by": "orchestrator"},
+        ]
+        kinds = [("orchestrator", "decision", words["journal.decision"], {"task_id": "t-bot"}), ("system", "grant", "The orchestrator allowed Naya: Exec: npm install grammy (basis: installing dependencies in the bot folder)", {"staff_id": "st-naya", "ask_id": "qk7m2x"}), ("staff", "report", "Max: done — 3 files, tests green", {"staff_id": "st-max", "task_id": "t-endpoint"}), ("operator", "note", words["journal.note"], {})]
+        journal = [
+            {"id": 100 - i, "at": f"2026-09-24T{9 - i // 12:02d}:{59 - (i % 12) * 5:02d}:00Z", "author": kinds[i % 4][0], "kind": kinds[i % 4][1], "text": f"{kinds[i % 4][2]} ({i + 1})" if i else kinds[0][2], "refs": kinds[i % 4][3]}
+            for i in range(35)
+        ]
+        schedules = [{"id": "wk1", "name": words["wake.name"], "run_in": "self", "cron": None, "run_at": "2026-09-24T12:00:00Z", "prompt": words["wake.note"], "enabled": 1, "next_run_at": "2026-09-24T12:00:00Z", "last_run_at": None, "last_summary": None, "kind": "lazy", "target_session": "orch-bakery", "failure_count": 0, "last_error": None}]
+        terminals = [
+            {"id": "tm-api", "env": "container", "title": "bash · bakery-api", "owner": {"kind": "project", "id": pid}, "project_id": pid, "profile": "shell", "sandbox": False, "cwd": "/home/operator/work/bakery-api", "status": "running", "exit_code": None, "exit_signal": None, "created_at": "2026-09-24T09:00:00Z", "exited_at": None, "last_output_at": "2026-09-24T09:50:00Z", "last_input_at": None, "cols": 120, "rows": 30},
+            {"id": "tm-psql", "env": "container", "title": "psql · orders", "owner": {"kind": "project", "id": pid}, "project_id": pid, "profile": "shell", "sandbox": False, "cwd": "/home/operator/work/bakery-api", "status": "exited", "exit_code": 0, "exit_signal": None, "created_at": "2026-09-24T08:00:00Z", "exited_at": "2026-09-24T08:30:00Z", "last_output_at": None, "last_input_at": None, "cols": 120, "rows": 30},
+        ]
+        messages = {"st-lev": [
+            {"id": "m2", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "orchestrator", "text": words["lev.message"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:45:00Z", "updated_at": "2026-09-24T09:45:05Z", "error": ""},
+            {"id": "m1", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "operator", "text": words["lev.first"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:30:00Z", "updated_at": "2026-09-24T09:30:02Z", "error": ""},
+        ]}
+        sessions = [
+            {"id": "orch-bakery", "title": "Orchestrator · Bakery 2.0", "status": "idle", "created_at": "2026-09-20T00:00:00Z", "last_message_at": "2026-09-24T09:55:00Z", "run_id": None, "model": "Claude Opus 5", "metadata": {"orchestrator_of": pid}, "project_id": pid, "project": "Bakery 2.0"},
+            {"id": "sess-lev", "title": f"Lev · {words['task.photos']}", "status": "idle", "created_at": "2026-09-24T09:30:00Z", "last_message_at": "2026-09-24T09:36:00Z", "run_id": None, "model": "Claude Opus 5", "metadata": {"staff_id": "st-lev"}, "project_id": pid, "project": "Bakery 2.0"},
+            *(other_sessions or []),
+        ]
+        counts = {"total": 2, "active": 1, "loops": 0, "last_message_at": "2026-09-24T09:55:00Z"}
+        folders_listed = [
+            {**{k: v for k, v in bakery.items() if k != "sessions"}, **counts, "orchestrator": {"enabled": True, "session_id": "orch-bakery", "staff": 6, "working": 4, "needs_you": 1}},
+            {**{k: v for k, v in garden_project.items() if k != "sessions"}, "total": 0, "active": 0, "loops": 0, "last_message_at": "", "orchestrator": None},
+        ]
+        listing = {"sessions": sessions, "projects": folders_listed}
+        # The project without an orchestrator has a team and a board of its own, both empty.
+        others: list[TeamStub | BoardStub] = [TeamStub(garden_project), BoardStub(garden_project)]
+        return cls(projects=projects, listing=listing, details=details, team=team, board=board, others=others, asks=asks, brief=brief, journal=journal, schedules=schedules, terminals=terminals, messages=messages)
+
+
+FOCUS_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "op.ask": "Add the folder ~/work/bakery-bot. The baker should get a Telegram message for every new order: the endpoint is Max's, the bot is Naya's.",
+        "orch.plan": "Split into two tasks. The bot depends on the endpoint, so Naya starts after Max. Ira is busy with the checkout; I am not pulling her off it.",
+        "orch.after": "Naya may install the bot's dependencies: the brief allows it. The discount question is yours — Ira's checkout waits on it.",
+        "ask.spring": "SPRING10: is the discount taken before delivery or after?",
+        "ask.before": "Before delivery", "ask.after": "After delivery",
+        "watch.note": "Max's turn finished → wake me",
+        "task.checkout": "Checkout", "task.bot": "Notify: bot", "task.endpoint": "Notify: endpoint", "task.photos": "Menu photo captions", "task.hours": "Opening hours",
+        "ira.role": "front end", "naya.role": "the baker's bot", "lev.role": "review", "olga.role": "copy", "link.name": "Menu link check",
+        "lev.task": "Task: captions for the menu photos. Done when every photo in the gallery has a caption from the sheet.",
+        "lev.reply": "Twelve of eighteen captions are written from the sheet; the rest have no row yet, so I am asking the orchestrator.",
+        "lev.message": "Take the captions from the owner's sheet, column C", "lev.first": "Start with the seasonal photos",
+        "brief.goals": "Orders arrive in the baker's Telegram within a minute.\nThe checkout takes SPRING10.",
+        "brief.constraints": "No new services; the bot runs on the host.", "brief.done": "A test order reaches the baker's chat.",
+        "brief.notes": "Max's endpoint is merged before Naya starts.",
+        "journal.decision": "The bot waits for the endpoint: one contract, not two.", "journal.note": "Remember the Friday price change.",
+        "wake.name": "Check the checkout", "wake.note": "Look at Ira's checkout after lunch",
+    },
+    "ru": {
+        "op.ask": "Добавь в проект папку ~/work/bakery-bot. Нужно, чтобы пекарь получал в Telegram сообщение о каждом новом заказе: эндпоинт — Максу, бота — Нае.",
+        "orch.plan": "Разложено на две задачи. Бот зависит от эндпоинта, поэтому Ная начнёт после Макса. Ира занята оформлением заказа, её не отвлекаю.",
+        "orch.after": "Нае можно ставить зависимости бота: это есть в брифе. Вопрос о скидке — ваш, от него зависит оформление заказа у Иры.",
+        "ask.spring": "SPRING10: скидка до доставки или после?",
+        "ask.before": "До доставки", "ask.after": "После доставки",
+        "watch.note": "ход Макса завершён → разбудить меня",
+        "task.checkout": "Оформление заказа", "task.bot": "Уведомление: бот", "task.endpoint": "Уведомление: эндпоинт", "task.photos": "Подписи к фото в меню", "task.hours": "Часы работы",
+        "ira.role": "фронтенд", "naya.role": "бот пекаря", "lev.role": "ревью", "olga.role": "тексты", "link.name": "Проверка ссылок меню",
+        "lev.task": "Задача: подписи к фото в меню. Готово, когда у каждого фото в галерее есть подпись из таблицы.",
+        "lev.reply": "Двенадцать из восемнадцати подписей взяты из таблицы; для остальных строк нет, спрашиваю оркестратора.",
+        "lev.message": "Подписи бери из таблицы владельца, колонка C", "lev.first": "Начни с сезонных фото",
+        "brief.goals": "Заказы приходят пекарю в Telegram за минуту.\nОформление заказа принимает SPRING10.",
+        "brief.constraints": "Без новых сервисов; бот работает на хосте.", "brief.done": "Тестовый заказ доходит до чата пекаря.",
+        "brief.notes": "Эндпоинт Макса сливается до того, как начнёт Ная.",
+        "journal.decision": "Бот ждёт эндпоинт: один контракт, а не два.", "journal.note": "Не забыть про смену цен в пятницу.",
+        "wake.name": "Проверить оформление заказа", "wake.note": "После обеда посмотреть оформление заказа у Иры",
+    },
+}

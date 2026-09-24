@@ -479,6 +479,24 @@ class StaffStore:
         )
         return {r["staff_id"]: _session(r) for r in rows}
 
+    async def team_counts(self) -> dict[str, dict[str, int]]:
+        """``{project_id: {staff, working}}`` for every project with a team, in two queries.
+
+        The agents list draws an orchestrated project as one entry that says how many work in it, and
+        it lists every project on every poll: asking each project in turn would be a query per project.
+        """
+        out: dict[str, dict[str, int]] = {}
+        for row in await self._db.fetchall("SELECT project_id, COUNT(*) AS n FROM staff WHERE archived_at IS NULL GROUP BY project_id"):
+            out.setdefault(row["project_id"], {"staff": 0, "working": 0})["staff"] = int(row["n"])
+        active = ",".join("?" * len(ACTIVE_STATUSES))
+        rows = await self._db.fetchall(
+            f"SELECT m.project_id, COUNT(*) AS n FROM staff_sessions s JOIN staff m ON m.id = s.staff_id WHERE s.ended_at IS NULL AND s.status IN ({active}) GROUP BY m.project_id",
+            tuple(sorted(ACTIVE_STATUSES)),
+        )
+        for row in rows:
+            out.setdefault(row["project_id"], {"staff": 0, "working": 0})["working"] = int(row["n"])
+        return out
+
     async def session_counts(self, project_id: str) -> dict[str, int]:
         rows = await self._db.fetchall(
             "SELECT s.staff_id, COUNT(*) AS n FROM staff_sessions s JOIN staff m ON m.id = s.staff_id WHERE m.project_id = ? GROUP BY s.staff_id",
@@ -1019,6 +1037,11 @@ class AsksStore:
         else:
             rows = await self._db.fetchall("SELECT * FROM asks WHERE project_id = ? AND resolved_at IS NULL AND routed_to = ? ORDER BY created_at, rowid", (project_id, routed_to))
         return [_ask(r) for r in rows]
+
+    async def open_counts(self, routed_to: str) -> dict[str, int]:
+        """How many open requests each project has for ``routed_to``, in one query."""
+        rows = await self._db.fetchall("SELECT project_id, COUNT(*) AS n FROM asks WHERE resolved_at IS NULL AND routed_to = ? GROUP BY project_id", (routed_to,))
+        return {r["project_id"]: int(r["n"]) for r in rows}
 
 
 __all__ = [

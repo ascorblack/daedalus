@@ -22,13 +22,19 @@ import { panelShortcut } from "../panel";
 import { Panel, usePanel, usePanelWidth } from "../panelhost";
 import { SessionDetails } from "../details";
 import { JobsTab } from "../jobs";
-import { navigate, pathFor, useRoute } from "../router";
+import { navigate, pathFor, projectHome, projectSessionPath, useRoute } from "../router";
 import { useMedia } from "../shell";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
 import { usePresenceScope } from "../presence";
 import { endsTerminals, TerminalButton, TerminalDock, TerminalFull, TerminalSheet, useSessionTerminals, useTerminalDock } from "../terminal/dock";
 import { insideTerminal } from "../terminal/keys";
+import { tabsFor } from "../panel";
+import { useAsks } from "../project/data";
+import { EventCard, FocusChat, FocusChatContext, StepLines, useFocusChat } from "../project/chat";
+import { StaffHeader, StaffMessages, useMember } from "../project/staff";
+import { BriefPage, FoldersPage, WakeupsPage } from "../project/pages";
+import { ProjectBoard } from "../board/ProjectBoard";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -57,9 +63,12 @@ export type SessionScreenProps = {
   pane?: "left" | "right";
   /** Open another session beside this one; absent when the screen cannot split. */
   onSplit?: () => void;
+  /** Inside a project's focus mode: the project, and whether this is its orchestrator's chat or a
+   *  session of the project (a staff member's, or anyone else's working there). */
+  focus?: { projectId: string; kind: "orchestrator" | "member" };
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -75,7 +84,19 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   // names; the second pane of a dual view keeps its panel to itself. Phones host it in a sheet.
   const route = useRoute();
   const phone = !useMedia("(min-width: 1024px)");
-  const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane });
+  const panelContext = focus ? focus.kind : "session";
+  const panelTabs = tabsFor(panelContext);
+  // In focus mode the panel's tab is written into the project's own address, so opening the board
+  // beside the orchestrator does not leave the project for the agents list.
+  const panelAt = useMemo(
+    () => (focus ? (q: Record<string, string | null>) => (focus.kind === "orchestrator" ? projectHome(focus.projectId, q) : projectSessionPath(focus.projectId, id, q)) : undefined),
+    [focus?.projectId, focus?.kind, id],
+  );
+  const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane, context: panelContext, at: panelAt });
+  const orchestrating = focus?.kind === "orchestrator";
+  const staffName = useMember(focus && detail?.staff ? detail.staff.id : null).data?.name ?? "";
+  const asks = useAsks(orchestrating ? focus!.projectId : null);
+  const focusChat = useMemo<FocusChat | null>(() => (focus ? { projectId: focus.projectId, orchestrator: orchestrating, asks, toast } : null), [focus?.projectId, orchestrating, asks, toast]);
   const [panelPct, dragPanel] = usePanelWidth();
   // The session's terminals: the dock under the conversation on a desktop, a sheet and a full-screen
   // view on a phone. Listed here because the header's button, the dock and the delete dialog all count them.
@@ -952,8 +973,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     document.addEventListener(EVIDENCE_EVENT, on);
     return () => document.removeEventListener(EVIDENCE_EVENT, on);
   }, [id, detail?.workspace, toast, openPreview]);
+  const staffId = focus && detail?.staff ? detail.staff.id : null;
+  const hasDetails = panelTabs.includes("details");
+  const focusPlaceholder = orchestrating ? t("focus.composer") : staffName ? t("focus.composer.staff", { name: staffName }) : undefined;
   return (
-    <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+    <FocusChatContext.Provider value={focusChat}>
+    <div className={`chat ${pane ? `pane pane-${pane}` : ""} ${focus ? `in-project ${focus.kind}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> {t("session.drop")}</div>}
       <div className={`chat-head ${busy || saving || compacting ? "live" : ""}`}>
         {(pane || phone) && (
@@ -1003,12 +1028,18 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             label={t("session.actions")}
             items={[
               { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
-              { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
+              // A session in a project's focus mode stays in its project; the orchestrator's chat has no
+              // files or jobs of its own to show.
+              ...(focus ? [] : [{ label: t("session.project.move"), icon: "folder" as IconName, onSelect: () => setMoving(true) }]),
               "-",
-              { label: t("panel.tab.details"), icon: "settings", onSelect: () => { setDetailsFocus("session"); panel.open("details"); } },
-              { label: t("session.files"), icon: "folder", onSelect: () => panel.open("files") },
-              { label: t("panel.tab.jobs"), icon: "terminal", onSelect: () => panel.open("jobs") },
-              { label: t("session.mcp"), icon: "plug", onSelect: () => { setDetailsFocus("mcp"); panel.open("details"); } },
+              ...(hasDetails
+                ? [
+                    { label: t("panel.tab.details"), icon: "settings" as IconName, onSelect: () => { setDetailsFocus("session"); panel.open("details"); } },
+                    { label: t("session.files"), icon: "folder" as IconName, onSelect: () => panel.open("files") },
+                    { label: t("panel.tab.jobs"), icon: "terminal" as IconName, onSelect: () => panel.open("jobs") },
+                    { label: t("session.mcp"), icon: "plug" as IconName, onSelect: () => { setDetailsFocus("mcp"); panel.open("details"); } },
+                  ]
+                : []),
               ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
               "-",
               { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
@@ -1022,6 +1053,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         </div>
         {(busy || saving || compacting) && <HeadProgress status={status} compacting={compacting} />}
       </div>
+      {staffId && <StaffHeader projectId={focus!.projectId} staffId={staffId} toast={toast} />}
 
       <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
@@ -1063,6 +1095,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               <Icon name="question" size={14} /><span><b>{t("session.runerror")}: </b>{detail.error}</span>
             </div>
           )}
+          {staffId && <StaffMessages staffId={staffId} />}
           <Composer
             ref={composer}
             sessionId={id}
@@ -1078,8 +1111,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             reasoningEffort={detail?.reasoning_effort}
             onChooseEffort={chooseEffort}
             place={{ project: detail?.project?.name, workspace: detail?.workspace_name || detail?.workspace, system: !!(detail?.project?.system || detail?.project?.settings.system) }}
+            idlePlaceholder={focusPlaceholder}
             context={detail?.context ?? null}
-            onContext={() => { setDetailsFocus("context"); panel.open("details"); }}
+            onContext={hasDetails ? () => { setDetailsFocus("context"); panel.open("details"); } : undefined}
             asr={asr}
             onVoice={voice ? () => navigate(pathFor("voice", null, { session: id })) : undefined}
             steers={steers}
@@ -1107,7 +1141,14 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             downloadUrl={(e) => downloadHref(e.base, e.path)}
             sheet={phone}
             onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
-            details={(ids) =>
+            tabs={panelTabs}
+            project={focus ? {
+              board: <ProjectBoard projectId={focus.projectId} toast={toast} embedded />,
+              brief: <BriefPage projectId={focus.projectId} compact toast={toast} />,
+              wakeups: <WakeupsPage projectId={focus.projectId} compact />,
+              folders: <FoldersPage projectId={focus.projectId} compact toast={toast} />,
+            } : undefined}
+            details={hasDetails ? (ids) =>
               <SessionDetails
                 ids={ids}
                 id={id}
@@ -1136,9 +1177,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                   openFiles: () => panel.open("files"),
                 }}
               />
-            }
-            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} upload folders={detail?.folders} home={detail?.folder_id} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
-            jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} onOpenSession={onOpen} />}
+            : undefined}
+            files={hasDetails ? <Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} upload folders={detail?.folders} home={detail?.folder_id} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} /> : undefined}
+            jobs={hasDetails ? <JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} onOpenSession={onOpen} /> : undefined}
           />
         )}
       </div>
@@ -1165,6 +1206,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       {receipt && <ReceiptDialog sessionId={id} receipt={receipt} onClose={() => setReceipt(null)} />}
 
     </div>
+    </FocusChatContext.Provider>
   );
 }
 
@@ -1338,6 +1380,7 @@ function SystemNoteRow({ note, cacheKey, run }: { note: SystemNote; cacheKey?: s
 
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void }) {
   const { id: sessionId, preview, toast } = useContext(SessionContext);
+  const focusChat = useFocusChat();
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, false);
   const [folded, setFolded] = useDisclosed(`${sessionId}:run:${turn.key}`, false);
   const wasLive = useRef(live);
@@ -1373,7 +1416,9 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   };
   return (
     <div className={`turn ${turn.note?.kind === "loop" ? "loop-turn" : ""} ${folded && !live ? "folded" : ""}`} id={seq ? `m${seq}` : undefined}>
-      {turn.user && turn.note && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} run={turn.note.kind === "loop" && !live ? { folded, toggle: () => setFolded(!folded) } : undefined} />}
+      {/* The project's events the orchestrator was woken with are the news of the chat: a card, open. */}
+      {turn.user && turn.note?.kind === "events" && <EventCard text={turn.note.body} />}
+      {turn.user && turn.note && turn.note.kind !== "events" && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} run={turn.note.kind === "loop" && !live ? { folded, toggle: () => setFolded(!folded) } : undefined} />}
       <div className="turn-content" hidden={folded && !live}>
       {turn.user && !turn.note && (
         <div className="msg-wrap">
@@ -1415,6 +1460,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
+      {focusChat?.orchestrator && <StepLines items={turn.activity.filter((a): a is ToolItem => a.kind === "tool")} />}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && (turn.media?.length ? (
         <div className={`answer answer-with-media ${live ? "streaming" : ""}`}>

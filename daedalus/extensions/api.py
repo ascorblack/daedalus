@@ -1547,6 +1547,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         await staff_member(staff_id)
         return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
 
+    @api.get("/api/staff/{staff_id}/messages")
+    async def staff_messages(staff_id: str, limit: int = Query(default=20, ge=1, le=200), _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """What was sent to a member, newest first, with each message's delivery state."""
+        await staff_member(staff_id)
+        return [m.view() for m in await manager.staff.messages(staff_id, limit=limit)]
+
     @api.post("/api/staff/{staff_id}/assign")
     async def assign_staff(staff_id: str, body: AssignBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Give a member a task: it starts now, or waits in the project's queue with the reason."""
@@ -1747,9 +1753,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         active = manager.active_sessions()
         counts = await manager.projects.summary(active)
         empty = {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}
-        folders = [{**p.view(), **counts.get(p.id, empty)} for p in projects]
+        # A project whose orchestrator is on is drawn as one entry that opens its focus mode, and that
+        # entry says what is going on inside: how many work for it, how many are at it now, and how
+        # many requests wait for the operator. Counted for every project in three queries.
+        orchestrated = [p for p in projects if p.settings.orchestrator.enabled]
+        teams = await manager.staff.team_counts() if orchestrated else {}
+        waiting = await manager.asks.open_counts("operator") if orchestrated else {}
+        folders = [{**p.view(), **counts.get(p.id, empty), "orchestrator": orchestration(p, teams, waiting)} for p in projects]
         folders.sort(key=lambda p: (p["last_message_at"] or p["created_at"], p["id"]), reverse=True)
         return {"sessions": rows, "projects": folders, "next_cursor": next_cursor}
+
+    def orchestration(project: Project, teams: dict[str, dict[str, int]], waiting: dict[str, int]) -> dict[str, Any] | None:
+        orchestrator = project.settings.orchestrator
+        if not orchestrator.enabled:
+            return None
+        team = teams.get(project.id, {})
+        return {"enabled": True, "session_id": orchestrator.session_id, "staff": team.get("staff", 0), "working": team.get("working", 0), "needs_you": waiting.get(project.id, 0)}
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1937,6 +1956,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "services": await app.extensions["services"].list(session_id) if "services" in app.extensions else [],
             "subagent_of": state.metadata.get("subagent_of"),
             "subagent_name": state.metadata.get("subagent_name"),
+            # What the session is to its project: its orchestrator (current or retired), or the session
+            # of a staff member. The app draws the orchestrator's chat and a staff member's header from these.
+            "orchestrator_of": state.metadata.get("orchestrator_of") or state.metadata.get("orchestrator_retired_of"),
+            "staff": {"id": state.metadata["staff_id"], "session_id": state.metadata.get("staff_session_id")} if state.metadata.get("staff_id") else None,
             "leader_title": leader.session.title if leader is not None else None,
             "subagents": subagents,
             "telegram_linked": bool(app.front is not None and await app.front.binding_for_session(session_id)),

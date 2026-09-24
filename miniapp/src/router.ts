@@ -22,8 +22,10 @@ export type Route = {
   detail: string | null;
   /** The project a project screen is about: /app/project/<id>/<page>. */
   project: string | null;
-  /** Which of the project's pages: team, board, journal… */
+  /** Which of the project's pages: team, board, journal… Null is the project's home, its orchestrator. */
   page: string | null;
+  /** A session of the project shown inside its focus mode: /app/project/<id>/s/<session>. */
+  inner: string | null;
   query: URLSearchParams;
 };
 
@@ -36,22 +38,39 @@ export function parse(pathname = window.location.pathname, search = window.locat
   const query = new URLSearchParams(search);
   const screen = ([...SCREENS, ...INNER] as string[]).includes(head) ? (head as Screen) : ALIASES[head] ?? "agents";
   const detail = rest[0] || null;
-  if (screen === "project") return { screen, session: null, with: null, detail: null, project: detail, page: rest[1] || null, query };
-  return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, project: null, page: null, query };
+  if (screen === "project") {
+    const page = rest[1] || null;
+    return { screen, session: null, with: null, detail: null, project: detail, page, inner: page === "s" ? rest[2] || null : null, query };
+  }
+  return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, project: null, page: null, inner: null, query };
 }
 
 export function pathFor(screen: Screen, detail?: string | null, query?: Record<string, string | null | undefined>): string {
   let p = `${BASE}/${screen}`;
   if (detail) p += `/${encodeURIComponent(detail)}`;
-  const qs = new URLSearchParams();
-  for (const [k, v] of Object.entries(query ?? {})) if (v) qs.set(k, v);
-  const s = qs.toString();
-  return s ? `${p}?${s}` : p;
+  return withQuery(p, query);
 }
 
 /** One of a project's pages. */
-export function projectPagePath(projectId: string, page: string): string {
-  return `${BASE}/project/${encodeURIComponent(projectId)}/${encodeURIComponent(page)}`;
+export function projectPagePath(projectId: string, page: string, query?: Record<string, string | null | undefined>): string {
+  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/${encodeURIComponent(page)}`, query);
+}
+
+/** A project's home in its focus mode: the orchestrator's chat, or the way to switch one on. */
+export function projectHome(projectId: string, query?: Record<string, string | null | undefined>): string {
+  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}`, query);
+}
+
+/** A session of a project, opened without leaving the project's focus mode. */
+export function projectSessionPath(projectId: string, sessionId: string, query?: Record<string, string | null | undefined>): string {
+  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/s/${encodeURIComponent(sessionId)}`, query);
+}
+
+function withQuery(path: string, query?: Record<string, string | null | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query ?? {})) if (v) qs.set(k, v);
+  const s = qs.toString();
+  return s ? `${path}?${s}` : path;
 }
 
 export function sessionPath(id: string, beside?: string | null): string {

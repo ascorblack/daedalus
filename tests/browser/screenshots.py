@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
+    FocusStub,
     TeamStub,
     Unhandled,
     expect_app,
@@ -1292,6 +1293,50 @@ def run_notifications() -> int:
     return UNHANDLED.report()
 
 
+def focus_stub(focus: FocusStub):  # type: ignore[no-untyped-def]
+    """The invented installation with an orchestrated project in it: focus mode's routes first."""
+
+    def handle(route) -> None:  # type: ignore[no-untyped-def]
+        request = route.request
+        url = urlsplit(request.url)
+        rel = url.path[url.path.index("/api/"):]
+        body = request.post_data_json if request.method in ("POST", "PUT", "PATCH") and request.post_data else None
+        answered = focus.answer(request.method, rel, url.query, body)
+        if answered is not None:
+            return respond(route, answered[1], status=answered[0])
+        return stub(route)
+
+    return handle
+
+
+def open_focus_brief(page: Page) -> None:
+    """The orchestrator with the board open beside it, as the mock-up draws it."""
+    page.wait_for_selector(".chat.in-project .event-card", timeout=10000)
+    tab = page.locator(".panel .panel-tab[data-tab='board']")
+    if tab.count() == 0:
+        page.locator(".chat-head .head-actions button[aria-pressed]").last.click()
+    page.locator(".panel .panel-tab[data-tab='board']").click()
+    page.wait_for_selector(".panel .pboard.embedded .pcard", timeout=5000)
+
+
+def run_focus() -> int:
+    """A project's focus mode: the orchestrator's chat with the board beside it, and the journal."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = desk.new_page()
+        focus = FocusStub.bakery(LANG)
+        page.route("**/api/**", focus_stub(focus))
+        pid = focus.projects[0]["id"]
+        shot(page, "project-focus", f"project/{pid}?panel=board", wait=".chat.in-project .event-card", before=open_focus_brief, settle=700)
+        shot(page, "project-journal", f"project/{pid}/journal", wait=".journal-entry", settle=500)
+        shot(page, "project-staff", f"project/{pid}/s/sess-lev?panel=brief", wait=".staff-head", settle=700)
+        desk.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1359,12 +1404,14 @@ def run() -> int:
         stub.fresh = False  # type: ignore[attr-defined]
         phone.close()
         browser.close()
-    # The notification centre needs a stream of its own for the toasts; it reports what went unanswered.
-    return run_notifications()
+    # The notification centre needs a stream of its own for the toasts, and focus mode an installation
+    # with an orchestrated project; each reports what went unanswered.
+    notifications = run_notifications()
+    return run_focus() or notifications
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_focus() if only == "focus" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
