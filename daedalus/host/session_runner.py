@@ -50,6 +50,7 @@ from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBou
 from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
+from daedalus.host.events import EventBus
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
 from daedalus.host.request_manifests import RequestManifestStore
@@ -415,6 +416,10 @@ class SessionManager:
         """And the supervisor reads it from there rather than resolving it a second time."""
         self._configure_redactor(settings, config)
         self.hooks = DaedalusHookManager(self.redactor, hooks_config=lambda: self.config.hooks)
+        self.bus = EventBus(db, redactor=self.redactor, queue_size=config.ops.event_subscriber_queue, replay_max=config.ops.event_replay_max)
+        """What happens to sessions, terminals and staff, for whoever subscribes: the app's stream,
+        the notifications, an orchestrator. Persisted before it is delivered, so a subscriber resumes
+        from its cursor after a restart."""
         self._background: set[asyncio.Task[Any]] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self.tools = InMemoryToolRegistry()
@@ -465,6 +470,7 @@ class SessionManager:
         """Open the stores; ``recovering`` (default: whether a previous process left runs behind) gates new runs until resume_unfinished()."""
         await self.memory.load()
         await self.workspace_units.load()
+        await self.bus.start()
         # The policy is built inside a tool call and cannot wait on a query; this is where the project
         # roots it compares against are read — and where a folder of our own that is not on disk is
         # put back, so the first run after a start is not the thing that discovers it missing.
@@ -541,6 +547,9 @@ class SessionManager:
                         await asyncio.gather(task, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
+        # Last, once the runs are drained, so their final events are written; and it ends every open
+        # event stream, which a shutdown would otherwise wait on.
+        await self.bus.close()
 
     def budget_exceeded(self) -> str | None:
         if self.budget_flag.exists():
@@ -585,6 +594,8 @@ class SessionManager:
     def reload_config(self, config: RuntimeConfig) -> None:
         self.config = config
         self._configure_redactor(self.settings, config)
+        self.bus.queue_size = config.ops.event_subscriber_queue
+        self.bus.replay_max = config.ops.event_replay_max
         self.providers.reload(config)
         self.mcp.reload(config.mcp.servers)
         for state in self._states.values():

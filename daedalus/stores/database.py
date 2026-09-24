@@ -761,6 +761,25 @@ ALTER TABLE media_items ADD COLUMN source_url TEXT NOT NULL DEFAULT '';
 """)
 
 
+# The event bus's persisted ring. AUTOINCREMENT, because a sequence number a client or an
+# orchestrator holds as its cursor must never be handed out again, not after a prune emptied the
+# table and not after a restart; the plain rowid would reuse the highest number once it is deleted.
+MIGRATIONS.append("""
+CREATE TABLE app_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    type TEXT NOT NULL,
+    project_id TEXT,
+    session_id TEXT,
+    staff_id TEXT,
+    terminal_id TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX app_events_by_at ON app_events(at);
+CREATE INDEX app_events_by_project ON app_events(project_id, seq) WHERE project_id IS NOT NULL;
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

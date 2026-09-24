@@ -18,6 +18,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
 from daedalus.host.config_validation import ConfigConflict, config_revision
+from daedalus.host.events import EventBus
 from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
 from daedalus.search.service import ConversationSearch
@@ -56,6 +57,13 @@ class Application:
         # headless browser takes minutes, and the page that started it may be reloaded meanwhile.
         self.components = Installer(settings)
         self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
+
+    @property
+    def bus(self) -> EventBus:
+        """The event bus; the same object as ``manager.bus``, which exists once the application started."""
+        if self.manager is None:
+            raise RuntimeError("the event bus exists once the application has started")
+        return self.manager.bus
 
     async def save_config(self, config: RuntimeConfig, *, expected_revision: str | None = None) -> None:
         async with self._config_lock:

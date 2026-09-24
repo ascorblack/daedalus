@@ -974,6 +974,17 @@ class OpsConfig(BaseModel):
     shutdown_grace_seconds: float = Field(default=20.0, ge=0)
     """How long a shutdown gives the housekeeping of a run that has just ended — the snapshot and the
     handover to the other fronts — before it is cancelled. 0 cancels at once, which loses them."""
+    app_events_keep_days: int = Field(default=7, ge=1)
+    """Age past which an event on the bus is dropped from its ring. A client or subscriber whose
+    cursor is older than that is told to re-read its lists rather than replayed."""
+    app_events_max_rows: int = Field(default=200_000, ge=1000)
+    """Hard ceiling on the bus's ring, whatever the age sweep left."""
+    event_subscriber_queue: int = Field(default=1024, ge=4)
+    """Live events one subscriber may leave unread before it stops receiving them and reads what it
+    missed from the ring instead. It bounds memory per subscriber; it never makes a publisher wait."""
+    event_replay_max: int = Field(default=5000, ge=100)
+    """Events a reconnecting client may be behind and still be caught up. Further behind, it is told
+    to re-read its lists, which is cheaper than streaming it a day of history."""
 
 
 class HeartbeatConfig(BaseModel):
