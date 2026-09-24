@@ -326,6 +326,11 @@ class TeamStub:
         """``(status, body)`` for a route of the team, or None for anything else."""
         if path == "/api/harnesses/catalog":
             return (200, self.catalog) if self.catalog is not None else (404, {"detail": "Not Found"})
+        # The project's column counts its wake-ups and watches; this project has none.
+        if path == f"/api/projects/{self.project['id']}/wakeups" and method == "GET":
+            return 200, {"wakeups": [], "max": 20}
+        if path == f"/api/projects/{self.project['id']}/watches" and method == "GET":
+            return 200, {"watches": [], "max": 50, "min_cooldown_minutes": 1, "providers": []}
         if path == f"/api/projects/{self.project['id']}/staff":
             if method == "GET":
                 return 200, self.listing("archived=1" in query)
