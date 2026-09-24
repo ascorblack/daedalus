@@ -87,18 +87,32 @@ RUN npm run build
 #
 # Debian bookworm's Go rather than the default tag's newer Debian: the library is static but the C
 # runtime is not, and a binary linked against a newer glibc than Ubuntu 24.04's refuses to start.
-FROM golang:1.26-bookworm AS ptyd
+#
+# The stage runs on the machine that builds and compiles for the one the image is for. The published
+# image is built for arm64 as well, and Zig building Ghostty under an emulated CPU is many times
+# slower than a cross build, which costs nothing extra here: Zig targets any architecture on its own,
+# and the Go side needs only Debian's cross C compiler for its few lines of cgo.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS ptyd
+ARG TARGETARCH
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in \
+        amd64) triple=x86_64-linux-gnu ;; \
+        arm64) triple=aarch64-linux-gnu ;; \
+        *) echo "no terminal daemon build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && cross="" \
+    && if [ "$TARGETARCH" != "$(dpkg --print-architecture)" ]; then cross="gcc-$triple libc6-dev-$TARGETARCH-cross"; fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends xz-utils $cross \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "$triple" > /opt/target-triple
 
 WORKDIR /src/ptyd
 # The library first, from the pins and the patches alone, so the minutes of Zig are paid again only
 # when one of those moves, never for a change to the daemon's Go. Only the installed library is kept:
 # the compiler, the Ghostty checkout and Zig's caches are a gigabyte nothing after this step reads.
 COPY ptyd/libghostty ./libghostty
-RUN PTYD_CACHE=/opt/libghostty libghostty/build.sh > /opt/libghostty.pkgconfig \
+RUN PTYD_CACHE=/opt/libghostty LIBGHOSTTY_TARGET="$(cat /opt/target-triple)" libghostty/build.sh > /opt/libghostty.pkgconfig \
     && find /opt/libghostty -mindepth 1 -maxdepth 1 ! -name 'libghostty-*' -exec rm -rf {} +
 
 COPY ptyd/go.mod ptyd/go.sum ./
@@ -107,12 +121,16 @@ COPY ptyd ./
 # The version is a digest of the daemon's sources. The host compares the version of the daemon that
 # is running with the one in its own image, and the digest differs exactly when the daemon changed —
 # a rebuild of the agent for any other reason does not offer to end every terminal for nothing.
+# The binary is asked its version only when this machine can run it.
 RUN export PKG_CONFIG_PATH="$(cat /opt/libghostty.pkgconfig)" \
+    && triple="$(cat /opt/target-triple)" \
+    && cc=gcc \
+    && if [ "$TARGETARCH" != "$(dpkg --print-architecture)" ]; then cc="$triple-gcc"; fi \
     && digest="$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)" \
-    && CGO_ENABLED=1 go build -trimpath \
+    && CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH" CC="$cc" go build -trimpath \
         -ldflags "-s -w -X github.com/ascorblack/daedalus/ptyd/internal/version.Version=src-$digest" \
         -o /out/ptyd ./cmd/ptyd \
-    && /out/ptyd version
+    && if [ "$cc" = gcc ]; then /out/ptyd version; fi
 
 
 # -- what ships -------------------------------------------------------------------------------

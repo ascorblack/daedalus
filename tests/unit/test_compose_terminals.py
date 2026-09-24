@@ -146,12 +146,14 @@ def test_the_header_says_what_recreating_the_service_costs_and_how_the_first_dep
 
 def test_the_image_builds_the_daemon_with_its_emulator_and_ships_only_the_binary() -> None:
     dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
-    stage = re.search(r"^FROM golang:(\S+) AS ptyd$", dockerfile, re.M)
+    # Built on the builder's own platform and cross-compiled for the image's, not under emulation.
+    stage = re.search(r"^FROM --platform=\$BUILDPLATFORM golang:(\S+) AS ptyd$", dockerfile, re.M)
     assert stage, "no ptyd stage"
     # The Go of the stage is the one go.mod names; the two drift apart only by someone's mistake.
     go = re.search(r"^go (\d+\.\d+)", (REPO / "ptyd" / "go.mod").read_text(encoding="utf-8"), re.M)
     assert go and stage.group(1).startswith(go.group(1) + "-")
-    assert "libghostty/build.sh" in dockerfile and "CGO_ENABLED=1 go build" in dockerfile
+    assert "libghostty/build.sh" in dockerfile and 'LIBGHOSTTY_TARGET="$(cat /opt/target-triple)"' in dockerfile
+    assert 'CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH"' in dockerfile
     assert "internal/version.Version=src-" in dockerfile
     assert "COPY --from=ptyd /out/ptyd /usr/local/bin/ptyd" in dockerfile
     runtime = dockerfile[dockerfile.index("FROM base AS runtime") :]
