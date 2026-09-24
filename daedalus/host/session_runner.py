@@ -79,6 +79,7 @@ from daedalus.providers.registry import ProviderRegistry
 from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
+from daedalus.stores.dispatches import DispatchStore
 from daedalus.stores.media import MediaStore
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
 from daedalus.stores.projects import Project, ProjectFolder, ProjectSettings, ProjectStore
@@ -444,6 +445,9 @@ class SessionManager:
             personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
         )
         self.asks = AsksStore(db)
+        self.dispatches = DispatchStore(db)
+        """The main orchestrator's hand-overs to projects: what a project orchestrator's state lists
+        and what its reports close."""
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)

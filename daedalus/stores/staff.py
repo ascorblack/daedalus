@@ -22,7 +22,7 @@ import sqlite3
 import time
 import uuid
 import zlib
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -51,8 +51,10 @@ MESSAGE_MODES = ("queue", "steer", "interrupt")
 MESSAGE_STATES = ("queued", "written", "submitted", "acknowledged", "failed")
 _MESSAGE_RANK = {"queued": 0, "written": 1, "submitted": 2, "acknowledged": 3}
 
-ASK_ORIGINS = ("staff", "orchestrator")
-ASK_KINDS = ("question", "permission", "folder")
+ASK_ORIGINS = ("staff", "orchestrator", "dispatcher")
+ASK_KINDS = ("question", "permission", "folder", "project")
+"""``project`` is the main orchestrator's confirmation before it creates a project: the one request
+that belongs to no project yet, because nothing exists until it is answered."""
 ASK_ROUTES = ("orchestrator", "operator")
 ASK_RESOLVERS = ("orchestrator", "operator", "staff", "system")
 
@@ -268,7 +270,8 @@ class StaffMessage:
 class Ask:
     id: str
     short_id: str
-    project_id: str
+    project_id: str | None
+    """``None`` only for the confirmation of a project that does not exist yet."""
     origin: str
     kind: str
     staff_id: str | None
@@ -284,6 +287,8 @@ class Ask:
     resolved_at: str | None
     resolved_by: str | None
     resolution: dict[str, Any]
+    dispatch_id: str | None = None
+    """The main orchestrator's dispatch this request is shown under, in its chat as well as the project's."""
 
     @property
     def open(self) -> bool:
@@ -309,6 +314,7 @@ class Ask:
             "resolved_at": self.resolved_at,
             "resolved_by": self.resolved_by,
             "resolution": self.resolution,
+            "dispatch_id": self.dispatch_id,
         }
 
 
@@ -399,6 +405,7 @@ def _ask(row: Any) -> Ask:
         resolved_at=row["resolved_at"],
         resolved_by=row["resolved_by"],
         resolution=_json(row["resolution_json"]),
+        dispatch_id=row["dispatch_id"],
     )
 
 
@@ -963,10 +970,14 @@ class AsksStore:
     def __init__(self, db: Database, *, short_id: Callable[[], str] = _short_id) -> None:
         self._db = db
         self._short_id = short_id
+        self.default_dispatch: Callable[[str], Awaitable[str | None]] | None = None
+        """``project id -> dispatch id`` asked for a request that names no dispatch: while the main
+        orchestrator sets a project up, every request of the project belongs to that first dispatch.
+        Asked here, where every request is made, so no way of asking can slip past it."""
 
     async def open(
         self,
-        project_id: str,
+        project_id: str | None,
         *,
         origin: str,
         kind: str,
@@ -978,12 +989,19 @@ class AsksStore:
         request_ref: str = "",
         detail: dict[str, Any] | None = None,
         suggestion: str = "",
+        dispatch_id: str | None = None,
     ) -> Ask:
         """A new request, with a short id nobody else waiting holds.
 
         The short id is random, so two open requests can draw the same one; the partial unique
-        index refuses the second, and the insert is tried again with a fresh draw.
+        index refuses the second, and the insert is tried again with a fresh draw. The dispatch link
+        is written in the same insert, before anyone announces the request, so every window that
+        shows it learns where it belongs from the row itself.
         """
+        if project_id is None and kind != "project":
+            raise StaffError("only the confirmation of a new project belongs to no project")
+        if dispatch_id is None and project_id is not None and self.default_dispatch is not None:
+            dispatch_id = await self.default_dispatch(project_id)
         if origin not in ASK_ORIGINS:
             raise StaffError(f"a request comes from staff or the orchestrator, not {origin!r}")
         if kind not in ASK_KINDS:
@@ -1002,9 +1020,9 @@ class AsksStore:
             short = self._short_id()
             try:
                 await self._db.execute(
-                    "INSERT INTO asks(id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text, detail_json, routed_to, suggestion, created_at, routed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (ask_id, short, project_id, origin, kind, staff_id, staff_session_id, task_id, _plain(request_ref, "the request reference", 500), body, details, routed_to, _plain(suggestion, "the suggestion", TEXT_MAX, multiline=True), at, at),
+                    "INSERT INTO asks(id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text, detail_json, routed_to, suggestion, created_at, routed_at, dispatch_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ask_id, short, project_id, origin, kind, staff_id, staff_session_id, task_id, _plain(request_ref, "the request reference", 500), body, details, routed_to, _plain(suggestion, "the suggestion", TEXT_MAX, multiline=True), at, at, dispatch_id or None),
                 )
             except sqlite3.IntegrityError:
                 if await self._db.fetchone("SELECT 1 FROM asks WHERE short_id = ? AND resolved_at IS NULL", (short,)) is None:
@@ -1057,6 +1075,25 @@ class AsksStore:
             rows = await self._db.fetchall("SELECT * FROM asks WHERE project_id = ? AND resolved_at IS NULL ORDER BY created_at, rowid", (project_id,))
         else:
             rows = await self._db.fetchall("SELECT * FROM asks WHERE project_id = ? AND resolved_at IS NULL AND routed_to = ? ORDER BY created_at, rowid", (project_id, routed_to))
+        return [_ask(r) for r in rows]
+
+    async def link(self, ask_id: str, dispatch_id: str | None) -> None:
+        """Show a request under a dispatch, or under none."""
+        await self._db.execute("UPDATE asks SET dispatch_id = ? WHERE id = ?", (dispatch_id or None, ask_id))
+
+    async def of_dispatches(self, dispatch_ids: Sequence[str], *, open_only: bool = True) -> list[Ask]:
+        """The requests shown under these dispatches, oldest first."""
+        if not dispatch_ids:
+            return []
+        marks = ", ".join("?" for _ in dispatch_ids)
+        clause = " AND resolved_at IS NULL" if open_only else ""
+        rows = await self._db.fetchall(f"SELECT * FROM asks WHERE dispatch_id IN ({marks}){clause} ORDER BY created_at, rowid", tuple(dispatch_ids))  # noqa: S608 — only placeholders are formatted in
+        return [_ask(r) for r in rows]
+
+    async def of_origin(self, origin: str, *, open_only: bool = True, limit: int = 50) -> list[Ask]:
+        """Requests of one origin, newest first: the main orchestrator's own confirmations."""
+        clause = " AND resolved_at IS NULL" if open_only else ""
+        rows = await self._db.fetchall(f"SELECT * FROM asks WHERE origin = ?{clause} ORDER BY created_at DESC, rowid DESC LIMIT ?", (origin, limit))  # noqa: S608 — a fixed clause
         return [_ask(r) for r in rows]
 
     async def open_counts(self, routed_to: str) -> dict[str, int]:

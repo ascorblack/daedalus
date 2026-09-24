@@ -741,7 +741,8 @@ class Orchestrators:
             return Wake(f"request:{p.get('request_ref') or event.seq}", urgent=routed == "orchestrator")
         if kind in ("ask.answered", "permission.resolved"):
             ask = await self._ask_for_event(p)
-            if ask is None:
+            if ask is None or ask.resolved_by == "system":
+                # A request withdrawn because what it served is over has no answer to bring.
                 return None
             own = ask.origin == "orchestrator"
             escalated = ask.routed_to == "operator" and ask.routed_at > ask.created_at and ask.resolved_by == "operator"
@@ -759,7 +760,14 @@ class Orchestrators:
         if kind == "watch.fired":
             action = (p.get("action") or "wake") if isinstance(p.get("action"), str) else "wake"
             return Wake(f"watch:{event.seq}", urgent=True) if action == "wake" else None
-        if kind in ("dispatch.created", "dispatch.message"):
+        if kind == "dispatch.created":
+            return Wake(f"dispatch:{event.seq}", urgent=True)
+        if kind == "dispatch.message":
+            # Only what the main orchestrator (or the operator) says on a dispatch is for this
+            # orchestrator; its own progress reports are messages on the dispatch too, and waking on
+            # them would be waking on its own doing.
+            if p.get("author") not in ("dispatcher", "operator"):
+                return None
             return Wake(f"dispatch:{event.seq}", urgent=True)
         return None
 
@@ -860,7 +868,11 @@ class Orchestrators:
         if kind in ("dispatch.created", "dispatch.message"):
             title = str(p.get("title") or "")
             text = _one_line(str(p.get("text") or ""), 600)
-            return f"[from the main orchestrator] dispatch {p.get('dispatch_id') or ''}{': ' + title if title else ''}: {text}"
+            if kind == "dispatch.message" and p.get("kind") == "cancelled":
+                return f"[from the main orchestrator] dispatch {p.get('dispatch_id') or ''} is cancelled: {text}"
+            what = "follow-up on dispatch" if kind == "dispatch.message" else "dispatch"
+            number = f" #{p.get('seq')}" if kind == "dispatch.created" and p.get("seq") else ""
+            return f"[from the main orchestrator] {what} {p.get('dispatch_id') or ''}{number}{': ' + title if title else ''}: {text}"
         return kind
 
     @staticmethod
@@ -1003,9 +1015,9 @@ class Orchestrators:
 
     # -- its own requests -----------------------------------------------------------------------------
 
-    async def open_request(self, project: Project, session_id: str, *, kind: str, text: str, options: list[str], detail: dict[str, Any], task_id: str | None = None) -> Ask:
+    async def open_request(self, project: Project, session_id: str, *, kind: str, text: str, options: list[str], detail: dict[str, Any], task_id: str | None = None, dispatch_id: str | None = None) -> Ask:
         """A request of the orchestrator's own to the operator: a row, and the event the router and the app show."""
-        ask = await self.manager.asks.open(project.id, origin="orchestrator", kind=kind, text=text, routed_to="operator", task_id=task_id, detail={**detail, "options": options})
+        ask = await self.manager.asks.open(project.id, origin="orchestrator", kind=kind, text=text, routed_to="operator", task_id=task_id, detail={**detail, "options": options}, dispatch_id=dispatch_id)
         ref = f"orchestrator:{project.id}:{ask.id}"
         await self.manager.db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.event_ref', ?) WHERE id = ?", (ref, ask.id))
         ask = (await self.manager.asks.get(ask.id)) or ask
@@ -1026,6 +1038,7 @@ class Orchestrators:
                 "short_id": ask.short_id,
                 "routed_to": "operator",
                 "kind": kind,
+                **({"dispatch_id": ask.dispatch_id} if ask.dispatch_id else {}),
             },
             project_id=project.id,
             session_id=session_id,

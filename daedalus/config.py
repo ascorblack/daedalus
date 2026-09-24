@@ -1149,6 +1149,26 @@ class StaffConfig(BaseModel):
     session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
 
 
+class DispatcherConfig(BaseModel):
+    """The main orchestrator: the one session that hands the operator's requests to projects."""
+
+    preset: str = ""
+    """Its model preset; empty is a mid-tier preset (:meth:`RuntimeConfig.middle_preset`). It routes and
+    follows, which a mid-tier model does as well as the strongest, and it runs on every report."""
+    batch_seconds: int = Field(default=10, ge=1, le=600)
+    """Reports on dispatches arriving together are told in one turn."""
+    max_wakes_per_hour: int = Field(default=20, ge=1)
+    stalled_minutes: int = Field(default=30, ge=5, le=24 * 60)
+    """An open dispatch with nothing happening on it this long, while nobody in its project works, is stalled."""
+    state_max_chars: int = Field(default=4000, ge=1000, le=20_000)
+    max_iterations: int = Field(default=20, ge=5)
+    """Model calls in one of its turns: it routes and ends its turn."""
+    usd_per_run: float | None = Field(default=None, ge=0)
+    container_roots: list[str] = Field(default_factory=list)
+    """Where ``CreateProject`` may find or make a container folder. Empty: the folders that already
+    hold container projects (the parents of their folders), which are the mounts the operator set up."""
+
+
 class OrchestratorConfig(BaseModel):
     """A project's orchestrator: which model it runs by default, how its wake-ups are batched, and what bounds a turn."""
 
@@ -1496,6 +1516,7 @@ class RuntimeConfig(BaseModel):
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
     watches: WatchesConfig = Field(default_factory=WatchesConfig)
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
@@ -1836,6 +1857,7 @@ __all__ = [
     "PeersConfig",
     "StaffConfig",
     "OrchestratorConfig",
+    "DispatcherConfig",
     "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
