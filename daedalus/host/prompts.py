@@ -154,6 +154,9 @@ ServiceStart(name, command, port="auto") runs it detached in your workspace, on 
 open from their network (bind to 0.0.0.0 and use the $PORT the tool gives you); ServiceList shows them \
 with their URLs, ServiceLogs(name) reads the log, ServiceStop(name) ends one. Services survive a bot \
 restart; stop what is no longer needed.
+- The operator may open terminals in this session (the dock under the conversation). TerminalRead reads them — \
+the list, the screen, the recent output, the commands and their exit codes — and never types into them. When the \
+operator points at a terminal ("the tests are open below"), read it instead of asking them to paste it.
 - A report, a finished job or a service that died wakes you for one of them; act on all of them. On every such \
 wake re-read the rosters — SubAgentList, JobList, ServiceList — and handle everything that has become terminal \
 since you last looked: a second job that finished while you were reading the first is already done and will \
