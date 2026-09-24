@@ -2781,6 +2781,18 @@ button.staff-row:hover { background: var(--surface-2); }
 .wakeup-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .wakeup-name { font-weight: 600; font-size: var(--fs-13); }
 .wakeup-note { white-space: pre-wrap; }
+.wakeup-name { overflow-wrap: anywhere; }
+.wakeup-meta { overflow-wrap: anywhere; }
+.wakeup-section { display: grid; gap: 8px; }
+.wakeup-section + .wakeup-section { margin-top: 12px; }
+.wakeup-section-head { display: flex; align-items: center; gap: 8px; min-height: var(--ctl-h-sm); }
+.wakeup-section-title { font-size: var(--fs-12); font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; }
+.wakeup-row > .iconbtn { flex: none; margin: -4px -6px -4px 0; }
+.watch-stopped { color: var(--warn); font-size: var(--fs-12); overflow-wrap: anywhere; }
+.watch-sheet .watch-once { align-self: end; display: flex; align-items: center; gap: 8px; min-height: var(--ctl-h); }
+.watch-sheet .chips, .wakeup-sheet .chips { margin-top: 6px; flex-wrap: wrap; overflow: visible; }
+/* A finger needs the full touch row to hit "cancel" and not the row beside it. */
+@media (pointer: coarse) { .wakeup-row > .iconbtn { min-width: var(--row-h-touch); min-height: var(--row-h-touch); margin: -10px -10px -10px 0; } }
 .focus-folders { display: grid; gap: 8px; align-content: start; padding: 4px 0; }
 .panel-body .focus-folders, .panel-body .wakeups { padding: 12px; }
 .focus-folder { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); }

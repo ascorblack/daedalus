@@ -56,7 +56,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import api_harnesses, api_projects
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
-from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
+from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature, webhook_facts
 from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
 from daedalus.extensions.push import PushRefused, PushService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
@@ -3907,7 +3907,21 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except ValueError:
             payload = {"raw": raw.decode("utf-8", "replace")[:PAYLOAD_MAX_CHARS]}
         event = request.headers.get("x-github-event") or request.headers.get("x-event") or ""
-        text = (f"event: {event}\n" if event else "") + flatten_payload(payload)
+        if not event and isinstance(payload, dict) and isinstance(payload.get("event") or payload.get("type"), str):
+            event = str(payload.get("event") or payload.get("type"))[:100]
+        summary = flatten_payload(payload)
+        text = (f"event: {event}\n" if event else "") + summary
+        # Every accepted delivery is an event, so a project's watch on a pull request or a CI result
+        # hears it whether or not a session also runs it.
+        try:
+            await manager.bus.publish(
+                "webhook.received",
+                {"provider": provider, "event": event, "delivery_id": delivery_id, "summary": summary, **webhook_facts(event, payload)},
+            )
+        except Exception:  # noqa: BLE001 — the delivery is accepted; the event is for the watches
+            logger.warning("could not publish webhook.received for %s", provider, exc_info=True)
+        if conf.deliver == "events":
+            return {"status": "accepted", "delivery_id": delivery_id, "delivered": "events"}
         try:
             result = await inbound.deliver(source=f"webhook:{provider}", text=text, session_ref=conf.session or None, default_title=f"[webhook {provider}]", prompt=conf.prompt)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 — the sender must get a status, and the failure goes to the inbox

@@ -163,7 +163,7 @@ async def test_a_replacement_links_both_ways_retargets_wake_ups_and_retires_the_
         old = (await r.orch.enable(r.project.id)).settings.orchestrator.session_id
         now = datetime.now(UTC).isoformat()
         await db.execute(
-            "INSERT INTO schedules(id, name, prompt, workspace, created_at, target_session, enabled, next_run_at) VALUES ('w1', 'wake', 'check the webhooks', '', ?, ?, 1, ?)",
+            "INSERT INTO schedules(id, name, prompt, workspace, created_at, target_session, enabled, next_run_at, kind) VALUES ('w1', 'wake', 'check the webhooks', '', ?, ?, 1, ?, 'wake')",
             (now, old, now),
         )
         new = (await r.orch.replace(r.project.id, "it stopped answering")).settings.orchestrator.session_id

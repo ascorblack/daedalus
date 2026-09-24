@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from daedalus.extensions import wakeups
+from daedalus.extensions.watches import WatchRefused
 from daedalus.stores.projects import FolderSpec, Project, ProjectError, ProjectFolder, ProjectSettings
 
 if TYPE_CHECKING:
@@ -28,6 +30,35 @@ BRIEF_SECTION_MAX_CHARS = 20000
 """A brief section is re-read into the orchestrator's prompt every turn, so it is bounded."""
 
 Env = Literal["container", "host"]
+
+
+class WatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    when: dict[str, Any]
+    then: dict[str, Any]
+    cooldown_minutes: float = 10
+    once: bool = False
+    note: str = ""
+
+
+class WatchPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    note: str | None = None
+    cooldown_minutes: float | None = None
+
+
+class WakeupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str
+    at: str | None = None
+    """ISO 8601; without an offset it is the operator's own time."""
+    in_minutes: int | None = None
+    cron: str | None = None
+    """In UTC, like every schedule."""
 
 
 class FolderBody(BaseModel):
@@ -416,6 +447,80 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         session_id = orchestrator.session_id if orchestrator.enabled else ""
         text = await orchestrators().project_state(project, session_id=session_id or None)
         return {"project_id": project_id, "session_id": session_id or None, "text": text, "chars": len(text), "max_chars": manager.config.orchestrator.state_max_chars}
+
+    # -- wake-ups ------------------------------------------------------------------------
+
+    @api.get("/api/projects/{project_id}/wakeups")
+    async def get_wakeups(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The orchestrator's wake-ups, whoever set them, soonest first."""
+        await existing(project_id)
+        return {"wakeups": await wakeups.wakeups(app, project_id), "max": manager.config.orchestrator.wakeups_max}
+
+    @api.post("/api/projects/{project_id}/wakeups")
+    async def post_wakeup(project_id: str, body: WakeupBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator leaves the orchestrator a wake-up with a note."""
+        project = await existing(project_id)
+        try:
+            wakeup = await wakeups.set_wakeup(app, project, note=body.note, at=body.at, in_minutes=body.in_minutes, cron=body.cron)
+        except wakeups.WakeupRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await manager.bus.publish("project.changed", {"change": "wakeups", "actor": "operator"}, project_id=project_id)
+        return wakeup
+
+    @api.delete("/api/projects/{project_id}/wakeups/{wakeup_id}")
+    async def delete_wakeup(project_id: str, wakeup_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        if not await wakeups.cancel(app, project_id, wakeup_id):
+            raise HTTPException(404, "no such wake-up")
+        await manager.bus.publish("project.changed", {"change": "wakeups", "actor": "operator"}, project_id=project_id)
+        return {"deleted": True}
+
+    # -- watches -------------------------------------------------------------------------
+
+    def keeper() -> Any:
+        found = app.extensions.get("watches")
+        if found is None:
+            raise HTTPException(503, "watches are not running on this installation")
+        return found
+
+    @api.get("/api/projects/{project_id}/watches")
+    async def get_watches(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Every watch of the project, switched on or off, oldest first, with what bounds them."""
+        await existing(project_id)
+        config = manager.config.watches
+        return {
+            "watches": [w.view() for w in keeper().of_project(project_id)],
+            "max": config.max_per_project,
+            "min_cooldown_minutes": max(1, round(config.min_cooldown_seconds / 60)),
+            "providers": sorted(manager.config.webhooks),
+        }
+
+    @api.post("/api/projects/{project_id}/watches")
+    async def post_watch(project_id: str, body: WatchBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        project = await existing(project_id)
+        try:
+            made = await keeper().create(project, when=body.when, then=body.then, cooldown_minutes=body.cooldown_minutes, once=body.once, note=body.note, by="operator")
+        except WatchRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return dict(made.view())
+
+    @api.patch("/api/projects/{project_id}/watches/{watch_id}")
+    async def patch_watch(project_id: str, watch_id: str, body: WatchPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        try:
+            changed = await keeper().update(project_id, watch_id, enabled=body.enabled, note=body.note, cooldown_minutes=body.cooldown_minutes, by="operator")
+        except KeyError as exc:
+            raise HTTPException(404, "no such watch") from exc
+        except WatchRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return dict(changed.view())
+
+    @api.delete("/api/projects/{project_id}/watches/{watch_id}")
+    async def delete_watch(project_id: str, watch_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        if not await keeper().remove(project_id, watch_id, by="operator"):
+            raise HTTPException(404, "no such watch")
+        return {"deleted": True}
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

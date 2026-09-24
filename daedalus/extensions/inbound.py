@@ -65,6 +65,48 @@ def flatten_payload(value: Any, prefix: str = "", *, limit: int = PAYLOAD_MAX_CH
     return out[:limit] + ("\n…" if len(out) > limit else "")
 
 
+def _dig(value: Any, *path: str) -> Any:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def webhook_facts(event: str, payload: Any) -> dict[str, str]:
+    """What a project's watches match on, read from a GitHub-style payload: the repository, the
+    action, a pull request's or a CI run's outcome, the branch and a title. Every value is a short
+    string; what a payload does not say is left out.
+
+    A pull request closed with ``merged`` is reported as ``merged``, since that is the outcome anyone
+    waits for. A CI run's conclusion is empty while it runs, so only a finished run has one.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    facts: dict[str, Any] = {
+        "repo": _dig(payload, "repository", "full_name") or _dig(payload, "project", "path_with_namespace"),
+        "action": payload.get("action"),
+    }
+    if event == "pull_request":
+        pull = payload.get("pull_request") or {}
+        merged = bool(_dig(pull, "merged"))
+        facts["conclusion"] = "merged" if payload.get("action") == "closed" and merged else payload.get("action")
+        facts["branch"] = _dig(pull, "head", "ref")
+        facts["title"] = _dig(pull, "title")
+    elif event in ("check_suite", "check_run", "workflow_run"):
+        run = payload.get(event) or {}
+        facts["conclusion"] = _dig(run, "conclusion")
+        facts["branch"] = _dig(run, "head_branch") or _dig(run, "check_suite", "head_branch")
+        facts["title"] = _dig(run, "name") or _dig(run, "display_title")
+    elif event == "status":
+        state = payload.get("state")
+        facts["conclusion"] = state if state != "pending" else None
+        branches = payload.get("branches") or []
+        facts["branch"] = _dig(branches[0], "name") if branches and isinstance(branches[0], dict) else None
+        facts["title"] = payload.get("context")
+    return {key: str(value)[:200] for key, value in facts.items() if isinstance(value, (str, int)) and str(value)}
+
+
 def verify_signature(scheme: str, secret: str, body: bytes, headers: dict[str, str]) -> bool:
     if not secret:
         return False
@@ -291,4 +333,4 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     return []
 
 
-__all__ = ["Inbound", "flatten_payload", "install", "search_bounded", "verify_signature"]
+__all__ = ["Inbound", "flatten_payload", "install", "search_bounded", "verify_signature", "webhook_facts"]
