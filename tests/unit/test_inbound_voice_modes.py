@@ -172,18 +172,18 @@ async def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     ws = tmp_path / "ws"
     ws.mkdir()
-    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="off"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ExecToolsConfig(sandbox="off"), writable=[ws])
     assert argv == ["bash", "-lc", "ls"] and not sandboxed
     monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
     monkeypatch.setattr(shell, "bwrap_status", lambda: "ok")
-    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ExecToolsConfig(sandbox="workspace"), writable=[ws])
     assert sandboxed and argv[0] == "/usr/bin/bwrap" and "--unshare-pid" in argv and argv[argv.index("--bind") + 1] == str(ws) and argv[-3:] == ["bash", "-lc", "ls"]
     # Patch the probe's answer, not only its cached value: ``_bwrap_state`` is re-probed for real
     # whenever ``_bwrap_probed_at`` is stale, so injecting the state alone made this test depend on
     # the machine — it asserted the fail-closed path only where bwrap genuinely does not work.
     monkeypatch.setattr(shell, "bwrap_status", lambda: "bwrap cannot create namespaces here")
     with pytest.raises(shell.SandboxUnavailable, match="configured .* but unavailable"):
-        await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+        await shell.sandbox_argv("ls", ExecToolsConfig(sandbox="workspace"), writable=[ws])
 
 
 def test_key_proxy_routing_and_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -276,7 +276,7 @@ async def test_sandbox_never_widens_to_the_working_directory(tmp_path: Path, mon
     ws.mkdir()
     monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
     monkeypatch.setattr(shell, "_bwrap_state", "ok")
-    argv, sandboxed = await shell.sandbox_argv("ls", Path("/"), ws, ExecToolsConfig(sandbox="workspace"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ExecToolsConfig(sandbox="workspace"), writable=[ws])
     assert sandboxed and argv.count("--bind") == 1 and argv[argv.index("--bind") + 1] == str(ws)
     with pytest.raises(ValueError):
         ExecToolsConfig(sandbox_extra_writable=["/"])

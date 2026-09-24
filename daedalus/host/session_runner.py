@@ -49,6 +49,7 @@ from daedalus.host import capabilities, launcher_bridge, prompts
 from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
 from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
+from daedalus.host.containment import Walls, walls_for, worktree_writable_paths
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.events import EventBus
 from daedalus.host.hooks import DaedalusHookManager
@@ -297,7 +298,8 @@ def _ensure_inbox(workspace: Path, folder: ProjectFolder | None) -> None:
     removable or network mount it is worse than that, because the real folder is shadowed by the
     empty one when it comes back. A folder the operator added is theirs to create.
     """
-    if folder is not None and not folder.reachable:
+    if folder is not None and (folder.readonly or not folder.reachable):
+        # A read-only folder is not ours to write either: no inbox, no note in its git exclude.
         return
     (workspace / "inbox").mkdir(parents=True, exist_ok=True)
     if folder is not None:
@@ -1453,6 +1455,10 @@ class SessionManager:
         """
         if state.project is not None and not state.project.settings.snapshots:
             return None
+        if state.services is not None and not state.services.workspace_writable:
+            # Nothing the session does can change a folder it may not write, and the snapshot store
+            # would be the one thing written into it.
+            return None
         limit = self.config.ops.checkpoint_max_gb
         try:
             # One walk answers both the size cap and the excludes; it used to be three.
@@ -1531,7 +1537,8 @@ class SessionManager:
                     raise NoModelConfigured
                 if self.shutting_down or self.recovering or (self.settings.state_dir / "dependencies" / "maintenance").exists():
                     raise RuntimeError("the bot is restarting; try again when it is ready")
-                if not state.workspace.is_dir() or not os.access(state.workspace, os.W_OK):
+                writes = state.services is None or state.services.workspace_writable
+                if not state.workspace.is_dir() or (writes and not os.access(state.workspace, os.W_OK)):
                     raise RuntimeError("the working directory is not writable")
                 rungs, _ = self.resolve_model(await self.live.load(session_id))
                 provider_id = rungs[0][0].endpoint.id if rungs else None
@@ -1898,14 +1905,26 @@ class SessionManager:
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
             writable=[q for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/") for q in worktree_writable_paths(Path(str(p)))],
-            # In a project, the workspace is also the wall: the sandbox binds it writable (it is
-            # ``workspace_dir``) and ``resolve`` refuses everything outside it and the worktrees above.
-            # For all but a session with a directory of its own that workspace IS the project's folder.
-            project_root=state.workspace if state.project is not None else None,
+            # The walls are what the sandbox binds writable and what ``resolve`` holds every path to:
+            # every local folder of the project to read, the ones not marked read-only to write, or
+            # the session's own directory alone when it has one.
+            walls=self.walls_of(state),
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services
         locator.register(services)
+
+    def walls_of(self, state: SessionState) -> Walls | None:
+        """The walls of a loaded session, from its project, its folder and its own directory."""
+        if state.project is None:
+            return None
+        metadata = state.session.metadata
+        return walls_for(
+            state.project,
+            folder_id=str(metadata.get("folder_id") or "") or None,
+            directory=str(metadata.get("directory") or "").strip() or None,
+            local_env=self.projects.local_env,
+        )
 
     async def open_writable(self, session_id: str, path: Path) -> None:
         """Let this session write to ``path`` under the sandbox from now on — a worktree it opened for its own changes."""
@@ -2032,8 +2051,14 @@ class SessionManager:
             if not state.workspace.is_dir():
                 name = state.project.name if state.project is not None else state.session.title
                 raise RuntimeError(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
-            if not os.access(state.workspace, os.W_OK):
+            # A session in a folder its walls make read-only reads and runs there without writing, so
+            # only a folder it may write has to be writable on disk; attachments, which land in the
+            # folder's inbox, have nowhere to go in one it may not.
+            writes = state.services is None or state.services.workspace_writable
+            if writes and not os.access(state.workspace, os.W_OK):
                 raise RuntimeError(f"the working directory for {state.session.title} is not writable")
+            if attachments and not writes:
+                raise RuntimeError(f"{state.workspace} is read-only for {state.session.title}, so attachments have nowhere to go; send them in a session that works in a writable folder")
             attachment_receipts: list[dict[str, str]] = []
             for item in attachments:
                 name = Path(item.name or item.path.name).name
@@ -4135,35 +4160,6 @@ class _LiveVision:
 
     def __bool__(self) -> bool:
         return self._manager._vision() is not None
-
-
-def worktree_writable_paths(worktree: Path) -> list[Path]:
-    """The worktree itself and the parts of its repository a commit there writes.
-
-    A worktree keeps its own HEAD, index and logs under the main repository's ``.git/worktrees/<name>``, and
-    shares that repository's object store and the refs of its branch. A commit writes to all of them, so a
-    session that may write its worktree gets those too — the shared object store (append-only by nature),
-    the ``agent/`` branch refs and their reflogs — and not the rest of the repository's state.
-    """
-    paths = [worktree]
-    dotgit = worktree / ".git"
-    try:
-        text = dotgit.read_text(encoding="utf-8") if dotgit.is_file() else ""
-    except OSError:
-        text = ""
-    if not text.startswith("gitdir:"):
-        return paths
-    gitdir = Path(text.split(":", 1)[1].strip())
-    if gitdir.parent.name != "worktrees":
-        return paths + [gitdir]
-    common = gitdir.parent.parent
-    for extra in (gitdir, common / "objects", common / "refs" / "heads" / "agent", common / "logs" / "refs" / "heads" / "agent"):
-        try:
-            extra.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        paths.append(extra)
-    return paths
 
 
 def _forget_persisted(state: SessionState) -> None:

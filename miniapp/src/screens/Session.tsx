@@ -1094,7 +1094,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 }}
               />
             }
-            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
+            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} upload folders={detail?.folders} home={detail?.folder_id} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
             jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} onOpenSession={onOpen} />}
           />
         )}
