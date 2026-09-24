@@ -31,13 +31,22 @@ DEFAULT_PORT = 8163
 DEFAULT_APP = f"http://127.0.0.1:{DEFAULT_PORT}/app"
 
 
+def folder(path: str, *, position: int = 0, label: str = "", env: str = "container", reach: str = "agents", reachable: bool = True, writable: bool | None = None, readonly: bool = False, is_git: bool = False) -> dict[str, object]:
+    """One folder of a project as ``/api/projects`` reports it."""
+    return {
+        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
+        "path": path, "label": label, "env": env, "is_git": is_git, "readonly": readonly, "position": position, "managed": False,
+        "reachable": reachable, "writable": (reachable and not readonly) if writable is None else writable, "reach": reach,
+    }
+
+
 def folders(path: str, *, reachable: bool = True, writable: bool | None = None) -> list[dict[str, object]]:
     """A project's folders as the host reports them, for a project whose one folder is ``path``."""
-    return [{
-        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
-        "path": path, "label": "", "env": "container", "is_git": False, "readonly": False, "position": 0, "managed": False,
-        "reachable": reachable, "writable": reachable if writable is None else writable,
-    }]
+    return [folder(path, reachable=reachable, writable=writable)]
+
+
+ENVIRONMENTS = {"local": "container", "available": ["container"], "host_bridge": False, "docker": True}
+"""Where a folder may live: a Docker installation without the host terminal bridge."""
 
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
@@ -68,6 +77,8 @@ GATES: dict[str, object] = {
     "/api/sessions": {"sessions": [], "projects": []},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
+    # The folder form asks where a folder may live before it offers the environment choice.
+    "/api/project-environments": ENVIRONMENTS,
     # The composer offers the voice page only where the installation has one; a harness has none.
     "/api/voice": {"enabled": False},
     # Terminal environments and the terminals in them: a container environment that works, a host
@@ -197,7 +208,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent

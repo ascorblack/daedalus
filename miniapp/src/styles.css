@@ -1955,6 +1955,25 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .project-pick .sub { font-size: var(--fs-12); }
 .menu-item.on { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .readonly-path { padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-1); color: var(--fg-2); font-size: var(--fs-13); word-break: break-all; }
+/* A folder is a card of its own inside the settings sheet: the name line carries the chips and the
+   remove button, the path wraps rather than truncates (a path cut in the middle names the wrong
+   folder), and the sentence under it says who can reach it. */
+.dir-list { display: flex; flex-direction: column; gap: 6px; }
+.dir-row { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--card); min-width: 0; }
+.dir-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dir-head .ic { color: var(--fg-3); flex: none; }
+.dir-name { font-size: var(--fs-14); font-weight: 600; min-width: 0; }
+.dir-head .iconbtn { margin-left: auto; flex: none; }
+.dir-path { font-size: var(--fs-12); word-break: break-all; }
+.dir-row .toggle-row { margin: 4px 0 0; }
+.dir-reach { font-size: var(--fs-12); }
+.badge.env-host { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
+.dir-form { margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); }
+.dir-form-foot { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.dir-add-open { margin-top: 8px; }
+.dir-mount { margin-top: 6px; }
+.project-ephemeral { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.project-ephemeral .sub { flex: 1 1 200px; }
 
 /* ── speech models: the picker for a recogniser that runs on this machine ────────────────── */
 /* Cards on a lighter step than the card they sit in, as everything raised here is: the list is
