@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from daedalus.extensions import orchestrator_ops, orchestrator_team
+from daedalus.extensions import orchestrator_ops, orchestrator_team, wakeups
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
 from daedalus.extensions.project_usage import ProjectUsage
+from daedalus.extensions.watches import describe as describe_watch
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
@@ -363,6 +364,7 @@ class Orchestrators:
             if old:
                 await self._retire(old, project_id, successor=session_id)
                 await self.manager.db.execute("UPDATE schedules SET target_session = ? WHERE target_session = ?", (session_id, old))
+            await wakeups.repoint(self.app, project_id, session_id)
             project = await self.project(project_id)
             await self._sync_model(project)
             await self.manager.projects.record(
@@ -418,6 +420,8 @@ class Orchestrators:
     async def _took_office(self, project: Project) -> None:
         self._models[project.id] = project.settings.orchestrator.model
         await self._sync_model(project)
+        # Wake-ups set before the orchestrator was switched off wake whoever holds the office now.
+        await wakeups.repoint(self.app, project.id, project.settings.orchestrator.session_id)
         # A new office starts from now: what happened to the project before it existed is not news.
         await self.manager.db.kv_set(CURSOR_KEY.format(project_id=project.id), self.manager.bus.head)
         await self.start_queue(project.id)
@@ -542,14 +546,14 @@ class Orchestrators:
         ]
         board_head = "Board: " + " · ".join(f"{name} {counts.get(name, 0)}" for name in ("doing", "review", "todo", "blocked", "done"))
 
-        wakeups = []
-        if session_id:
-            for row in await self.manager.db.fetchall("SELECT id, name, prompt, next_run_at, cron FROM schedules WHERE target_session = ? AND enabled = 1 ORDER BY next_run_at LIMIT 10", (session_id,)):
-                when = row["cron"] or (row["next_run_at"] or "")[:16].replace("T", " ")
-                wakeups.append(f"[{row['id']}] {when} \"{_one_line(row['prompt'] or row['name'], 80)}\"")
+        alarms = []
+        for wakeup in (await wakeups.wakeups(self.app, project.id))[:10]:
+            when = f"cron {wakeup['cron']} UTC" if wakeup["cron"] else self._moment(wakeup["next_run_at"] or "")
+            alarms.append(f"[{wakeup['id']}] {when} \"{_one_line(wakeup['note'], 80)}\"")
+        keeper = self.app.extensions.get("watches")
         watches = [
-            f"[{row['id']}] {_one_line(row['note'] or row['pattern_json'], 80)}"
-            for row in await self.manager.db.fetchall("SELECT id, note, pattern_json FROM watches WHERE project_id = ? AND enabled = 1 ORDER BY created_at LIMIT 10", (project.id,))
+            f"[{w.id}] {_one_line(describe_watch(w), 120)}" + (f" ({_one_line(w.note, 60)})" if w.note else "")
+            for w in (keeper.of_project(project.id, enabled_only=True) if keeper is not None else [])[:10]
         ]
 
         journal = [f"{self._clock(e.at)} {e.kind}: {_one_line(e.text, 160)}" for e in await self.manager.projects.journal(project.id, limit=JOURNAL_LINES)]
@@ -568,7 +572,7 @@ class Orchestrators:
             _section("Needs the operator", for_operator, cap=ASK_LINES, more="the requests list"),
             _section("Launch queue", queue_lines, cap=QUEUE_LINES, more="Team"),
             (board_lines, "Tasks"),
-            (["Wake-ups: " + (" · ".join(wakeups) or "none") + " · Watches: " + (" · ".join(watches) or "none")], ""),
+            (["Wake-ups: " + (" · ".join(alarms) or "none") + " · Watches: " + (" · ".join(watches) or "none")], ""),
             _section("Journal (latest)", journal, cap=JOURNAL_LINES, more="Journal"),
             ([await self._spend_line(project.id, now)], ""),
         ]
@@ -625,6 +629,16 @@ class Orchestrators:
             return at[:16]
         moment = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
         return moment.astimezone(self._zone()).strftime("%H:%M")
+
+    def _moment(self, at: str) -> str:
+        """A time of day when it is today in the operator's zone, with the date when it is not."""
+        try:
+            moment = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            return at[:16]
+        moment = (moment if moment.tzinfo else moment.replace(tzinfo=UTC)).astimezone(self._zone())
+        today = datetime.now(UTC).astimezone(self._zone()).date()
+        return moment.strftime("%H:%M" if moment.date() == today else "%Y-%m-%d %H:%M")
 
     # -- wake-ups -------------------------------------------------------------------------------------
 
@@ -826,7 +840,8 @@ class Orchestrators:
         if kind == "schedule.fired":
             return f"your wake-up [{p.get('schedule_id')}] fired: {_one_line(str(p.get('note') or p.get('name') or ''), 200)}"
         if kind == "watch.fired":
-            return f"watch [{p.get('watch_id')}] fired{': ' + _one_line(str(p.get('note')), 200) if p.get('note') else ''}"
+            said = " — ".join(_one_line(str(p[key]), 240) for key in ("detail", "note") if p.get(key))
+            return f"watch [{p.get('watch_id')}] fired{': ' + said if said else ''}"
         if kind in ("dispatch.created", "dispatch.message"):
             title = str(p.get("title") or "")
             text = _one_line(str(p.get("text") or ""), 600)

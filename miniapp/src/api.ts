@@ -692,6 +692,64 @@ export type Proposal = {
   created_at: string;
 };
 
+/** What a watch waits for: ``event`` and the fields that kind of event has (the host adds the ids and
+ *  the names it resolved, such as ``staff_id`` and ``terminal_title``). */
+export type WatchWhen = {
+  event: string;
+  staff?: string;
+  staff_id?: string;
+  minutes?: number;
+  task?: string;
+  task_id?: string;
+  to?: string;
+  terminal?: string;
+  terminal_title?: string;
+  regex?: string;
+  folder?: string;
+  folder_label?: string;
+  branch?: string;
+  provider?: string;
+  repo?: string;
+  conclusion?: string;
+};
+
+export type WatchThen = { action: "wake" | "tell" | "notify"; note?: string; staff?: string; text?: string; mode?: string; title?: string; level?: string };
+
+/** A project's watch (``/api/projects/{id}/watches``): "when X, do Y", bounded by a cooldown. */
+export type ProjectWatch = {
+  id: string;
+  project_id: string;
+  when: WatchWhen;
+  then: WatchThen;
+  cooldown_minutes: number;
+  once: boolean;
+  note: string;
+  created_by: "orchestrator" | "operator";
+  created_at: string;
+  last_fired_at: string | null;
+  fire_count: number;
+  enabled: boolean;
+  /** Why it switched itself off: "once", or the hourly limit, or a pattern the terminal refused. */
+  stopped: string;
+  last_error: string;
+  describe: string;
+};
+
+export type WatchList = { watches: ProjectWatch[]; max: number; min_cooldown_minutes: number; providers: string[] };
+
+/** A project orchestrator's wake-up (``/api/projects/{id}/wakeups``): a schedule that wakes it with a note. */
+export type Wakeup = {
+  id: string;
+  note: string;
+  cron: string | null;
+  at: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  enabled: boolean;
+  set_by: "orchestrator" | "operator";
+  created_at: string;
+};
+
 export type Schedule = {
   id: string;
   name: string;
@@ -703,7 +761,7 @@ export type Schedule = {
   next_run_at: string | null;
   last_run_at: string | null;
   last_summary: string | null;
-  kind: "agent" | "message" | "lazy";
+  kind: "agent" | "message" | "lazy" | "wake";
   target_session: string | null;
   created_by_session?: string | null;
   active_session_id?: string | null;

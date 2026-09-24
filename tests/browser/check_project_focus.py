@@ -119,7 +119,8 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(side.locator(".focus-spend")).to_have_text(words["spent"])
     for label in ("board", "brief", "wakeups", "journal", "folders"):
         expect(side.locator(".focus-row", has_text=words[label])).to_have_count(1)
-    expect(side.locator(".focus-row", has_text=words["wakeups"]).locator(".focus-row-meta")).to_have_text("1")
+    # One wake-up and one watch switched on; the watch that switched itself off is not counted.
+    expect(side.locator(".focus-row", has_text=words["wakeups"]).locator(".focus-row-meta")).to_have_text("2")
 
     # The orchestrator's chat: the events as a card, the steps as lines, the question as a card.
     chat = page.locator(".chat.in-project.orchestrator")
@@ -159,7 +160,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(page.locator(".panel .brief-card.notes")).to_contain_text(words["byorch"])
     assert f"/app/project/{PID}?" in page.url and "panel=brief" in page.url, page.url
     page.locator(".panel .panel-tab[data-tab='wakeups']").click()
-    expect(page.locator(".panel .wakeup-row")).to_contain_text(invented["wake.name"])
+    expect(page.locator(".panel .wakeup-row").first).to_contain_text(invented["wake.note"])
     page.locator(".panel .panel-tab[data-tab='folders']").click()
     expect(page.locator(".panel .focus-folder")).to_have_count(3)
 
