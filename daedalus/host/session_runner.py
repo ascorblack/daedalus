@@ -44,7 +44,16 @@ from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
-from daedalus.config import REASONING_EFFORTS, VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
+from daedalus.config import (
+    REASONING_EFFORTS,
+    STAFF_BLOCKED_TOOLS,
+    STAFF_ONLY_TOOLS,
+    VOICE_ONLY_TOOLS,
+    VOICE_TOOLS,
+    NoModelConfigured,
+    RuntimeConfig,
+    Settings,
+)
 from daedalus.host import capabilities, launcher_bridge, prompts
 from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
 from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
@@ -475,6 +484,9 @@ class SessionManager:
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
         self.idle_work = asyncio.Lock()
+        self.answer_claims: list[Callable[[str, str, str], Awaitable[str | None]]] = []
+        """``(session_id, tool_call_id, via) -> refusal`` asked before a pending question is answered;
+        a non-empty refusal (someone else answered first) stops the answer with that text."""
         self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
         """``(session_id, run_id)`` after a run was actually created — the point where a prompt hook's side effects may be committed."""
         self.shutting_down = False
@@ -603,7 +615,10 @@ class SessionManager:
 
     @staticmethod
     def _event_ids(state: SessionState) -> dict[str, str | None]:
-        return {"session_id": state.session.id, "project_id": state.project.id if state.project is not None else None}
+        # A staff member's session names the member too: whoever follows a project's team (the
+        # orchestrator, the team page) filters on the member, not on sessions it would have to look up.
+        staff_id = str(state.metadata.get("staff_id") or "") or None
+        return {"session_id": state.session.id, "project_id": state.project.id if state.project is not None else None, "staff_id": staff_id}
 
     async def _publish(self, state: SessionState, event_type: str, payload: dict[str, Any]) -> AppEvent | None:
         """Tell the bus about this session. A bus that cannot write must not end a run, so a failure is logged."""
@@ -888,6 +903,14 @@ class SessionManager:
     def workspace_of(self, session_id: str, metadata: dict[str, Any], project: Project | None) -> Path:
         """Return the session's project folder or its private directory inside that folder."""
         base = self.folder_of(session_id, metadata, project).path
+        worktree = str(metadata.get("worktree_cwd") or "").strip()
+        if worktree:
+            # A staff member in its own worktree works there: ``<folder>/.agents/worktrees/<name>``,
+            # or the same sub-folder of it when the project folder is a sub-folder of its repository.
+            target = Path(os.path.normpath(worktree))
+            if not target.is_absolute() or (base != target and base not in target.parents):
+                raise RuntimeError(f"session {session_id} has a worktree outside its project folder")
+            return target
         relative = str(metadata.get("directory") or "").strip()
         if not relative:
             return base
@@ -2091,11 +2114,17 @@ class SessionManager:
         if state.project is None:
             return None
         metadata = state.session.metadata
+        # A staff member is walled by its isolation: its own worktree (and what a commit there
+        # writes) instead of the checkout it was made from, or nothing writable at all.
+        isolation = str(metadata.get("staff_isolation") or "shared")
+        worktree = str(metadata.get("worktree") or "").strip()
         return walls_for(
             state.project,
             folder_id=str(metadata.get("folder_id") or "") or None,
             directory=str(metadata.get("directory") or "").strip() or None,
             local_env=self.projects.local_env,
+            isolation=isolation,
+            worktree=Path(worktree) if isolation == "worktree" else None,
         )
 
     async def open_writable(self, session_id: str, path: Path) -> None:
@@ -2187,6 +2216,7 @@ class SessionManager:
         attachments: Sequence[Attachment] = (),
         *,
         steer: bool = False,
+        follow_up: bool = False,
         as_answer: bool = True,
         origin: str = "operator",
         client_message_id: str | None = None,
@@ -2197,6 +2227,8 @@ class SessionManager:
         ``origin`` names who wrote the text (``operator``, or a system source such as
         ``reminder``); the transcript and the Mini App show it accordingly. ``via`` is the front it
         came through, which a free-text answer to a pending question reports as where it was answered.
+        While a run is active the text is a steer unless ``follow_up`` asks for it to wait for the end
+        of the turn (or the session's ``queue_mode`` says so); ``steer`` wins over both.
         """
         state = await self.get_state(session_id)
         if state is None:
@@ -2316,7 +2348,7 @@ class SessionManager:
             if state.running:
                 # A message sent while the agent works is a steer: the core places it before the
                 # next model call (after the current tool batch). follow_up would wait for the end.
-                kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
+                kind = "follow_up" if not steer and (follow_up or state.metadata.get("queue_mode") == "follow_up") else "steer"
                 queued = {**new_queued_prompt(kind, body).to_dict(), "origin": origin, "queued_at": datetime.now(UTC).isoformat()}
                 if client_message_id:
                     queued["id"] = client_message_id
@@ -2461,11 +2493,15 @@ class SessionManager:
         body = (text.strip() + "\n\n" if text.strip() else "") + "Attached files:\n" + "\n".join(lines)
         return body, image_refs
 
-    async def answer(self, session_id: str, answers: list[dict[str, Any]], *, via: str) -> str:
+    async def answer(self, session_id: str, answers: list[dict[str, Any]], *, via: str, source: str = "user", claimed: bool = False) -> str:
         """Resume a run paused on AskUser with the operator's answers.
 
         ``via`` says where it was answered (app, telegram, timeout, cli, …): the other fronts retire
-        their copy of the question when they hear it was answered somewhere else.
+        their copy of the question when they hear it was answered somewhere else. ``source`` is who
+        answered, as the model reads it in the tool result (``user``, or ``orchestrator`` for a staff
+        member's question). Before anything changes, every answer claim is asked whether this answer
+        is the first (``claimed`` says the caller already won that race itself); a question that has a
+        request row elsewhere is answered once, by whoever updates that row first.
         """
         state = await self.get_state(session_id)
         if state is None or state.pending is None or state.engine is None:
@@ -2473,6 +2509,13 @@ class SessionManager:
         if state.running:
             raise RuntimeError("the run is still finishing; try again in a moment")
         pending = state.pending
+        if not claimed:
+            for claim in self.answer_claims:
+                refusal = await claim(session_id, pending.tool_call_id, via)
+                if refusal:
+                    raise RuntimeError(refusal)
+            if state.pending is not pending:
+                raise RuntimeError("the question was answered meanwhile")
         questions = [q.get("question", "") for q in pending.payload.get("questions", [])]
         shaped = []
         for index, answer in enumerate(answers):
@@ -2483,7 +2526,7 @@ class SessionManager:
                     "custom": answer.get("custom"),
                 }
             )
-        result = json.dumps({"answers": shaped, "source": "user"}, ensure_ascii=False)
+        result = json.dumps({"answers": shaped, "source": source}, ensure_ascii=False)
         state.engine.history.append(
             Message(
                 role=MessageRole.tool,
@@ -3625,6 +3668,11 @@ class SessionManager:
         """Whether this is the voice session: the operator's spoken conversation with the concierge."""
         return bool(state.metadata.get("voice"))
 
+    @staticmethod
+    def is_staff(state: SessionState) -> bool:
+        """Whether this session is a staff member's, working on a task of its project's team."""
+        return bool(state.metadata.get("staff_session_id"))
+
     def _local_blocked_tools_for(self, state: SessionState) -> set[str]:
         """Restrictions selected directly for this session, before its parent narrows them."""
         known = {t.name for t in self.tools.list_all()}
@@ -3633,6 +3681,10 @@ class SessionManager:
         # tools that hand work over are its alone. Neither rule goes through a mode, so editing one cannot
         # give a session being spoken to a shell, nor give a working agent a second way to spawn one.
         blocked |= (known - set(VOICE_TOOLS)) if self.is_voice(state) else (known & set(VOICE_ONLY_TOOLS))
+        # A staff member asks the orchestrator rather than the operator and works on its task rather
+        # than starting agents, schedules or loops; its two reporting tools are its alone. Beside the
+        # voice rule and for the same reason: no mode edit can hand either side the other's tools.
+        blocked |= (known & set(STAFF_BLOCKED_TOOLS)) if self.is_staff(state) else (known & set(STAFF_ONLY_TOOLS))
         mode = self.mode_for(state)
         if mode is not None:
             if mode.tools_only:
@@ -3860,7 +3912,13 @@ class SessionManager:
                 logger.warning("policy %s %s for %s in session %s: %s", decision.action, decision.rule, tool, session_id, decision.reason)
             return decision
 
-        return PolicyAdapter(decide)
+        def ask_hint() -> str | None:
+            # A staff member's request goes to its orchestrator, not to the operator, and is answered
+            # by a message; retrying before then is the same request again.
+            state = self._states.get(session_id)
+            return prompts.STAFF_POLICY_HINT if state is not None and self.is_staff(state) else None
+
+        return PolicyAdapter(decide, ask_hint=ask_hint)
 
     async def flush_background(self) -> None:
         """Wait for the fire-and-forget writes (timing rows, egress rows, grant updates) to land."""
