@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
@@ -39,9 +40,9 @@ type Publisher interface {
 	Flush(terminalID string)
 }
 
-// Answerer produces the reply to a terminal query from the emulator's state, or nil to stay silent.
-// A build without one answers nothing.
-type Answerer func(q scan.Mark, e emulator.Emulator) []byte
+// Answerer produces the reply to a terminal query from the emulator's state and what is known of the
+// person whose screen sets the size, or nil to stay silent. A build without one answers nothing.
+type Answerer func(q scan.Mark, e emulator.Emulator, o answer.Owner) []byte
 
 // Deps are what every terminal shares.
 type Deps struct {
@@ -114,6 +115,7 @@ type Terminal struct {
 	vt     chan vtRequest
 	vtQuit chan struct{}
 	vtOnce sync.Once
+	fed    int64 // the output offset the emulator has been fed up to; the emulator goroutine's own
 
 	readerDone chan struct{}
 	done       chan struct{} // closed once the exit is recorded and published
@@ -173,7 +175,7 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 	t.in = newInput(proc.Master, deps.Clock, spec.InputIdle, t.ring.Head)
 	t.in.onDelivered = t.delivered
 	emu := deps.Emulator(emulator.Options{Cols: spec.Cols, Rows: spec.Rows, ScrollbackLines: config.ScrollbackLines,
-		GraphemeClusters: true})
+		ScrollbackBytes: config.ScrollbackBytes, GraphemeClusters: true})
 	// Published before the reader starts, so no event of the terminal's output can precede it.
 	deps.Events.Publish("terminal.created", t.ID, map[string]any{
 		"pid": t.Pid, "argv": t.Argv, "cwd": spec.Cwd, "labels": t.Labels, "launch_id": t.LaunchID,
@@ -290,6 +292,7 @@ func (t *Terminal) serve(e emulator.Emulator, req vtRequest, before emulator.Mod
 	if at < len(req.data) {
 		e.Feed(req.data[at:])
 	}
+	t.fed = req.base + int64(len(req.data))
 	if modesMayChange {
 		now := e.Modes()
 		if modesInfo(now) != modesInfo(before) {
@@ -345,7 +348,10 @@ func (t *Terminal) onMark(e emulator.Emulator, m scan.Mark, seq int64) {
 		}
 	case scan.KindQuery:
 		if t.deps.Answer != nil {
-			if reply := t.deps.Answer(m, e); len(reply) > 0 {
+			t.mu.Lock()
+			owner := answer.Owner{PxW: t.pxW, PxH: t.pxH}
+			t.mu.Unlock()
+			if reply := t.deps.Answer(m, e, owner); len(reply) > 0 {
 				t.in.Reply(reply)
 			}
 		}
@@ -503,6 +509,17 @@ func (t *Terminal) Keyboard() KeyboardState { return t.in.Keyboard() }
 // SetKeyboard changes who holds the keyboard.
 func (t *Terminal) SetKeyboard(owner string, ttl time.Duration) KeyboardState {
 	return t.in.SetKeyboard(owner, ttl)
+}
+
+// SetTheme gives the emulator the colours of the person looking at the terminal, which colour
+// queries are answered with unless the program set its own. It does nothing for an emulator without
+// a screen.
+func (t *Terminal) SetTheme(th emulator.Theme) {
+	_ = t.WithEmulator(func(e emulator.Emulator) {
+		if q, ok := e.(emulator.Querier); ok {
+			q.SetTheme(th)
+		}
+	})
 }
 
 // Resize applies a size as the host, which becomes the size owner.

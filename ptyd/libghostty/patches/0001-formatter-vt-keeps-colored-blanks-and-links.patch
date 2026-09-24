@@ -1,0 +1,281 @@
+formatter: keep background-colored rows, unstyled blanks and hyperlinks in VT output
+
+Three defects of the VT formatter, found by replaying its output into a fresh terminal and comparing
+the screens cell by cell:
+
+- A row whose only content is background color (erased with a colored pen, as every full-screen
+  program with a colored background does) was treated as blank and dropped.
+- A run of blank cells was written while the previous cell's style was still active, so the blanks
+  after an inverse vertical bar came out inverse.
+- Hyperlinks were emitted for HTML only; VT output lost every OSC 8 link except the cursor's.
+
+Carried by ptyd against the pinned commit until it is merged upstream.
+
+diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
+index 4feedda..feec515 100644
+--- a/src/terminal/formatter.zig
++++ b/src/terminal/formatter.zig
+@@ -1215,8 +1215,10 @@ pub const PageFormatter = struct {
+ 
+             // If this row is blank, accumulate to avoid a bunch of extra
+             // work later. If it isn't blank, make sure we dump all our
+-            // blanks.
+-            if (!Cell.hasTextAny(cells_subset)) {
++            // blanks. For styled formats a row whose only content is
++            // background color (erased with a colored pen) or styled
++            // empty cells is not blank: dropping it loses the color.
++            if (!rowHasContent(emit, cells_subset)) {
+                 blank_rows += 1;
+                 continue;
+             }
+@@ -1361,6 +1363,24 @@ pub const PageFormatter = struct {
+                 // This cell is not blank. If we have accumulated blank cells
+                 // then we want to emit them now.
+                 if (blank_cells > 0) {
++                    // Blank cells are unstyled. Writing them while the
++                    // previous cell's style is still active would paint
++                    // them with it (an inverse bar followed by blanks
++                    // would turn the blanks inverse).
++                    if (comptime formatStyled(emit)) {
++                        if (!style.default()) {
++                            try self.formatStyleClose(emit, writer);
++                            style = .{};
++                            style_id = 0;
++                        }
++                    }
++                    if (comptime emit == .vt) {
++                        if (current_hyperlink_id != null) {
++                            try self.formatHyperlinkClose(emit, writer);
++                            current_hyperlink_id = null;
++                        }
++                    }
++
+                     try writer.splatByteAll(' ', blank_cells);
+ 
+                     if (self.point_map) |*map| try self.appendBlankPoints(
+@@ -1456,10 +1476,9 @@ pub const PageFormatter = struct {
+ 
+                 // Hyperlink state
+                 hyperlink: {
+-                    // We currently only emit hyperlinks for HTML. In the
+-                    // future we can support emitting OSC 8 hyperlinks for
+-                    // VT output as well.
+-                    if (comptime emit != .html) break :hyperlink;
++                    // Hyperlinks are emitted for HTML (anchors) and VT
++                    // (OSC 8); plain text has no way to carry them.
++                    if (comptime emit == .plain) break :hyperlink;
+ 
+                     // Get the hyperlink ID. This ID is our internal ID,
+                     // not necessarily the OSC8 ID.
+@@ -1484,17 +1503,20 @@ pub const PageFormatter = struct {
+                     current_hyperlink_id = link_id;
+ 
+                     // Emit the opening hyperlink tag
+-                    const uri = uri: {
+-                        const link = self.page.hyperlink_set.get(
+-                            self.page.memory,
+-                            link_id,
+-                        );
+-                        break :uri link.uri.offset.ptr(self.page.memory)[0..link.uri.len];
++                    const link = self.page.hyperlink_set.get(
++                        self.page.memory,
++                        link_id,
++                    );
++                    const uri = link.uri.offset.ptr(self.page.memory)[0..link.uri.len];
++                    const explicit_id: ?[]const u8 = switch (link.id) {
++                        .explicit => |id| id.offset.ptr(self.page.memory)[0..id.len],
++                        .implicit => null,
+                     };
+                     try self.formatHyperlinkOpen(
+                         emit,
+                         writer,
+                         uri,
++                        explicit_id,
+                     );
+ 
+                     // If we have a point map, we map the hyperlink to
+@@ -1505,6 +1527,7 @@ pub const PageFormatter = struct {
+                             emit,
+                             &discarding.writer,
+                             uri,
++                            explicit_id,
+                         );
+                         map.map.appendNTimes(
+                             map.alloc,
+@@ -1555,7 +1578,7 @@ pub const PageFormatter = struct {
+         // If the style is non-default, we need to close our style tag.
+         if (!style.default()) try self.formatStyleClose(emit, writer);
+ 
+-        // Close any open hyperlink for HTML output
++        // Close any open hyperlink (HTML anchor or VT OSC 8)
+         if (current_hyperlink_id != null) try self.formatHyperlinkClose(emit, writer);
+ 
+         // Close the monospace wrapper for HTML output
+@@ -1580,6 +1603,18 @@ pub const PageFormatter = struct {
+         return .{ .rows = blank_rows, .cells = blank_cells };
+     }
+ 
++    /// Whether a row has anything to format. Plain text keeps only text;
++    /// styled formats also keep cells that are empty but colored or
++    /// styled, such as the cells an erase leaves behind with a colored
++    /// background.
++    fn rowHasContent(comptime emit: Format, cells: []const Cell) bool {
++        if (comptime !formatStyled(emit)) return Cell.hasTextAny(cells);
++        for (cells) |*cell| {
++            if (!cell.isEmpty() or cell.hasStyling()) return true;
++        }
++        return false;
++    }
++
+     /// Fast path for writing runs of simple cells: single-codepoint cells
+     /// that require no style or hyperlink handling. Output bytes are
+     /// batched into a stack buffer to avoid per-cell writer dispatch.
+@@ -1627,6 +1662,17 @@ pub const PageFormatter = struct {
+         var len: usize = 0;
+         var pending: usize = blank_cells.*;
+ 
++        // Blanks carried in from the slow path are unstyled and unlinked;
++        // the slow path closes the style and the link before writing them.
++        if (pending > 0) {
++            if (comptime formatStyled(emit)) {
++                if (run_style_id != 0) return 0;
++            }
++            if (comptime emit == .vt) {
++                if (run_hyperlink_id != null) return 0;
++            }
++        }
++
+         var i: usize = 0;
+         while (i < cells.len) : (i += 1) {
+             const cell = &cells[i];
+@@ -1679,7 +1725,7 @@ pub const PageFormatter = struct {
+             // cell must belong to the currently open hyperlink (or none).
+             // Transitions take the slow path. This is checked after blank
+             // accounting because blank cells never touch hyperlink state.
+-            if (comptime emit == .html) {
++            if (comptime emit != .plain) {
+                 if (cell.hyperlink) {
+                     const run_id = run_hyperlink_id orelse break;
+                     const cell_id = self.page.lookupHyperlink(cell) orelse break;
+@@ -2078,9 +2124,18 @@ pub const PageFormatter = struct {
+         comptime emit: Format,
+         writer: *std.Io.Writer,
+         uri: []const u8,
++        explicit_id: ?[]const u8,
+     ) std.Io.Writer.Error!void {
+         switch (emit) {
+-            .plain, .vt => unreachable,
++            .plain => unreachable,
++
++            .vt => if (explicit_id) |id| try writer.print(
++                "\x1b]8;id={s};{s}\x1b\\",
++                .{ id, uri },
++            ) else try writer.print(
++                "\x1b]8;;{s}\x1b\\",
++                .{uri},
++            ),
+ 
+             // layout since we're primarily using it as a CSS wrapper.
+             .html => {
+@@ -2102,7 +2157,8 @@ pub const PageFormatter = struct {
+     ) std.Io.Writer.Error!void {
+         const str: []const u8 = switch (emit) {
+             .html => "</a>",
+-            .plain, .vt => return,
++            .vt => "\x1b]8;;\x1b\\",
++            .plain => return,
+         };
+ 
+         try writer.writeAll(str);
+@@ -6804,6 +6860,91 @@ test "Page VT background color on trailing blank cells" {
+     try testing.expect(has_red_bg_line1);
+ }
+ 
++test "Page VT keeps a row that only has background color" {
++    // A row erased with a colored pen has no text, only background color.
++    // It must not be treated as blank and dropped.
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++
++    var builder: std.Io.Writer.Allocating = .init(alloc);
++    defer builder.deinit();
++
++    var t = try Terminal.init(io, alloc, .{ .cols = 10, .rows = 4 });
++    defer t.deinit(alloc);
++
++    var s = t.vtStream();
++    defer s.deinit();
++    s.nextSlice("top\r\n\x1b[44m\x1b[K\x1b[0m\r\nbottom");
++
++    const page = t.screens.active.pages.pages.last.?.page();
++    var formatter: PageFormatter = .init(page, .vt);
++    try formatter.format(&builder.writer);
++    const output = builder.writer.buffered();
++
++    // The middle row carries the blue background between the two text rows.
++    const first = std.mem.indexOf(u8, output, "\r\n") orelse return error.TestUnexpectedResult;
++    const last = std.mem.lastIndexOf(u8, output, "\r\n") orelse return error.TestUnexpectedResult;
++    try testing.expect(first != last);
++    const middle = output[first..last];
++    try testing.expect(std.mem.indexOf(u8, middle, "\x1b[44m") != null or
++        std.mem.indexOf(u8, middle, "\x1b[48;5;4m") != null);
++}
++
++test "Page VT writes blanks after a styled cell unstyled" {
++    // An inverse cell followed by blank cells and then text: the blanks
++    // must not be written while the inverse style is still active.
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++
++    var builder: std.Io.Writer.Allocating = .init(alloc);
++    defer builder.deinit();
++
++    var t = try Terminal.init(io, alloc, .{ .cols = 20, .rows = 2 });
++    defer t.deinit(alloc);
++
++    var s = t.vtStream();
++    defer s.deinit();
++    s.nextSlice("\x1b[7m|\x1b[0m\x1b[1;10Hx");
++
++    const page = t.screens.active.pages.pages.last.?.page();
++    var formatter: PageFormatter = .init(page, .vt);
++    try formatter.format(&builder.writer);
++    const output = builder.writer.buffered();
++
++    // The reset comes before the run of blanks.
++    const bar = std.mem.indexOf(u8, output, "|") orelse return error.TestUnexpectedResult;
++    const blanks = std.mem.indexOf(u8, output, "        x") orelse return error.TestUnexpectedResult;
++    try testing.expect(std.mem.indexOf(u8, output[bar..blanks], "\x1b[0m") != null);
++}
++
++test "Page VT with hyperlinks" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++
++    var builder: std.Io.Writer.Allocating = .init(alloc);
++    defer builder.deinit();
++
++    var t = try Terminal.init(io, alloc, .{ .cols = 20, .rows = 2 });
++    defer t.deinit(alloc);
++
++    var s = t.vtStream();
++    defer s.deinit();
++    s.nextSlice("a\x1b]8;;http://example.com\x1b\\link\x1b]8;;\x1b\\ b\x1b]8;id=x;http://other\x1b\\c\x1b]8;;\x1b\\");
++
++    const page = t.screens.active.pages.pages.last.?.page();
++    var formatter: PageFormatter = .init(page, .vt);
++    try formatter.format(&builder.writer);
++    const output = builder.writer.buffered();
++
++    try testing.expectEqualStrings(
++        "a\x1b]8;;http://example.com\x1b\\link\x1b]8;;\x1b\\ b\x1b]8;id=x;http://other\x1b\\c\x1b]8;;\x1b\\",
++        output,
++    );
++}
++
+ test "Page HTML with hyperlinks" {
+     const testing = std.testing;
+     const alloc = testing.allocator;

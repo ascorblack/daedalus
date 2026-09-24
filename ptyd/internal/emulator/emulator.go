@@ -36,6 +36,10 @@ type Options struct {
 	// ScrollbackLines bounds the history. Lines, not bytes: a byte cap silently holds a few hundred
 	// lines of coloured output.
 	ScrollbackLines int
+	// ScrollbackBytes bounds the memory the history may take, so that the lines of a 500-column
+	// terminal full of distinct styles cannot grow one terminal without limit. It is set well above
+	// what ScrollbackLines of ordinary output needs, so the line count is what normally applies.
+	ScrollbackBytes int
 	// GraphemeClusters starts the emulator with grapheme clustering on (mode 2027), which is how the
 	// browser's width provider measures text. With it off, the two would disagree about the width of
 	// every emoji sequence and every combining cluster, and a snapshot would misplace the rest of the
@@ -57,7 +61,7 @@ type Cursor struct {
 // Mouse is the mouse reporting the application asked for.
 type Mouse struct {
 	Mode     int // 0 off, else 9, 1000, 1002 or 1003
-	Encoding int // 0 default, else 1005, 1006 or 1015
+	Encoding int // 0 default, else 1005, 1006, 1015 or 1016
 }
 
 // Modes are the terminal modes that change what the daemon sends or reports.
@@ -99,4 +103,59 @@ type Run struct {
 	U   bool   `json:"u,omitempty"`
 	D   bool   `json:"d,omitempty"`
 	Inv bool   `json:"inv,omitempty"`
+}
+
+// Querier is what an emulator with a screen also knows: the state terminal queries ask about beyond
+// Cursor and Modes. The query answerer uses it when the emulator has it and falls back to Cursor and
+// Modes when not.
+type Querier interface {
+	// ModeReport is the state of a mode as DECRQM reports it: known is false for a mode the emulator
+	// does not have.
+	ModeReport(mode int, ansi bool) (set, known bool)
+	// Pen is the current graphic rendition as SGR parameters ("0;1;38;5;3"), what DECRQSS m reports.
+	Pen() string
+	// ScrollRegion is the top and bottom margins, 1-based and inclusive.
+	ScrollRegion() (top, bottom int)
+	// CursorShape is the DECSCUSR value in effect (1 blinking block … 6 steady bar).
+	CursorShape() int
+	// Color is the colour in effect for a slot, including what the program set with OSC 4/10/11/12.
+	Color(slot ColorSlot, index int) (RGB, bool)
+	// SetTheme sets the colours a program gets when it did not set its own: the ones the person
+	// looking at the terminal sees.
+	SetTheme(Theme)
+}
+
+// ColorSlot names a colour a program can ask about.
+type ColorSlot int
+
+const (
+	ColorPalette    ColorSlot = iota // OSC 4, index 0..255
+	ColorForeground                  // OSC 10
+	ColorBackground                  // OSC 11
+	ColorCursor                      // OSC 12
+)
+
+// RGB is a colour.
+type RGB struct{ R, G, B uint8 }
+
+// Theme is the colours of the person looking at a terminal. Palette may be shorter than 16 or empty;
+// the entries it lacks keep their defaults.
+type Theme struct {
+	Foreground, Background, Cursor RGB
+	Palette                        []RGB
+}
+
+// DefaultTheme is the app's dark palette (FALLBACK in miniapp/src/terminal/theme.ts). A terminal
+// answers colour queries with it until it learns the colours of the person looking at it; a host
+// test keeps the two copies equal.
+var DefaultTheme = Theme{
+	Foreground: RGB{0xed, 0xed, 0xef},
+	Background: RGB{0x09, 0x09, 0x0b},
+	Cursor:     RGB{0x2d, 0xd4, 0xbf},
+	Palette: []RGB{
+		{0x1c, 0x1c, 0x1f}, {0xf0, 0x62, 0x5d}, {0x5f, 0xd6, 0x8a}, {0xe8, 0xb4, 0x4c},
+		{0x7d, 0xb4, 0xff}, {0xc7, 0x92, 0xea}, {0x2d, 0xd4, 0xbf}, {0xc8, 0xc9, 0xce},
+		{0x5c, 0x5d, 0x66}, {0xff, 0x8a, 0x85}, {0x8b, 0xe9, 0xa8}, {0xf5, 0xcf, 0x7a},
+		{0xa6, 0xcc, 0xff}, {0xdd, 0xb3, 0xf5}, {0x7e, 0xe8, 0xd9}, {0xed, 0xed, 0xef},
+	},
 }

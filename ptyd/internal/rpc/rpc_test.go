@@ -37,7 +37,10 @@ type fixture struct {
 
 // start runs a daemon in-process on a fresh run directory, with the fake emulator so a test can
 // script the modes that keys and pastes depend on.
-func start(t *testing.T) *fixture {
+func start(t *testing.T) *fixture { return startWith(t, nil, nil) }
+
+// startWith runs the daemon with the given emulator and answerer instead of the fake.
+func startWith(t *testing.T, factory emulator.Factory, answerer term.Answerer) *fixture {
 	t.Helper()
 	base, err := os.MkdirTemp("", "ptyd")
 	if err != nil {
@@ -56,12 +59,15 @@ func start(t *testing.T) *fixture {
 	}
 	evlog := events.NewLog(1000)
 	var last *fake.Emulator
-	registry := term.NewRegistry(term.Deps{
-		Emulator: fake.Factory(func(e *fake.Emulator) {
+	if factory == nil {
+		factory = fake.Factory(func(e *fake.Emulator) {
 			f.mu.Lock()
 			last = e
 			f.mu.Unlock()
-		}),
+		})
+	}
+	registry := term.NewRegistry(term.Deps{
+		Emulator: factory, Answer: answerer,
 		Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
 		Clock: term.RealClock{}, Log: log, KillGrace: 200 * time.Millisecond,
 	}, 4)
