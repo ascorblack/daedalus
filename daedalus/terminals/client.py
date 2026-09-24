@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.terminals import wire
-from daedalus.terminals.endpoint import EndpointMissing, read_endpoint
+from daedalus.terminals.endpoint import EndpointMissing, permission_detail, read_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,8 @@ class PtydClient:
                 reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(endpoint.path), limit=wire.MAX_PAYLOAD + 64), HANDSHAKE_TIMEOUT)
             else:
                 reader, writer = await asyncio.wait_for(asyncio.open_connection(endpoint.host, endpoint.port, limit=wire.MAX_PAYLOAD + 64), HANDSHAKE_TIMEOUT)
+        except PermissionError as exc:
+            raise Unavailable(self.env, "permission_denied", permission_detail(endpoint.path or self.run_dir, exc)) from None
         except (OSError, TimeoutError) as exc:
             # The endpoint file says a daemon listens and nothing answers: it died without its
             # shutdown (a killed container), and the next one will rewrite the file.

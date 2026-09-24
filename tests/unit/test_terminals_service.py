@@ -156,6 +156,31 @@ async def test_an_exit_event_ends_the_row_with_its_code_and_keeps_the_last_scree
     assert shown["preview"] == [[{"t": "bye"}]]
 
 
+async def test_a_shells_commands_are_mirrored_and_listed(service: Terminals, daemon: FakePtyd, db: Database) -> None:
+    shell = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd="/tmp"))
+    program = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd="/tmp", argv=["cat"]))
+    # A shell starts with its integration; a program given as argv is started exactly as asked.
+    assert shell["shell_integration"] is True and program["shell_integration"] is False
+    assert (await _row(db, shell["id"]))["shell_integration"] == 1 and (await _row(db, program["id"]))["shell_integration"] == 0
+    with pytest.raises(Unsupported, match="reports no commands"):
+        await service.commands(program["id"])
+    daemon.terminals[shell["id"]].commands = [
+        {"n": 1, "command": "make", "cwd": "/tmp", "exit_code": 2, "finished_at": "x"},
+        {"n": 2, "command": "sleep 9", "cwd": "/tmp", "exit_code": None, "finished_at": None},
+    ]
+    assert [c["n"] for c in await service.commands(shell["id"], last=1)] == [2]
+    # A command's end is written down with how long it ran, so the list shows it after the daemon forgot.
+    daemon.emit("terminal.command", shell["id"], {"phase": "end", "n": 1, "exit_code": 2, "command": "make", "duration_ms": 1500, "seq": 10})
+
+    async def last_command() -> Any:
+        row = await _row(db, shell["id"])
+        return json.loads(row["last_command_json"])["duration_ms"] if row["last_command_json"] else None
+
+    await wait_until(last_command, 1500)
+    stored = json.loads((await _row(db, shell["id"]))["last_command_json"])
+    assert stored["command"] == "make" and stored["exit_code"] == 2
+
+
 async def _status(db: Database, terminal_id: str) -> str:
     row = await db.fetchone("SELECT status FROM terminals WHERE id = ?", (terminal_id,))
     return str(row["status"]) if row else ""
@@ -422,11 +447,22 @@ async def test_the_load_reports_what_runs_and_learns_a_cost_per_profile(service:
     await wait_until(lambda: _profiles(service), 2)
     load = await service.load(cap=4)
     assert load["running"] == 2 and load["cap"] == 20
-    assert load["used"]["rss_bytes"] == 510 << 20
+    # ptyd's own memory is counted with the terminals: it holds their emulators and output rings.
+    assert load["used"]["rss_bytes"] == (510 << 20) + (30 << 20) and load["used"]["daemon_rss_bytes"] == 30 << 20
+    assert load["envs"][0]["rss_bytes"] == 510 << 20 and load["envs"][0]["daemon_rss_bytes"] == 30 << 20
+    # Only the terminals' own samples teach the per-profile cost; the daemon's share is not in them.
     assert load["profiles"]["harness:claude"]["rss_bytes"] == 500 << 20
     assert load["likely"]["basis"] == "running" and load["likely"]["rss_bytes"] == 255 << 20
     projection = load["projection"]
-    assert projection["cap"] == 4 and projection["terminals_rss_bytes"] == (510 << 20) + 2 * (255 << 20)
+    assert projection["cap"] == 4 and projection["terminals_rss_bytes"] == (540 << 20) + 2 * (255 << 20)
+
+
+async def test_a_daemon_that_reports_no_process_of_its_own_adds_nothing(service: Terminals, daemon: FakePtyd) -> None:
+    # An older daemon sends no "daemon" block; the sum is then the terminals' alone.
+    await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd="/tmp"))
+    daemon.daemon = {}
+    load = await service.load()
+    assert load["used"]["rss_bytes"] == 50 << 20 and load["used"]["daemon_rss_bytes"] == 0
 
 
 async def _profiles(service: Terminals) -> int:

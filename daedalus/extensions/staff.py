@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
@@ -48,10 +48,12 @@ from daedalus.staff_runtime import (
 )
 from daedalus.stores.projects import Project, ProjectFolder
 from daedalus.stores.staff import ACTIVE_STATUSES, HARNESS_NAMES, Ask, Staff, StaffBusy, StaffError, StaffSession
+from daedalus.terminals.bridge import HostBridge
 
 if TYPE_CHECKING:
     from daedalus.app import Application
     from daedalus.host.session_runner import SessionManager
+    from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +141,9 @@ class Team:
         assert app.manager is not None
         self.manager: SessionManager = app.manager
         self.runtimes: dict[str, StaffRuntime] = {"daedalus": DaedalusStaffRuntime(self.manager)}
-        self.worktrees = StaffWorktrees(self.manager.projects.local_env)
+        # A host folder in Docker is worked in through the host terminal bridge; the service is
+        # looked up per call, so a bridge installed after the start is used without a restart.
+        self.worktrees = StaffWorktrees(self.manager.projects.local_env, host=HostBridge(lambda: cast("Terminals | None", app.extensions.get("terminals"))))
         self.ingress = Ingress(self)
         self._capacity = capacity
         """A fixed :class:`MachineCapacity` for tests; otherwise the terminals service is asked each time."""
@@ -429,8 +433,11 @@ class Team:
         return LiveSession(member, refreshed or session)
 
     def permission_level(self, project: Project) -> str:
+        """The permission level a command-line member starts with. ``full`` autonomy starts it exactly
+        like ``normal``: the operator decided that full means the orchestrator answers the requests
+        itself, not that the agent stops asking — a bypassed permission is one nobody sees."""
         autonomy = project.settings.orchestrator.autonomy if project.settings.orchestrator.enabled else "ask"
-        return {"ask": "ask", "normal": "edits", "full": "all"}.get(autonomy, "ask")
+        return {"ask": "ask", "normal": "edits", "full": "edits"}.get(autonomy, "ask")
 
     async def brief(self, member: Staff, project: Project, folder: ProjectFolder, worktree: Worktree | None) -> str:
         if worktree is not None:
@@ -538,7 +545,7 @@ class Team:
             env = str(row["env"]) if row is not None else env
         return Worktree(path=path, branch=session.branch, base_ref=session.base_ref or "HEAD", folder=path.parent.parent.parent, env=env)
 
-    async def release(self, member: Staff, *, keep_worktree: bool = True, reason: str = "released") -> bool:
+    async def release(self, member: Staff, *, keep_worktree: bool = True, reason: str = "released", by: str = "operator") -> bool:
         """End the member's live session: its runtime stops it, the row ends, the task goes back to todo.
 
         The worktree stays unless asked otherwise, and even then an unmerged branch is kept: it is the
@@ -547,11 +554,12 @@ class Team:
         live = await self.live_of(member)
         if live is None:
             return False
-        await self._end(live, reason, stop=True)
+        await self._end(live, reason, stop=True, by=by)
         if live.session.task_id:
             task = await self.task(live.session.task_id)
             if task is not None and task.status == "doing":
-                await self._move_task(task, "todo", actor="operator", assignee=None)
+                # Named by who released, so the orchestrator is not woken by its own release.
+                await self._move_task(task, "todo", actor=by, assignee=None)
         if not keep_worktree:
             worktree = await self.worktree_of(live.session)
             if worktree is not None:
@@ -562,7 +570,7 @@ class Team:
         self.queue.pump_soon(member.project_id)
         return True
 
-    async def _end(self, live: LiveSession, reason: str, *, stop: bool) -> None:
+    async def _end(self, live: LiveSession, reason: str, *, stop: bool, by: str | None = None) -> None:
         if stop:
             try:
                 await self.runtime(live.staff).stop(live)
@@ -570,7 +578,10 @@ class Team:
                 logger.exception("stopping %s's session failed", live.staff.name)
         ended = await self.manager.staff.end_session(live.id, reason)
         if ended is not None:
-            await self.publish("staff.status", {"status": "exited", "previous": live.session.status, "detail": reason[:500]}, member=live.staff, session_id=live.session_id)
+            payload: dict[str, Any] = {"status": "exited", "previous": live.session.status, "detail": reason[:500]}
+            if by:
+                payload["actor"] = by
+            await self.publish("staff.status", payload, member=live.staff, session_id=live.session_id)
             for ask in await self._open_asks(live.id):
                 if await self.manager.asks.resolve(ask.id, "system", {"closed": f"the session ended: {reason}"}):
                     await self._withdrawn(ask)
@@ -696,7 +707,9 @@ class Team:
         elif ref.startswith("staff:"):
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
             if ask.kind == "permission":
-                await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": "allow" if allow else "deny", "via": via, "by": by}, member=member, project_id=ask.project_id)
+                # Answered on the agent's own screen, the decision is the CLI's to know, not ours.
+                decision = "terminal" if allow is None and via == "terminal" else "allow" if allow else "deny"
+                await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": decision, "via": via, "by": by}, member=member, project_id=ask.project_id)
             else:
                 await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": via}, member=member, project_id=ask.project_id)
 
@@ -765,11 +778,12 @@ class Team:
                 source="staff",
             ))
 
-    async def escalate(self, ask: Ask, *, why: str = "") -> bool:
-        """Hand a request the orchestrator has not answered to the operator. True when it moved."""
+    async def escalate(self, ask: Ask, *, why: str = "", suggestion: str = "") -> bool:
+        """Hand a request the orchestrator has not answered to the operator, with what it would have
+        answered when it has a view. True when it moved."""
         if not ask.open or ask.routed_to == "operator":
             return False
-        if not await self.manager.asks.route(ask.id, "operator"):
+        if not await self.manager.asks.route(ask.id, "operator", suggestion):
             return False
         await self.manager.projects.record(ask.project_id, "system", "escalation", f"Request {ask.short_id} went to the operator{': ' + why if why else ''}", {"ask_id": ask.id})
         routed = await self.manager.asks.get(ask.id)
@@ -1005,12 +1019,16 @@ class Ingress:
         return self.team.manager
 
     async def status(self, live: LiveSession, status: str, waiting_for: str = "", *, detail: str = "", actor: str = "") -> None:
+        # Compared with the row as it was, not with the caller's copy of it: two paths report the same
+        # change — a command-line runtime sets the session working when it delivers an answer, and the
+        # team does after it — and a stale copy would announce the second as a change of its own.
+        before = await self.manager.staff.session(live.id)
         # One line: it is a status, and the whole question is on the request.
         changed = await self.manager.staff.set_status(live.id, status, " ".join(waiting_for.split())[:200])
         if changed is None:
             return
         previous, session = changed
-        if previous == status and session.waiting_for == live.session.waiting_for:
+        if previous == status and session.waiting_for == (before.waiting_for if before is not None else live.session.waiting_for):
             return
         payload: dict[str, Any] = {"status": status, "previous": previous}
         if session.waiting_for:
@@ -1111,6 +1129,30 @@ class Ingress:
 
     async def usage(self, live: LiveSession, snapshot: UsageSnapshot) -> None:
         await self.manager.staff.record_usage(live.id, snapshot.view())
+
+    async def signal(self, live: LiveSession) -> None:
+        await self.manager.staff.touch(live.id)
+
+    async def resolved(self, live: LiveSession, request_ref: str, *, by: str = "operator", via: str = "terminal") -> bool:
+        row = await self.manager.db.fetchone(
+            "SELECT id FROM asks WHERE staff_session_id = ? AND request_ref = ? AND resolved_at IS NULL ORDER BY created_at DESC LIMIT 1", (live.id, request_ref)
+        )
+        ask = await self.manager.asks.get(row["id"]) if row is not None else None
+        if ask is None or not await self.manager.asks.resolve(ask.id, by, {"via": via, "in_session": True}):
+            return False
+        if via == "withdrawn":
+            await self.team._withdrawn(ask)
+        else:
+            await self.team._announce_resolved(ask, allow=None, by=by, via=via)
+        return True
+
+    async def located(self, live: LiveSession, *, cli_session_id: str | None = None, transcript_ref: str | None = None) -> None:
+        await self.manager.staff.started(live.id, cli_session_id=cli_session_id, transcript_ref=transcript_ref)
+
+    async def ended(self, live: LiveSession, reason: str) -> None:
+        await self.team._end(live, reason, stop=False)
+        # A place under the project's concurrency came free.
+        self.team.queue.pump_soon(live.staff.project_id)
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:

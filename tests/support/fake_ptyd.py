@@ -12,6 +12,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import os
 import secrets
 import struct
 from dataclasses import dataclass, field
@@ -46,7 +47,7 @@ class FakeTerminal:
     """The screen's lines, once a test gives it one; without, ``read_screen`` is unknown to the daemon,
     as it is to a daemon without an emulator."""
     commands: list[dict[str, Any]] | None = None
-    """The shell's commands, likewise; without, ``terminal.commands`` is unknown."""
+    """The shell's commands, likewise; without, ``terminal.commands`` says the program reports none."""
     pid: int = field(default_factory=lambda: 1000 + secrets.randbelow(30000))
 
     def info(self, preview_rows: int = 0) -> dict[str, Any]:
@@ -92,6 +93,8 @@ class FakePtyd:
         self.fail: dict[str, tuple[int, str]] = {}
         """Method → the error its next call answers with, once."""
         self.machine: dict[str, Any] = {"mem_total_bytes": 16 << 30, "mem_available_bytes": 8 << 30, "cpus": 8, "cpu_percent": 10.0, "load1": 1.0, "load5": 1.0, "load15": 1.0}
+        # ptyd's own process, which holds every emulator: a real daemon reports it with each sample.
+        self.daemon: dict[str, Any] = {"pid": 1, "rss_bytes": 30 << 20, "cpu_percent": 0.5}
         self.rss: dict[str, int] = {}
         self.home = "/root"
         # Side channels: scripted programs, real files under the roots the host sets, echoing byte
@@ -100,6 +103,8 @@ class FakePtyd:
         self.exec_results: dict[str, dict[str, Any]] = {}
         """Program basename → the exec.run result it gives; unknown ones exit 0 with no output."""
         self.roots: list[str] = []
+        self.made: list[str] = []
+        """Every folder ``fs.mkdir`` was asked for."""
         self.launches: dict[str, dict[str, Any]] = {}
         self.pending_replies: dict[str, str] = {}
         """reply_id → launch_id of a held post that waits."""
@@ -332,7 +337,8 @@ class FakePtyd:
                 del self.terminals[term.id]
                 raise _RpcFail(1008, "launch is not registered or has ended")
             self.emit("terminal.created", term.id, {"pid": term.pid, "argv": term.argv, "cwd": term.cwd, "labels": term.labels, "launch_id": params.get("launch_id") or ""})
-            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "created_at": term.created_at}
+            integration = "" if params.get("argv") else "bash"
+            return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "shell_integration": integration, "created_at": term.created_at}
         if method == "terminal.list":
             ids = params.get("ids")
             return {"terminals": [t.info(int(params.get("preview_rows") or 0)) for t in self.terminals.values() if not ids or t.id in ids]}
@@ -379,11 +385,14 @@ class FakePtyd:
             assert term.screen is not None
             return {"cols": term.cols, "rows": term.rows, "cursor": {"x": 0, "y": len(term.screen) - 1, "visible": True, "abs_row": len(term.screen) - 1},
                     "alt_screen": False, "title": term.title, "cwd": term.cwd, "seq": len(term.output), "lines": list(term.screen)}
-        if method == "terminal.commands" and self._term(params).commands is not None:
-            return {"commands": list(self._term(params).commands or [])[-int(params.get("last") or 20):]}
+        if method == "terminal.commands":
+            term = self._term(params)
+            if term.commands is None:
+                raise _RpcFail(1007, "this terminal's program reports no commands: it is not a shell with integration")
+            return {"commands": list(term.commands)[-int(params.get("last") or 20):], "busy": False, "shell_integration": "bash"}
         if method == "terminal.stats":
             running = [t for t in self.terminals.values() if t.status == "running"]
-            return {"at": stamp(), "supported": True, "machine": self.machine,
+            return {"at": stamp(), "supported": True, "machine": self.machine, "daemon": dict(self.daemon),
                     "terminals": [{"id": t.id, "pid": t.pid, "processes": 1, "rss_bytes": self.rss.get(t.id, 50 << 20), "cpu_percent": 2.0} for t in running]}
         side = self._side(method, params)
         if side is not None:
@@ -399,6 +408,17 @@ class FakePtyd:
             raise _RpcFail(1004, f"{path} is not under an allowed root")
         return real
 
+    def _as_root(self, path: str) -> Path:
+        """The daemon's rule for a folder about to become a root: absolute, and neither the
+        filesystem's root nor a folder that holds the home directory."""
+        target = Path(path)
+        if not target.is_absolute():
+            raise _RpcFail(-32602, "the path must be absolute")
+        real = target.resolve()
+        if real == Path("/") or real == Path(self.home) or real in Path(self.home).parents:
+            raise _RpcFail(1004, f"{path} cannot be a folder of a project")
+        return real
+
     def _side(self, method: str, params: dict[str, Any]) -> Any:
         if method == "exec.run":
             name = Path(params["argv"][0]).name
@@ -409,6 +429,19 @@ class FakePtyd:
         if method == "fs.set_roots":
             self.roots = [r for r in params.get("roots") or [] if r != "/"]
             return {"roots": self.roots, "accepted": self.roots, "refused": [{"root": "/", "reason": "is the root of the filesystem"}] if "/" in (params.get("roots") or []) else []}
+        if method == "fs.stat" and params.get("as_root"):
+            real = self._as_root(params["path"])
+            if not real.exists():
+                return {"exists": False, "size": 0}
+            return {"exists": True, "type": "dir" if real.is_dir() else "file", "size": 0, "mtime": stamp(), "mode": "0755", "writable": os.access(real, os.W_OK)}
+        if method == "fs.mkdir":
+            real = self._as_root(params["path"])
+            if real.exists() and not real.is_dir():
+                raise _RpcFail(-32602, f"{params['path']} exists and is not a directory")
+            created = not real.exists()
+            real.mkdir(parents=True, exist_ok=True)
+            self.made.append(str(real))
+            return {"exists": True, "type": "dir", "size": 0, "mtime": stamp(), "mode": "0755", "writable": True, "created": created}
         if method == "fs.stat":
             real = self._under_root(params["path"])
             if not real.exists():

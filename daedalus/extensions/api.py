@@ -639,6 +639,8 @@ class SettingsBody(BaseModel):
     compaction: dict[str, Any] | None = None
     orchestrator: dict[str, Any] | None = None
     """The project orchestrator's defaults: its model preset, its wake-up batching and its limits."""
+    terminals: dict[str, Any] | None = None
+    """``running_cap`` from Settings; the terminals service reads the configuration on every admission."""
     answer_language: str | None = None
 
 
@@ -3478,6 +3480,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/terminals/{terminal_id}/screen")
     async def terminals_screen(terminal_id: str, format: Literal["text", "vt", "runs"] = "text", scrollback: int = Query(default=0, ge=0, le=10_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return await terminal_service().read_screen(terminal_id, format=format, scrollback=scrollback)
+
+    @api.get("/api/terminals/{terminal_id}/commands")
+    async def terminals_commands(terminal_id: str, last: int = Query(default=20, ge=1, le=500), output: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The commands the terminal's shell reported, for "copy last output" and the marks."""
+        return {"commands": await terminal_service().commands(terminal_id, last=last, with_output=output)}
 
     @api.get("/api/terminals/{terminal_id}/audit")
     async def terminals_audit(terminal_id: str, limit: int = Query(default=200, ge=1, le=1000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

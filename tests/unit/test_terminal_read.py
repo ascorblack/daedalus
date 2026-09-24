@@ -163,7 +163,7 @@ async def test_a_screen_is_read_when_the_service_keeps_one_and_output_stands_in_
 async def test_commands_come_from_the_shell_or_say_they_cannot(service: Terminals, daemons: dict[str, FakePtyd], ctx: ToolContext) -> None:
     tid = await _open(service)
     text, failed = await _read(ctx, what="commands")
-    assert not failed and "does not record the commands" in text
+    assert not failed and "commands are not recorded" in text
     daemons["container"].terminals[tid].commands = [
         {"n": 1, "command": "npm ci", "cwd": "/tmp/app", "exit_code": 0, "finished_at": "x"},
         {"n": 2, "command": "npm test", "cwd": "/tmp/app", "exit_code": 1, "finished_at": "x"},

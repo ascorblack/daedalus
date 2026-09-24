@@ -36,6 +36,12 @@ const SAME_IN_BOTH = [
   "lang.name.en",
   "lang.name.ru",
   "login.title",
+  // Channel names that are product names in both languages, and rows made only of holes.
+  "nset.cell.aria",
+  "nset.channel.push",
+  "nset.channel.telegram",
+  "nset.out.device",
+  "nset.test.line",
   "sched.cron",
   "sched.when.cron",
   "session.mcp.toggled",
@@ -158,7 +164,7 @@ describe("the keys the code asks for", () => {
       ["svc.copied.", ["address", "link", "key"]],
       ["settings.chat.", ["private", "topics"]],
       ["settings.selfchange.", ["manual", "auto"]],
-      ["settings.sec.", ["models", "rules", "limits", "tools", "voice", "components", "chat", "security", "heartbeat", "about"]],
+      ["settings.sec.", ["models", "rules", "limits", "terminals", "tools", "voice", "components", "chat", "notifications", "security", "heartbeat", "about"]],
       ["tool.group.", ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile", "other"]],
       ["tool.board.", ["get", "list"]],
       // Both speech pickers build a language name from a catalog's own code, and the recognition
@@ -204,10 +210,18 @@ describe("the keys the code asks for", () => {
       // A notification's category and the way its request ended come from the host by name.
       ["notice.cat.", listed("./notifications.tsx", "NOTICE_CATEGORIES")],
       ["notice.resolution.", listed("./notifications.tsx", "NOTICE_RESOLUTIONS")],
+      // The notification settings name every category, channel, cell and mute length from lists.
+      ["nset.cat.", listed("./notifications.tsx", "NOTICE_CATEGORIES")],
+      ["nset.channel.", listed("./notifyprefs.ts", "CHANNELS")],
+      ["nset.cell.", listed("./notifyprefs.ts", "CELLS")],
+      ["nset.legend.", listed("./notifyprefs.ts", "CELLS")],
+      ["nset.cell.", listed("./notifyprefs.ts", "CELLS").map((c) => `${c}.long`)],
+      ["nset.mute.", listed("./notifyprefs.ts", "MUTE_ENDS")],
+      ["load.basis.", ["running", "measured", "default"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.
-    const hints = ["models", "rules", "limits", "tools", "voice", "components", "chat", "security", "heartbeat", "about"].map((s) => `settings.sec.${s}.hint`).filter((k) => !(k in DICT));
+    const hints = ["models", "rules", "limits", "terminals", "tools", "voice", "components", "chat", "notifications", "security", "heartbeat", "about"].map((s) => `settings.sec.${s}.hint`).filter((k) => !(k in DICT));
     // Every tool the timeline names has a verb while it runs and one after it.
     const verbs = ["Exec", "Read", "Write", "Edit", "Find", "WebSearch", "WebFetch", "SendFile", "ImageView", "Skill", "Verify", "SubAgent", "SpawnAgent", "AskPeer", "HistorySearch", "ServiceStart", "ServiceStop"]
       .flatMap((name) => [`tool.${name}.on`, `tool.${name}.off`])

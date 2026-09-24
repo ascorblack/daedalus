@@ -23,6 +23,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
@@ -87,6 +88,9 @@ func startWith(t *testing.T, emu emulator.Factory) *fixture {
 	}
 	f.daemon = &rpc.Daemon{Config: cfg, Instance: "inst1", StartedAt: time.Now().UTC(), Registry: registry,
 		Events: evlog, Log: log, EmulatorName: "fake@0", Environ: os.Environ()}
+	if f.daemon.ShellDir, err = shellint.Install(filepath.Join(cfg.StateDir, "shell")); err != nil {
+		t.Fatal(err)
+	}
 	srv := server.New(ep.Token, log, f.daemon.Hello)
 	f.daemon.Register(srv)
 	go srv.Serve(ep.Listener)

@@ -318,18 +318,20 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 		}
 		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: %s.\n", server.URL(), after)
 	}
-	watch(ctx, app)
+	watch(ctx, app, surface)
 }
 
 // watch tells the desktop when the installation has something for the operator. A machine with no
-// way to show a notification says so once and is not asked again.
-func watch(ctx context.Context, app *App) {
+// way to show a notification says so once and is not asked again. A click the launcher is told
+// about (Linux) brings the surface forward on the thing the notification is about.
+func watch(ctx context.Context, app *App, surface *Surface) {
 	off := false
+	open := func(link string) { surface.Focus(ctx, link) }
 	app.Watch(ctx, func(n Notification) {
 		if off {
 			return
 		}
-		if err := Notify(n); err != nil {
+		if err := Notify(n, open); err != nil {
 			off = true
 			app.log("desktop notifications are off: %v", err)
 		}

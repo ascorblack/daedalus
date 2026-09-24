@@ -8,7 +8,7 @@ first call. The results are text for the model: short, with the ids it needs for
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -34,8 +34,10 @@ class Refused(ValueError):
     """What an orchestrator tool will not do, said so the orchestrator can do something else."""
 
 
-async def dispatch(orch: Orchestrators, operation: str, /, **kwargs: Any) -> Any:
-    handler = OPS.get(operation)
+async def dispatch(orch: Orchestrators, operation: str, ops: Mapping[str, Callable[..., Awaitable[str]]] | None = None, /, **kwargs: Any) -> Any:
+    """Run one operation for the session named by ``session_id`` once it is known to hold the office.
+    ``ops`` is every operation there is; the team's live in their own module, which imports this one."""
+    handler = (ops if ops is not None else OPS).get(operation)
     if handler is None:
         raise ValueError(f"unknown orchestrator operation {operation!r}")
     session_id = str(kwargs.pop("session_id", "") or "")
@@ -332,7 +334,7 @@ async def peek(orch: Orchestrators, project: Project, session_id: str, *, op: st
 # -- speaking to the operator ----------------------------------------------------------------------
 
 
-async def ask_operator(orch: Orchestrators, project: Project, session_id: str, *, question: str, options: list[str] | None = None, context: str = "", task_id: str | None = None, urgent: bool = False) -> str:
+async def ask_operator(orch: Orchestrators, project: Project, session_id: str, *, question: str, options: list[str] | None = None, context: str = "", task_id: str | None = None, urgent: bool = False, dispatch_id: str | None = None) -> str:
     text = question.strip()
     if not text:
         raise Refused("the question is empty")
@@ -344,10 +346,17 @@ async def ask_operator(orch: Orchestrators, project: Project, session_id: str, *
         if row is None:
             raise Refused(f"no task {task_id} on {project.name}'s board")
     ask = await orch.open_request(project, session_id, kind="question", text=text[:8000], options=labels, detail={"urgent": bool(urgent)}, task_id=task_id)
+    if dispatch_id and await _has_column(orch, "asks", "dispatch_id"):
+        # The link that shows this question in the main orchestrator's chat. The column arrives with
+        # the dispatches; before it exists the argument is accepted and has nothing to link to.
+        await orch.manager.db.execute("UPDATE asks SET dispatch_id = ? WHERE id = ?", (dispatch_id.strip()[:64], ask.id))
     return f"asked the operator as [{ask.short_id}]; do not wait — the answer arrives as an event in a later wake-up"
 
 
-async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None) -> str:
+async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> str:
+    """``dispatch_id`` names the main orchestrator's hand-over this report answers. There is nothing to
+    record it in until the dispatches exist — they bring their own table, and closing a dispatch with a
+    done or blocked report is theirs to do — so until then it is accepted and not used."""
     body = text.strip()
     if not body:
         raise Refused("a report needs text")
@@ -375,6 +384,18 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
         ))
     await orch._changed(project.id, "journal", "orchestrator")
     return f"reported (journal #{entry.id})"
+
+
+_COLUMNS: dict[tuple[int, str, str], bool] = {}
+
+
+async def _has_column(orch: Orchestrators, table: str, column: str) -> bool:
+    """Whether the schema has a column yet; asked once per process, since migrations run only at start."""
+    key = (id(orch.manager.db), table, column)
+    if key not in _COLUMNS:
+        rows = await orch.manager.db.fetchall(f"PRAGMA table_info({table})")  # noqa: S608 — the table name is this module's own
+        _COLUMNS[key] = any(r["name"] == column for r in rows)
+    return _COLUMNS[key]
 
 
 OPS: dict[str, Callable[..., Awaitable[str]]] = {
