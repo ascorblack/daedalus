@@ -180,6 +180,15 @@ describe("the keys the code asks for", () => {
       ["team.colour.", listed("./team/team.ts", "STAFF_COLOURS")],
       ["team.env.", ["container", "host"]],
       ["team.unavailable.", ["notinstalled", "loggedout", "error"]],
+      // A project board names its columns, the brief's parts and the kinds of request from lists
+      // it builds; each needs a word, and a column also its "nothing here" line.
+      ["pboard.col.", listed("./board/board.ts", "COLUMNS")],
+      ["pboard.none.", listed("./board/board.ts", "COLUMNS")],
+      ["pboard.brief.", listed("./board/board.ts", "BRIEF_FIELDS")],
+      ["pboard.need.kind.", ["question", "permission", "folder"]],
+      // A notification's category and the way its request ended come from the host by name.
+      ["notice.cat.", listed("./notifications.tsx", "NOTICE_CATEGORIES")],
+      ["notice.resolution.", listed("./notifications.tsx", "NOTICE_RESOLUTIONS")],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.
@@ -189,7 +198,8 @@ describe("the keys the code asks for", () => {
       .flatMap((name) => [`tool.${name}.on`, `tool.${name}.off`])
       .filter((k) => !(k in DICT));
     const isolation = listed("./team/team.ts", "ISOLATIONS").flatMap((i) => [`team.isolation.${i}.short`, `team.isolation.${i}.hint`]).filter((k) => !(k in DICT));
-    expect([...missing, ...hints, ...verbs, ...isolation]).toEqual([]);
+    const placeholders = listed("./board/board.ts", "BRIEF_FIELDS").map((f) => `pboard.brief.${f}.placeholder`).filter((k) => !(k in DICT));
+    expect([...missing, ...hints, ...verbs, ...isolation, ...placeholders]).toEqual([]);
   });
 });
 

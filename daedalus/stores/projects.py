@@ -1001,6 +1001,33 @@ class ProjectStore:
         rows = await self._db.fetchall("SELECT id, title FROM sessions WHERE project_id = ? ORDER BY last_message_at DESC", (project_id,))
         return [{"id": r["id"], "title": r["title"]} for r in rows]
 
+    async def sessions_in_folder(self, project_id: str, folder_id: str) -> Sequence[dict[str, str]]:
+        """The sessions that work in this folder: those that name it, and, when it is the primary,
+        those that name none — a session without a ``folder_id`` works in whichever folder is first,
+        so removing or demoting the primary moves it as surely as removing the folder it names."""
+        project = await self.get(project_id)
+        if project is None or project.folder(folder_id) is None:
+            return []
+        primary = project.primary.id == folder_id
+        return [{"id": sid, "title": title} for sid, title, named in await self._named_folders(project_id) if named == folder_id or (primary and not named)]
+
+    async def sessions_by_default(self, project_id: str) -> Sequence[dict[str, str]]:
+        """The sessions that name no folder and so work in the primary, whichever folder that is."""
+        return [{"id": sid, "title": title} for sid, title, named in await self._named_folders(project_id) if not named]
+
+    async def _named_folders(self, project_id: str) -> Sequence[tuple[str, str, str]]:
+        """``(session id, title, the folder it names or "")`` for every session of the project, newest first."""
+        rows = await self._db.fetchall("SELECT id, title, metadata FROM sessions WHERE project_id = ? ORDER BY last_message_at DESC", (project_id,))
+        out = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            named = str(metadata.get("folder_id") or "") if isinstance(metadata, dict) else ""
+            out.append((row["id"], row["title"], named))
+        return tuple(out)
+
     async def by_session(self) -> dict[str, str]:
         """``{session_id: project_id}`` for every session that has one, in one query."""
         rows = await self._db.fetchall("SELECT id, project_id FROM sessions")

@@ -199,7 +199,7 @@ async def test_the_listing_answers_rows_and_project_folders(settings: Settings, 
     root.mkdir()
     try:
         async with _client(app) as client:
-            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})).json()
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(root)}]})).json()
             await client.post("/api/sessions", headers=HEADERS, json={"title": "Menu", "project_id": project["id"]})
             automatic = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Alone"})).json()["id"]
             # The Voice project does not exist until something needs it.
@@ -227,7 +227,7 @@ async def test_a_session_moves_between_projects_without_a_file_moving(settings: 
     root.mkdir()
     try:
         async with _client(app) as client:
-            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})).json()
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(root)}]})).json()
             sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Alone"})).json()["id"]
             original = manager.live_state(sid)
             assert original is not None
@@ -264,8 +264,8 @@ async def test_moving_to_an_own_directory_places_it_inside_the_destination(setti
     garage.mkdir()
     try:
         async with _client(app) as client:
-            first = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(bakery)})).json()
-            second = (await client.post("/api/projects", headers=HEADERS, json={"name": "Garage", "root": str(garage)})).json()
+            first = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(bakery)}]})).json()
+            second = (await client.post("/api/projects", headers=HEADERS, json={"name": "Garage", "folders": [{"path": str(garage)}]})).json()
             sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Baker", "project_id": first["id"]})).json()["id"]
             assert manager.live_state(sid).workspace == bakery  # type: ignore[union-attr]
             (bakery / "note.txt").write_text("the recipe", encoding="utf-8")

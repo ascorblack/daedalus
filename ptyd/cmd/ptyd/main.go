@@ -13,8 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
-	"github.com/ascorblack/daedalus/ptyd/internal/emulator/basic"
+	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
 	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
@@ -26,6 +27,7 @@ import (
 const usage = `usage:
   ptyd serve --env <name> --run-dir <dir> --state-dir <dir> [flags]
   ptyd version
+  ptyd hook-post <name> [--wait-ms N] < body   (inside a launch: post a hook, print the reply)
 
 serve flags:
   --listen unix|tcp:127.0.0.1:<port>   where to listen (default unix: <run-dir>/ptyd.sock)
@@ -37,6 +39,10 @@ serve flags:
 `
 
 func main() {
+	// Called through the hook command's link, the daemon is that command.
+	if filepath.Base(os.Args[0]) == "hook-post" {
+		os.Exit(hookPost(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -49,6 +55,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "ptyd:", err)
 			os.Exit(1)
 		}
+	case "hook-post":
+		os.Exit(hookPost(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -97,7 +105,8 @@ func serve(args []string) error {
 	evlog := events.NewLog(config.EventRingSize)
 	deb := events.NewDebouncer(evlog, events.Policies)
 	registry := term.NewRegistry(term.Deps{
-		Emulator:  basic.Factory,
+		Emulator:  production.Factory,
+		Answer:    answer.Reply,
 		Events:    deb,
 		Journal:   logx.NewJournal(journalFile),
 		Clock:     term.RealClock{},
@@ -106,8 +115,14 @@ func serve(args []string) error {
 	}, cfg.Limits.MaxTerminals)
 	daemon := &rpc.Daemon{
 		Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(), Registry: registry,
-		Events: evlog, Log: log, EmulatorName: basic.Name, Environ: environ,
+		Events: evlog, Log: log, EmulatorName: production.Name, Environ: environ,
 	}
+	side, closeSide, err := startSide(cfg, evlog, environ, log)
+	if err != nil {
+		return fmt.Errorf("side channels: %w", err)
+	}
+	defer closeSide()
+	daemon.Side = side
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 
@@ -120,7 +135,7 @@ func serve(args []string) error {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ep.Listener) }()
 	log.Info("ptyd serving", "env", cfg.Env, "version", version.Version, "protocol", version.Protocol,
-		"instance", daemon.Instance, "run_dir", cfg.RunDir, "emulator", basic.Name)
+		"instance", daemon.Instance, "run_dir", cfg.RunDir, "emulator", production.Name)
 
 	var serveErr error
 	select {

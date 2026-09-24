@@ -17,6 +17,7 @@ import { useQuery } from "./store";
 import { useStreamUp } from "./events";
 import { t } from "./i18n";
 import { agentName } from "./grouping";
+import { Bell } from "./bell";
 
 const SessionsScreen = lazy(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen })));
 
@@ -64,6 +65,7 @@ export function Sidebar(p: SidebarProps) {
             <img src="/app/icons/icon-192.png" alt="" width={24} height={24} />
           </a>
           {toggle}
+          <Bell />
           <ProjectChip projects={p.projects} current={p.project} onOpen={p.onProjects} collapsed />
           <button className="iconbtn quiet" onClick={p.onPalette} title={t("shell.search.title")} aria-label={t("shell.search.label")}><Icon name="search" size={18} /></button>
           <button className="iconbtn quiet" onClick={() => navigate(pathFor("agents", null, { new: "1" }))} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={18} /></button>
@@ -80,6 +82,7 @@ export function Sidebar(p: SidebarProps) {
           <img src="/app/icons/icon-192.png" alt="" width={24} height={24} />
           <span className="sidebar-text">Daedalus</span>
         </a>
+        <Bell />
         {toggle}
       </div>
       <div className="sidebar-body">

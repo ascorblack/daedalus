@@ -13,12 +13,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/ring"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan"
+	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 // readBytes is one read from the PTY.
@@ -40,9 +42,9 @@ type Publisher interface {
 	Flush(terminalID string)
 }
 
-// Answerer produces the reply to a terminal query from the emulator's state, or nil to stay silent.
-// A build without one answers nothing.
-type Answerer func(q scan.Mark, e emulator.Emulator) []byte
+// Answerer produces the reply to a terminal query from the emulator's state and what is known of the
+// person whose screen sets the size, or nil to stay silent. A build without one answers nothing.
+type Answerer func(q scan.Mark, e emulator.Emulator, o answer.Owner) []byte
 
 // Deps are what every terminal shares.
 type Deps struct {
@@ -122,6 +124,8 @@ type Terminal struct {
 	att    attachments
 	sizeMu sync.Mutex   // serialises size changes, which wait for the emulator
 	fed    atomic.Int64 // the output offset the emulator has consumed, which a snapshot is taken at
+	// theme is the viewer's theme last handed to the emulator; the emulator goroutine's own.
+	theme wire.Theme
 
 	mu            sync.Mutex
 	title         string
@@ -180,7 +184,7 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 	t.in.onKeyboard = t.keyboardChanged
 	t.deps.Events = attachPublisher{inner: deps.Events, t: t}
 	emu := deps.Emulator(emulator.Options{Cols: spec.Cols, Rows: spec.Rows, ScrollbackLines: config.ScrollbackLines,
-		GraphemeClusters: true})
+		ScrollbackBytes: config.ScrollbackBytes, GraphemeClusters: true})
 	// Published before the reader starts, so no event of the terminal's output can precede it.
 	deps.Events.Publish("terminal.created", t.ID, map[string]any{
 		"pid": t.Pid, "argv": t.Argv, "cwd": spec.Cwd, "labels": t.Labels, "launch_id": t.LaunchID,
@@ -354,7 +358,9 @@ func (t *Terminal) onMark(e emulator.Emulator, m scan.Mark, seq int64) {
 		}
 	case scan.KindQuery:
 		if t.deps.Answer != nil {
-			if reply := t.deps.Answer(m, e); len(reply) > 0 {
+			facts := t.OwnerFacts()
+			t.applyTheme(e, facts.Theme)
+			if reply := t.deps.Answer(m, e, answer.Owner{PxW: facts.PxW, PxH: facts.PxH}); len(reply) > 0 {
 				t.in.Reply(reply)
 				t.answered(seq, reply)
 			}
