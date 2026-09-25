@@ -2748,6 +2748,7 @@ button.staff-row:hover { background: var(--surface-2); }
 .ask-own { display: flex; gap: 6px; }
 .ask-own .field { flex: 1; min-width: 0; margin: 0; }
 .ask-answer { color: var(--fg-2); font-size: var(--fs-13); }
+.ask-failed { color: var(--bad); font-size: var(--fs-13); overflow-wrap: anywhere; }
 
 /* A staff member's session: who, what runs it, where, and the controls; the messages sent to it. */
 .staff-head { flex: none; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--surface-1); }

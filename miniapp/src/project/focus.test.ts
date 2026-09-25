@@ -6,8 +6,9 @@ import { describe, expect, it } from "vitest";
 import { PANEL_TABS, PROJECT_TABS, defaultPanelTab, readPanelQuery, readPanelTab, tabsFor } from "../panel";
 import { parse, projectHome, projectPagePath, projectSessionPath } from "../router";
 import { eventTone, parseEvents, systemNote } from "../turns";
+import type { Ask } from "../api";
 import type { Staff } from "../team/team";
-import { askIdOf, canFocus, firstWait, focusView, isChat, oldestOpen, PHONE_TABS, phoneTab, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, teamCounts, waitKey } from "./focus";
+import { askIdOf, canFocus, requestsOf, firstWait, focusView, isChat, oldestOpen, PHONE_TABS, phoneTab, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, teamCounts, waitKey } from "./focus";
 
 function member(over: Partial<Staff> = {}): Pick<Staff, "status" | "queued" | "one_off" | "archived_at"> {
   return { status: "off", queued: [], one_off: false, archived_at: null, ...over };
@@ -134,6 +135,25 @@ describe("the orchestrator's steps", () => {
     expect(askIdOf("done")).toBeNull();
     expect(askIdOf(undefined)).toBeNull();
   });
+
+  it("makes a card of every request a step opened, a folder as well as a question", () => {
+    const ask = (id: string, origin: Ask["origin"], kind: Ask["kind"]): Ask => ({
+      id: `ask-${id}`, short_id: id, project_id: "p1", origin, kind, staff_id: null, task_id: null, text: id, detail: {}, routed_to: "operator",
+      suggestion: "", created_at: "2026-09-25T10:47:00Z", resolved_at: null, resolved_by: null, resolution: {},
+    });
+    const asks = new Map([["qmrvj9", ask("qmrvj9", "orchestrator", "question")], ["qshpm9", ask("qshpm9", "orchestrator", "folder")], ["qstaff", ask("qstaff", "staff", "question")]]);
+    const items = [
+      { name: "AskOperator", result: "asked the operator as [qmrvj9]; do not wait" },
+      { name: "Folders", result: "a host folder needs the operator's confirmation; asked as [qshpm9]. The answer arrives as an event." },
+      { name: "Journal", result: "journal entry #16 written" },
+      // Named again, and a member's request the orchestrator answered: neither is a second card.
+      { name: "Folders", result: "asked as [qshpm9]" },
+      { name: "Answer", result: "answered [qstaff]" },
+      // Not a step of the orchestrator's own.
+      { name: "Read", result: "[qmrvj9]" },
+    ];
+    expect(requestsOf(items, asks).map((a) => a.short_id)).toEqual(["qmrvj9", "qshpm9"]);
+  });
 });
 
 describe("the events the orchestrator was woken with", () => {
@@ -165,6 +185,16 @@ describe("the events the orchestrator was woken with", () => {
     expect(wrapped.lines[0].tone).toBe("warn");
     expect(parseEvents("Hello")).toBeNull();
     expect(eventTone("Ada stopped with an error on \"Menu\": boom")).toBe("bad");
+  });
+
+  it("reads a failed approval as a failure, not as an answer, and keeps the model's advice out", () => {
+    const failed = parseEvents([
+      "[events · Work · 2 since 15:48]",
+      "- 15:48 you approved request [qshpm9], but the folder /home/someone/labs could not be added: Work already has the folder /home/someone/labs",
+      '- 15:48 the operator answered your request [qshpm9] "Add the host folder /home/someone/labs to Work?": approved, but the folder /home/someone/labs could not be added: Work already has the folder /home/someone/labs — nothing was added; do not ask for it again unless that reason is gone',
+    ].join("\n"))!;
+    expect(failed.lines.map((l) => l.tone)).toEqual(["bad", "bad"]);
+    expect(failed.lines[1].text.endsWith("already has the folder /home/someone/labs")).toBe(true);
   });
 });
 

@@ -612,7 +612,8 @@ export type Ask = {
   created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
-  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string; closed?: string; outcome?: string };
+  /** ``outcome`` is what came of an approval, in the host's words; ``error`` the bare reason it failed. */
+  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string; closed?: string; outcome?: string; error?: string };
   /** The main orchestrator's dispatch this request is shown under, in its chat as well as the project's. */
   dispatch_id?: string | null;
 };

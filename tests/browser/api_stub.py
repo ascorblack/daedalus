@@ -625,6 +625,9 @@ class FocusStub:
         self.terminals = terminals
         self.messages = messages
         self.answers: list[tuple[str, dict]] = []
+        self.refusals: dict[str, str] = {}
+        """Requests whose approval the host takes and then cannot carry out, by id, with the reason
+        it answers: a folder the host refuses to add."""
         self.enabled: list[tuple[str, dict]] = []
         self.notes: list[str] = []
         self.briefed: list[dict] = []
@@ -667,7 +670,10 @@ class FocusStub:
             payload = dict(body or {})
             self.answers.append((ask["id"], payload))
             ask.update(resolved_at="2026-09-24T10:00:00Z", resolved_by="operator", resolution={"allow": payload.get("allow"), "text": payload.get("text") or "", "selected": payload.get("selected") or [], "via": "app"})
-            return 200, {"state": "answered", "delivered": True, "error": "", "ask": ask}
+            refused = self.refusals.get(ask["id"], "")
+            if refused:
+                ask["resolution"].update(outcome=f"approved, but the folder could not be added: {refused}", error=refused)
+            return 200, {"state": "answered", "delivered": not refused, "error": refused, "ask": ask}
         if path.startswith("/api/projects/") and path.endswith("/orchestrator") and method == "POST":
             pid = path.split("/")[3]
             project = self.project(pid)

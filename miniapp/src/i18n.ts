@@ -2882,6 +2882,8 @@ Object.assign(DICT, {
   "focus.ask.no": { en: "no", ru: "нет" },
   "focus.ask.conflict": { en: "Already answered elsewhere", ru: "Уже ответили в другом месте" },
   "focus.ask.sent": { en: "Answer sent; the orchestrator wakes with it", ru: "Ответ отправлен; оркестратор проснётся с ним" },
+  "focus.ask.failed": { en: "Approved, but it failed: {reason}", ru: "Одобрено, но не выполнено: {reason}" },
+  "focus.ask.notdone": { en: "Not carried out: {reason}", ru: "Не выполнено: {reason}" },
 
   "focus.staff.interrupt": { en: "Interrupt", ru: "Прервать" },
   "focus.staff.pause": { en: "Pause after the turn", ru: "После хода — пауза" },

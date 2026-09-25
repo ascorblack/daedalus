@@ -88,7 +88,7 @@ Talk to a small fast model that answers out loud in a second, hands anything sub
 <td valign="top">
 
 **📁 Projects**<br/>
-Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. Every path they resolve is checked against that folder and one that leads out is refused, not followed: the file tools, the file browser, the preview, the download and the files they send you. `Exec` runs in the folder and is bounded by the sandbox where one is on and by the policy rules where it is not. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before.
+Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. Every path they resolve is checked against that folder and one that leads out is refused, not followed: the file tools, the file browser, the preview, the download and the files they send you. `Exec` runs in the folder and is bounded by the sandbox where one is on and by the policy rules where it is not. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before. One folder may belong to several projects — it is one place on disk, and each project's rules bind its own agents — but folders never nest: a folder inside another project's, or around it, is refused. When an orchestrator asks for a folder, the request is a card in its chat; an approval that cannot be carried out says why there and in a notification.
 
 </td>
 <td valign="top">
