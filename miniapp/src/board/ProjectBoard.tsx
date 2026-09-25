@@ -54,9 +54,13 @@ function launchText(launch: Launch): string | null {
 }
 
 /**
- * `embedded` is the board as a tab of focus mode's right panel: no page header of its own, the list
- * layout whatever the window, and the open task kept in the panel instead of the address — the address
- * belongs to the conversation beside it. `back` is the page header's way back (null for none).
+ * `embedded` is the board without a page header of its own and in the list layout whatever the window:
+ * a tab of focus mode's right panel, or a phone's board under the project's own header. The open task
+ * lives in the address whenever the caller passes `selected`, and in the board otherwise: focus mode's
+ * panel passes nothing, because its address belongs to the conversation beside it, while a phone's
+ * board is the whole page and a link to one of its tasks (a notification, the review's `?task=`) has to
+ * open the task there. Keying this on `embedded` alone once left a phone deaf to that link.
+ * `back` is the page header's way back (null for none).
  */
 export function ProjectBoard({ projectId, toast, selected, layout = "auto", embedded = false, back }: { projectId: string; toast: (text: string) => void; selected?: string | null; layout?: "auto" | "list"; embedded?: boolean; back?: string | null }) {
   const [showDone, setShowDone] = useState(false);
@@ -81,7 +85,8 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto", embe
   };
   const arranged = useMemo<Arranged>(() => arrange(data ?? { tasks: [], needs_you: [] }), [data]);
   const titles = useMemo(() => Object.fromEntries((data?.tasks ?? []).map((task) => [task.id, { title: task.title, status: task.status }])), [data]);
-  const chosen = embedded ? picked : selected;
+  const inAddress = selected !== undefined;
+  const chosen = inAddress ? selected : picked;
   const open = chosen ? data?.tasks.find((task) => task.id === chosen) ?? null : null;
   // A link to a finished task widens the board so the task can be shown.
   useEffect(() => {
@@ -89,8 +94,8 @@ export function ProjectBoard({ projectId, toast, selected, layout = "auto", embe
   }, [chosen, data, open, showDone]);
 
   const boardPath = projectPagePath(projectId, "board");
-  const openTask = (task: ProjectTask) => (embedded ? setPicked(task.id) : navigate(`${boardPath}?task=${encodeURIComponent(task.id)}`));
-  const closeTask = () => (embedded ? setPicked(null) : navigate(boardPath, { replace: true }));
+  const openTask = (task: ProjectTask) => (inAddress ? navigate(`${boardPath}?task=${encodeURIComponent(task.id)}`) : setPicked(task.id));
+  const closeTask = () => (inAddress ? navigate(boardPath, { replace: true }) : setPicked(null));
 
   async function accept(task: ProjectTask) {
     try {

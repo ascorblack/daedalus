@@ -276,6 +276,40 @@ describe("the terminal connection", () => {
     expect(h.sink.log).toEqual(["write:old", "wait", "reset:100x30", "write:new", "write:after"]);
   });
 
+  it("hands a size over after the snapshot still waiting before it, so the snapshot cannot undo it", async () => {
+    // A pane sent 80×23 while the attach's snapshot (at 80×24) waited for an earlier write; the
+    // daemon's confirmation overtook the snapshot, whose reset then left the screen at 80×24.
+    const order: string[] = [];
+    const pending: (() => void)[] = [];
+    let h: Harness | null = null;
+    const sizes = () => h!.events.filter((e) => e.type === "size").map((e) => `size:${(e as { rows: number }).rows}`);
+    const sink: TerminalSink = {
+      write: (data, parsed) => {
+        if (data.length) order.push(`write:${new TextDecoder().decode(data)}`);
+        pending.push(parsed);
+      },
+      reset: (cols, rows) => {
+        order.push(...sizes(), `reset:${cols}x${rows}`);
+      },
+    };
+    h = start({ sink });
+    await live(h);
+    h.last().receive(output(0, "old"));
+    h.last().receive(event({ type: "resync", reason: "attach", first_abs_row: 0 }));
+    h.last().receive(snapshot(80, 24, 900, "screen"));
+    h.last().receive(event({ type: "size", cols: 80, rows: 23, owner: "you" }));
+    expect(sizes()).toEqual([]);
+    pending.splice(0).forEach((c) => c());
+    await settle();
+    pending.splice(0).forEach((c) => c());
+    await settle();
+    expect(order).toEqual(["write:old", "reset:80x24", "write:screen"]);
+    expect(sizes()).toEqual(["size:23"]);
+    // With no snapshot waiting, a size is handed over on arrival as before.
+    h.last().receive(event({ type: "size", cols: 80, rows: 22, owner: "you" }));
+    expect(sizes()).toEqual(["size:23", "size:22"]);
+  });
+
   it("never parses a write twice when a snapshot's reset resizes a real terminal", async () => {
     // xterm.js's `resize` flushes its write queue from the start, and inside a write callback the
     // queue still holds the writes already parsed: a snapshot applied there brought the old screen's

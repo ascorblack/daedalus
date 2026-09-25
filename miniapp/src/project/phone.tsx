@@ -25,9 +25,10 @@ import { StaffSheet } from "../team/StaffSheet";
 import type { Staff, Team } from "../team/team";
 import type { ProjectBoardData } from "../board/board";
 import { errorText } from "../ui";
-import { boardKey, staffKey, terminalsKey, useProject } from "./data";
+import { boardKey, staffKey, terminalsKey, useProject, useUsage } from "./data";
 import { firstWait, oldestOpen, PHONE_TABS, type PhoneTab, splitTeam, staffTone, teamCounts, waitKey } from "./focus";
 import { useMember } from "./staff";
+import { spendLine, staffUsage } from "./usage";
 
 const enc = encodeURIComponent;
 const operatorAsksKey = (projectId: string) => `/api/asks?project=${enc(projectId)}&routed_to=operator`;
@@ -239,6 +240,7 @@ function memberPath(projectId: string, member: Staff): string | null {
 
 export function PhoneTeam({ projectId, toast }: { projectId: string; toast: (text: string) => void }) {
   const { team, board } = useTeamAndBoard(projectId);
+  const usage = useUsage(projectId);
   const [hiring, setHiring] = useState(false);
   const [editing, setEditing] = useState<Staff | null>(null);
   const { team: members, oneOff } = splitTeam(team?.staff ?? []);
@@ -249,7 +251,16 @@ export function PhoneTeam({ projectId, toast }: { projectId: string; toast: (tex
     else setEditing(member);
   };
   const reload = () => invalidate(`/api/projects/${enc(projectId)}/staff`);
-  const row = (member: Staff) => <PhoneStaffRow key={member.id} member={member} task={member.live?.task_id ? tasks.get(member.live.task_id) : undefined} onOpen={() => open(member)} onEdit={() => setEditing(member)} />;
+  const row = (member: Staff) => (
+    <PhoneStaffRow
+      key={member.id}
+      member={member}
+      task={member.live?.task_id ? tasks.get(member.live.task_id) : undefined}
+      spend={spendLine(staffUsage(usage, member.id))}
+      onOpen={() => open(member)}
+      onEdit={() => setEditing(member)}
+    />
+  );
   return (
     <>
       <ProjectPhoneHead
@@ -279,8 +290,9 @@ export function PhoneTeam({ projectId, toast }: { projectId: string; toast: (tex
   );
 }
 
-/** A member as M8 draws it: who, what runs them and where, what they are on, and a dot for how it goes. */
-function PhoneStaffRow({ member, task, onOpen, onEdit }: { member: Staff; task?: string; onOpen: () => void; onEdit: () => void }) {
+/** A member as M8 draws it: who, what runs them and where, what they are on, what they spent today,
+ *  and a dot for how it goes. */
+function PhoneStaffRow({ member, task, spend, onOpen, onEdit }: { member: Staff; task?: string; spend: string | null; onOpen: () => void; onEdit: () => void }) {
   const tone = staffTone(member);
   const wait = firstWait(member);
   const line = wait
@@ -300,6 +312,9 @@ function PhoneStaffRow({ member, task, onOpen, onEdit }: { member: Staff; task?:
           {member.env === "host" && <span className="focus-host">{t("team.env.host")}</span>}
         </span>
         <span className={`phone-staff-line truncate ${wait || tone === "waiting" ? "waits" : ""}`}>{line}</span>
+        {/* The spend has a line of its own rather than joining the one above: that line truncates, and
+            the money is the part the operator would lose on a narrow phone. */}
+        {spend && <span className="phone-staff-line staff-spend truncate">{spend}</span>}
         <HealthLine health={member.health ?? null} compact />
       </span>
       <span className={`focus-dot tone-${tone}`} aria-label={t(`focus.tone.${tone}`)} role="img" />

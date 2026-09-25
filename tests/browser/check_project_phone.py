@@ -5,8 +5,8 @@ the project, says how its work goes and leads back to every project, where the a
 The request that has waited longest for the operator is a banner answered with one tap — an option, or
 words of the operator's own — and the next one takes its place until none is left. The team lists its
 members with what each is on and opens a member's conversation, which gives the whole height to it and
-goes back to the team. The board is the list under chips, and a task in review is accepted with one
-tap. The terminals are rows that open the phone's terminal. The orchestrator's composer ends above the
+goes back to the team. The board is the list under chips, and a task in review is accepted (merged, for a
+staff branch) with one tap. The terminals are rows that open the phone's terminal. The orchestrator's composer ends above the
 tabs. Every answer is a touch row high, and nothing scrolls sideways.
 """
 
@@ -31,9 +31,9 @@ PID = "b4k3ry20f0c5"
 
 WORDS = {
     "en": {"tabs": ["Orchestrator", "Team", "Board", "Terminals"], "needs": "Needs you", "ira": "Ira asks:", "orchestrator": "The orchestrator asks:", "write": "Answer…", "head": "3 working · 1 in review",
-           "own": "Your own answer…", "send": "Answer", "working": "working", "review": "Review", "accept": "Accept", "board": "Board · Bakery 2.0"},
+           "own": "Your own answer…", "send": "Answer", "working": "working", "review": "Review", "merge": "Merge", "board": "Board · Bakery 2.0"},
     "ru": {"tabs": ["Оркестратор", "Команда", "Доска", "Терминалы"], "needs": "Нужны вы", "ira": "Ira спрашивает:", "orchestrator": "Оркестратор спрашивает:", "write": "Ответить…", "head": "3 работают · 1 на проверке",
-           "own": "Свой ответ…", "send": "Ответить", "working": "работает", "review": "Проверка", "accept": "Принять", "board": "Доска · Bakery 2.0"},
+           "own": "Свой ответ…", "send": "Ответить", "working": "работает", "review": "Проверка", "merge": "Слить", "board": "Доска · Bakery 2.0"},
 }
 
 
@@ -66,6 +66,9 @@ def tabs(page: Page, words: dict, active: str | None) -> None:
     bar = page.locator("nav.project-tabs")
     expect(bar).to_be_visible()
     expect(page.locator("nav.tabbar:not(.project-tabs)")).to_have_count(0)
+    # While the bar's code is still loading, App.tsx holds its place with an empty bar of the same
+    # class, so the tabs are waited for rather than read at once from that placeholder.
+    expect(bar.locator("a")).to_have_count(len(words["tabs"]))
     labels = [x.strip() for x in bar.locator("a").all_inner_texts()]
     assert [lbl.split("\n")[-1] for lbl in labels] == words["tabs"], labels
     current = bar.locator("a.active")
@@ -131,7 +134,8 @@ def run_one(page: Page, lang: str, width: int) -> None:
     expect(page.locator(".pagehead h1")).to_have_text(words["board"])
     expect(page.locator(".pboard-cols")).to_have_count(0)
     page.locator(".pboard-chips .chip", has_text=words["review"]).tap()
-    page.locator(".pboard-list .pcard").get_by_role("button", name=words["accept"]).tap()
+    # The task in review is a staff branch, and on a branch accepting is merging: the card says Merge.
+    page.locator(".pboard-list .pcard").get_by_role("button", name=words["merge"]).tap()
     expect(page.locator(".toast")).to_be_visible()
     assert focus.board.accepted == ["t-endpoint"], focus.board.accepted
     fits(page, f"{where} board")
