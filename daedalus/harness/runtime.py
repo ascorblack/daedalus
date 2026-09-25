@@ -517,7 +517,7 @@ class CliStaffRuntime:
             asyncio.create_task(self._watch_quiet(session), name=f"{name}-quiet"),
             session.worker.start(),
         ]
-        if self.adapter.capabilities.team_tools == "mcp":
+        if self.adapter.capabilities.team_tools != "none":
             session.tasks.append(asyncio.create_task(self._watch_team_tools(session), name=f"{name}-team"))
         if gate:
             session.tasks.append(asyncio.create_task(self._gate(session), name=f"{name}-gate"))
@@ -639,7 +639,11 @@ class CliStaffRuntime:
         session.changed.set()
         if kind in (EventKind.READY, EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED, EventKind.PERMISSION_REQUESTED, EventKind.QUESTION_ASKED, EventKind.TURN_COMPLETED):
             session.ready.set()
-        if kind is EventKind.PROMPT_ACKNOWLEDGED or (kind is EventKind.TURN_STARTED and live.session.status != StaffState.WORKING.value):
+        if kind in (EventKind.TURN_CANCELLED, EventKind.TURN_FAILED):
+            # A turn that ended any other way leaves nothing for the next one to count. The flag is
+            # cleared at a turn's end, never at its start: a team call is answered as it arrives,
+            # while the CLI's own events queue behind the adapter, so a Report made early in a turn
+            # (pi's, measured) is often seen before the prompt that started the turn.
             session.reported = False
         if kind is EventKind.TRANSCRIPT:
             await self._located(session, live, event)

@@ -1,0 +1,33 @@
+[Skills]
+  daedalus-team
+
+[Extensions]
+  pi_bridge.ts
+
+
+ Warning: fd not found. Offline mode enabled, skipping download.
+
+
+ [team] You are Ada. SPIKE-REPORT please
+
+
+
+ Report
+ recorded by the spike
+
+
+ done after tool
+
+
+ [orchestrator] SPIKE-SLOW work on it
+
+
+ working 0. working 1. working 2. working 3. working 4. working 5.
+
+ Operation aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[orchestrator] steer: focus on tests
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/work/pro...
+0.2%/32k (auto)                                                                                               stub-model

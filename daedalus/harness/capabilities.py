@@ -158,15 +158,18 @@ CAPABILITIES: dict[str, Capabilities] = {
     "grok": Capabilities(
         harness="grok",
         label="Grok Build",
-        status_channel="files",
-        status_channel_label="session files",
+        status_channel="hooks",
+        status_channel_label="hooks per launch (agent file)",
+        # Measured (1.0.41): Enter while busy queues the message after the turn, and a queued
+        # message's hook fires only when it starts; so a steer interrupts first, then sends.
         steer="cancel_and_send",
-        permissions="keys",
+        permissions="hook_then_keys",
+        # Grok's own question tool is removed at launch: a staff member asks its orchestrator.
         questions="none",
-        # Only if a launch-specific agent file may carry MCP servers; until that is proven, none.
-        team_tools="none",
+        team_tools="mcp",
         first_prompt="argv",
         interrupt="keys",
+        # Pasting four lines or more shows "[Pasted: N lines]"; a single long line is shown as it is.
         paste=PasteRules(collapses_over=None, burst_guard_ms=400),
         companion=False,
         pointer_dir_flag="",

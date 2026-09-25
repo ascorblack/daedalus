@@ -615,14 +615,14 @@ async def test_pi_bridge_sends_steers_and_acknowledges_by_id() -> None:
 async def test_pi_under_tmux_loses_every_enter_and_credentials_are_a_trap() -> None:
     async with Rig() as rig:
         term = await rig.spawn(["pi", "--approve"], env={"TMUX": "/tmp/tmux-0/default"})
-        await rig.screen_until(term, "enter send")
+        await rig.screen_until(term, "fake/fake-model")
         await term.write(paste="echo:never")
         await term.write(keys=["Enter"])
         await wait(lambda: bool(log_events(rig, "enter_swallowed")))
         assert [e["reason"] for e in log_events(rig, "enter_swallowed")] == ["environment"]
         assert not log_events(rig, "submitted")
         check = await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--json", "--no-refresh"])
-        assert json.loads(check.stdout) == {"provider": "anthropic", "authenticated": True}
+        assert json.loads(check.stdout) == {"status": "ready", "provider": "anthropic", "authType": "oauth"}
         await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--credentials"])
         assert log_events(rig, "credentials_printed")
 
@@ -635,45 +635,53 @@ GROK_SESSION = "8c1d7a60-2f7e-4d38-9a57-6f1f0b0e8a11"
 
 async def test_grok_session_files_and_the_preselected_permission_row() -> None:
     async with Rig() as rig:
-        term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "perm:rm -rf dist"])
-        screen = await rig.screen_until(term, r"Allow Bash\?")
-        assert "❯ 3. Always allow on all sessions" in screen  # the default nobody should get
-        await term.write(keys=["Esc"])
-        await rig.screen_until(term, "I did not run rm -rf dist")
+        term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "--", "perm:rm -rf dist"])
+        screen = await rig.screen_until(term, "Yes, proceed")
+        assert "1 (●) Yes, and don't ask again for anything" in screen  # Grok's default nobody should get
+        await term.write(keys=["C-c"])  # Ctrl+C dismisses the prompt, and the turn with it
+        await rig.screen_until(term, "Turn cancelled because a permission prompt was dismissed")
         directory = next((rig.home / ".grok" / "sessions").glob(f"*/{GROK_SESSION}"))
-        assert json.loads((directory / "summary.json").read_text())["sessionId"] == GROK_SESSION
-        updates = [json.loads(line)["update"]["sessionUpdate"] for line in (directory / "updates.jsonl").read_text().splitlines()]
-        assert updates[0] == "user_message_chunk" and "agent_message_chunk" in updates
+        assert json.loads((directory / "summary.json").read_text())["info"]["id"] == GROK_SESSION
+        updates = [json.loads(line)["params"]["update"]["sessionUpdate"] for line in (directory / "updates.jsonl").read_text().splitlines()]
+        assert updates[0] == "user_message_chunk" and updates[-1] == "turn_completed"
         events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
-        requested = next(e for e in events if e["type"] == "permission_requested")
-        assert requested["selected"] == "allow_always" and requested["command"] == "rm -rf dist"
+        assert next(e for e in events if e["type"] == "permission_resolved")["decision"] == "cancelled"
     async with Rig() as rig:
         term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "perm:ls"], env={"GROK_DEFAULT_SELECTED_PERMISSION": "allow_once"})
-        assert "❯ 1. Allow once" in await rig.screen_until(term, r"Allow Bash\?")
-        await term.write(text="1")  # no digit shortcuts in this dialog
-        await wait(lambda: bool(log_events(rig, "typed_into_dialog")))
-        assert "Allow Bash?" in await term.screen()
-        await term.write(keys=["Enter"])
+        assert "2 (●) Yes, proceed" in await rig.screen_until(term, "Yes, proceed")
+        await term.write(text="2")  # a digit chooses and confirms
         await rig.screen_until(term, "Ran ls")
 
 
-async def test_grok_cancels_and_sends_and_runs_hooks_from_its_agent_file() -> None:
+async def test_grok_queues_a_message_while_busy_and_runs_hooks_from_its_agent_file() -> None:
     async with Rig() as rig:
         launch = await rig.register()
         hook = {"type": "command", "command": f"{rig.bin / 'hook-post'} grok"}
         agent = rig.work / "daedalus-staff.md"
         hooks = {name: [{"hooks": [hook]}] for name in ("SessionStart", "UserPromptSubmit", "Stop", "StopCancelled")}
-        agent.write_text(f"---\nname: staff\nhooks: {json.dumps(hooks)}\n---\nYou are staff.\n")
+        agent.write_text(f"---\nname: staff\nhooks: {json.dumps(hooks)}\nmcpServers: []\n---\nYou are staff.\n")
         term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "--agent", str(agent), "slow:1000"], launch_id=launch["launch_id"])
         await rig.screen_until(term, "Read\\(")
-        await term.write(paste="echo:instead")
+        await term.write(paste="echo:afterwards")
         await term.write(keys=["Enter"])
-        await rig.screen_until(term, "● instead")
-        await wait(lambda: any(h["body"].get("hook_event_name") == "Stop" for h in rig.hooks("grok")))
+        await wait(lambda: bool(log_events(rig, "queued")))
+        await term.write(keys=["Esc"])
+        await rig.screen_until(term, "Press Ctrl\\+c to cancel the turn")  # Esc does not stop a turn
+        await term.write(keys=["C-c"])
+        await rig.screen_until(term, "afterwards")
+        await wait(lambda: sum(h["body"].get("hook_event_name") == "Stop" for h in rig.hooks("grok")) == 1)
         names = [h["body"]["hook_event_name"] for h in rig.hooks("grok")]
+        # The queued message's prompt hook fires when it starts, after the cancelled turn.
         assert names == ["SessionStart", "UserPromptSubmit", "StopCancelled", "UserPromptSubmit", "Stop"]
-        assert rig.hooks("grok")[-1]["body"]["hookEventName"] == "stop"
-        assert log_events(rig, "cancel_and_send")
+        cancelled = next(h["body"] for h in rig.hooks("grok") if h["body"]["hook_event_name"] == "StopCancelled")
+        assert (cancelled["reason"], cancelled["hookEventName"]) == ("user_interrupt", "stop_cancelled")
+        assert rig.hooks("grok")[-1]["body"]["lastAssistantMessage"] == "afterwards"
+    async with Rig() as rig:
+        # A map of MCP servers makes Grok ignore the whole file.
+        agent = rig.work / "broken.md"
+        agent.write_text('---\nname: staff\nhooks: {}\nmcpServers: {"x": {"command": "true"}}\n---\nbody\n')
+        await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "--agent", str(agent), "echo:a"])
+        await wait(lambda: bool(log_events(rig, "agent_file_ignored")))
 
 
 async def test_grok_runs_the_operators_claude_hooks_unless_told_not_to() -> None:
@@ -683,7 +691,7 @@ async def test_grok_runs_the_operators_claude_hooks_unless_told_not_to() -> None
         term = await rig.spawn(["grok", "--cwd", str(rig.work), "-s", GROK_SESSION, "--trust", "echo:a"])
         await rig.screen_until(term, "● a")
         await wait(lambda: bool(log_events(rig, "claude_hooks_ran")))
-        await rig.spawn(["grok", "--cwd", str(rig.work), "-s", "9c1d7a60-2f7e-4d38-9a57-6f1f0b0e8a11", "--trust", "echo:b"], env={"GROK_COMPAT_CLAUDE_HOOKS": "0"})
+        await rig.spawn(["grok", "--cwd", str(rig.work), "-s", "9c1d7a60-2f7e-4d38-9a57-6f1f0b0e8a11", "--trust", "echo:b"], env={"GROK_CLAUDE_HOOKS_ENABLED": "false"})
         await wait(lambda: len(log_events(rig, "turn_ended")) == 2)  # its Stop hooks, if any, have run
         assert len(log_events(rig, "claude_hooks_ran")) == 1
 

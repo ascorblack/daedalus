@@ -1,0 +1,8 @@
+
+ready
+> SPIKE-QUESTION instead
+  I looked at it. Should I proceed?
+
+Resume this session with:
+  grok --resume 66666666-2222-4333-8444-555555555556
+EXIT=0

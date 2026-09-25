@@ -1,4 +1,4 @@
-"""The Codex and OpenCode adapters against the real CLIs and the real daemon: the harness manager's
+"""The Codex, OpenCode, pi and Grok Build adapters against the real CLIs and the real daemon: the harness manager's
 self-check session — the launch with the adapter's configuration, the CLI's server reached through the
 daemon, the team tools loaded through ``ptyd team-mcp``, with the model turn one prompt whose ``Report``
 comes back through the team channel, and a clean exit.
@@ -10,6 +10,12 @@ CLI, ``DAEDALUS_CODEX_HOME=<a signed-in ~/.codex>`` or ``DAEDALUS_OPENCODE_AUTH=
 runs everything but the prompt, which costs nothing. The credentials are copied into a temporary home
 and used from there, without anything that could refresh them: the original sign-in is never written
 to or rotated, and no project folder of a running installation is touched.
+
+pi and Grok Build need no sign-in at all: their model is a stub on loopback
+(``tests/support/model_stub.py``), named in the temporary home's configuration (pi's ``models.json``,
+Grok's ``[endpoints]`` with a key for the stub), so the whole turn — the bridge extension or the agent
+file's hooks, the ``Report``, the end of the turn — runs against the real CLI and costs nothing
+(``DAEDALUS_HARNESS_LIVE=pi,grok``).
 """
 
 from __future__ import annotations
@@ -29,12 +35,15 @@ import pytest
 
 from daedalus.config import HarnessConfig, TerminalsConfig
 from daedalus.harness.codex import CodexAdapter
+from daedalus.harness.grok import GrokAdapter
 from daedalus.harness.opencode import OpenCodeAdapter
+from daedalus.harness.pi import PiAdapter
 from daedalus.harness.runtime import RuntimeEnvironment
 from daedalus.harness.selfcheck import session_check
 from daedalus.stores.database import Database
 from daedalus.terminals.service import Terminals
 from tests.integration.test_ptyd_real import FreeOnly
+from tests.support.model_stub import MODEL, ModelStub
 
 BINARY = os.environ.get("DAEDALUS_PTYD_BIN", "")
 LIVE = os.environ.get("DAEDALUS_HARNESS_LIVE", "").split(",")
@@ -82,7 +91,7 @@ def opencode_home(base: Path) -> None:
 @pytest.fixture
 async def service(db: Database, base: Path) -> AsyncIterator[Terminals]:
     home = base / "home"
-    paths = [str(Path(p).parent) for p in (shutil.which("codex"), shutil.which("opencode"), shutil.which("node")) if p]
+    paths = [str(Path(p).parent) for p in (shutil.which("codex"), shutil.which("opencode"), shutil.which("pi"), shutil.which("grok"), shutil.which("node")) if p]
     env = {"PATH": ":".join([*paths, "/usr/local/bin", "/usr/bin", "/bin"]), "HOME": str(home), "LANG": "C.UTF-8"}
     process = subprocess.Popen(  # noqa: S603 — the binary the caller named, with fixed arguments
         [BINARY, "serve", "--env", "container", "--run-dir", str(base / "run"), "--state-dir", str(base / "state"), "--shell", "/bin/sh", "--home", str(home)],
@@ -127,3 +136,49 @@ async def test_the_self_check_session_against_the_real_opencode(service: Termina
     result = await session_check(OpenCodeAdapter(), service, lambda: HarnessConfig(ready_timeout_s=90), env, model, TURN)
     assert result.ok, [(s.name, s.ok, s.detail) for s in result.steps]
     assert [s.name for s in result.steps] == expected_steps()
+
+
+def pi_home(base: Path, stub: ModelStub) -> None:
+    """A provider of pi's own kind pointing at the stub, and nothing else: no credential exists."""
+    agent = base / "home" / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    provider = {"baseUrl": stub.base_url, "api": "openai-completions", "apiKey": "stub", "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False}, "models": [{"id": MODEL, "reasoning": False}]}
+    (agent / "models.json").write_text(json.dumps({"providers": {"stub": provider}}))
+    (agent / "settings.json").write_text(json.dumps({"defaultProvider": "stub", "defaultModel": MODEL}))
+
+
+@pytest.mark.skipif("pi" not in LIVE or not shutil.which("pi"), reason="set DAEDALUS_HARNESS_LIVE=pi")
+async def test_the_self_check_session_against_the_real_pi(service: Terminals, base: Path) -> None:
+    with ModelStub() as stub:
+        pi_home(base, stub)
+        env = RuntimeEnvironment(service, "container", home=str(base / "home"))
+        result = await session_check(PiAdapter(), service, lambda: HarnessConfig(ready_timeout_s=90), env, f"stub/{MODEL}", TURN)
+        assert result.ok, [(s.name, s.ok, s.detail) for s in result.steps]
+        assert [s.name for s in result.steps] == expected_steps()
+        if TURN:
+            # The bridge's tools reached the model beside pi's own, and the team block its system prompt.
+            offered = {str((t.get("function") or t).get("name")) for t in stub.requests[0].get("tools") or []}
+            assert {"Report", "AskOrchestrator"} <= offered
+            assert "self-check of the command-line agent" in json.dumps(stub.requests[0]["messages"][0])
+
+
+def grok_home(base: Path, stub: ModelStub) -> None:
+    """Grok pointed at the stub with a key of its own: no sign-in exists, so nothing can be rotated."""
+    config = base / "home" / ".grok" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[endpoints]\nmodels_base_url = "{stub.base_url}"\n\n[model.{MODEL}]\napi_key = "stub"\n\n[models]\ndefault = "{MODEL}"\n')
+
+
+@pytest.mark.skipif("grok" not in LIVE or not shutil.which("grok"), reason="set DAEDALUS_HARNESS_LIVE=grok")
+async def test_the_self_check_session_against_the_real_grok(service: Terminals, base: Path) -> None:
+    with ModelStub() as stub:
+        grok_home(base, stub)
+        env = RuntimeEnvironment(service, "container", home=str(base / "home"))
+        result = await session_check(GrokAdapter(), service, lambda: HarnessConfig(ready_timeout_s=90), env, MODEL, TURN)
+        assert result.ok, [(s.name, s.ok, s.detail) for s in result.steps]
+        assert [s.name for s in result.steps] == expected_steps()
+        if TURN:
+            # The agent file's team server reached the model through Grok's deferred tools, and the
+            # team block its system prompt as the human's rules.
+            main = next(r for r in stub.requests if {"search_tool", "use_tool"} <= {str((t.get("function") or t).get("name")) for t in r.get("tools") or []})
+            assert "self-check of the command-line agent" in json.dumps(main["messages"])

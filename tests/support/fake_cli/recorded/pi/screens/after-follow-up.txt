@@ -1,0 +1,36 @@
+ [orchestrator] SPIKE-SLOW work on it
+
+
+ working 0. working 1. working 2. working 3. working 4. working 5.
+
+ Operation aborted
+
+
+ [orchestrator] SPIKE-ASK now
+
+
+
+ AskOrchestrator
+ green
+
+
+ done after tool
+
+
+ [orchestrator] SPIKE-SLOW again
+
+
+ working 0. working 1. working 2. working 3. working 4. working 5. working 6. working 7. working 8. working 9. working
+ 10. working 11. working 12. working 13. working 14. working 15. working 16. working 17. working 18. working 19. ready
+
+
+ [orchestrator] SPIKE-QUESTION after
+
+
+ I looked at it. Should I proceed?
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/work/pro...
+0.5%/32k (auto)                                                                                               stub-model

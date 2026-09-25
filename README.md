@@ -785,6 +785,17 @@ OpenCode's TUI carries its server inside it, on a loopback port of the launch an
 made for that launch; messages go to it under ids the host chooses and come back as its events. The
 team tools, the instructions and the skill are launch configuration in both, never your own.
 
+pi works as staff through a small extension the launch loads with `-e`: it reports the session's
+events, takes the host's messages on a socket in the launch's directory (a steer goes in after the
+running tool call), gives the model the two team tools and answers pi's folder-trust question. pi asks
+for no permissions. In the container it runs on the Node the Harnesses screen installs.
+
+Grok Build works as staff through an agent file the launch hands it with `--agent`: the file carries
+the hooks and the team tools for that session only, so nothing is written into `~/.grok`, and your
+own Claude hooks are kept out of it. Its permission prompts come to the orchestrator or to you and
+are answered with the dialog's own keys; a steer stops the running turn first, because Grok would
+otherwise only queue it behind that turn.
+
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
 bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.

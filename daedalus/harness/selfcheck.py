@@ -181,7 +181,7 @@ async def session_check(
         if not steps.add("ready", ready is None, ready or "the CLI said it was ready"):
             return CheckResult(False, tuple(steps.steps), version, _ms(started))
         await adapter.after_spawn(term, record, plan)
-        if adapter.capabilities.team_tools == "mcp":
+        if adapter.capabilities.team_tools != "none":
             loop = asyncio.get_running_loop()
             deadline = loop.time() + cfg.team_hello_s
             while "hello" not in seen and loop.time() < deadline:
