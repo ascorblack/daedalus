@@ -24,7 +24,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
 from daedalus.extensions.harness import install as install_harness
 from daedalus.harness import ADAPTERS
-from daedalus.harness.claude import ClaudeCodeAdapter, composer, parse_transcript
+from daedalus.harness.claude import ClaudeCodeAdapter, composer, parse_transcript, unpasted
 from daedalus.harness.contract import LAUNCH_DIR, EventKind, HookPost, Launch, LaunchSpec, ScreenClass, StaffEvent
 from daedalus.harness.runtime import CliStaffRuntime, RuntimeEnvironment
 from daedalus.harness.selfcheck import session_check
@@ -141,6 +141,27 @@ def test_the_real_transcript_is_read_as_turns() -> None:
     records = [json.loads(line) for line in (RECORDED / "transcript.jsonl").read_text().splitlines()]
     by_message = {r["message"]["id"]: r["message"]["usage"] for r in records if r.get("type") == "assistant"}
     assert sum(t.usage.output_tokens for t in turns if t.usage) == sum(u["output_tokens"] for u in by_message.values())
+
+
+# A brief of four lines as Claude Code 2.1.282 submitted it after collapsing its paste, byte for byte
+# in shape: a blank line, the tag with its id, the text, the closing tag with the same id.
+WRAPPED_BRIEF = (
+    '\n\n<pasted_content id="777e">\n[orchestrator] Your previous task is closed. Here is your next one.\n\n'
+    '[task 384042 · assigned by the orchestrator]\nObjective: take the password out of HANDOFF.md\n</pasted_content id="777e">\n'
+)
+
+
+def test_a_collapsed_paste_is_read_as_the_text_that_was_sent() -> None:
+    sent = WRAPPED_BRIEF.split(">\n", 1)[1].rsplit("\n</pasted_content", 1)[0]
+    assert unpasted(WRAPPED_BRIEF) == sent
+    assert unpasted("check this:\n\n<pasted_content id=\"0a1b\">\nline one\nline two\n</pasted_content id=\"0a1b\">\n") == "check this:\n\nline one\nline two"
+    assert unpasted("plain words") == "plain words"
+    # The hook's prompt is what the delivery matches against, and the transcript is what the Feed shows.
+    [event] = ClaudeCodeAdapter()._map(None, None, HookPost("UserPromptSubmit", {"prompt": WRAPPED_BRIEF}))  # type: ignore[arg-type]
+    assert event.kind is EventKind.PROMPT_ACKNOWLEDGED and event.payload["prompt"] == sent
+    record = {"type": "user", "timestamp": "2026-09-25T14:29:03.002Z", "message": {"role": "user", "content": WRAPPED_BRIEF}}
+    [turn] = parse_transcript(json.dumps(record))
+    assert (turn.role, turn.text) == ("orchestrator", sent)
 
 
 class Replay:
@@ -538,6 +559,61 @@ async def test_a_cli_whose_team_tools_never_load_is_shown_so(settings: Settings,
         assert s.runtime.channel(await s.team.live((await s.session_row(ada)).id))["team_tools"] == "missing"  # type: ignore[arg-type]
 
 
+async def test_a_real_team_call_proves_the_tools_that_never_said_hello(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, extra_env={"FAKE_TEAM_MCP_SILENT": "1"}, team_hello_s=0.5, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+
+        async def warned() -> bool:
+            return bool(await s.events("staff.channel", staff_id=ada.id))
+
+        await eventually(warned, "the missing team tools were reported")
+        launch = await HarnessStore(db).open_launch_for(row.id)
+        assert launch is not None
+        body = {"tool": "report", "kind": "checkpoint", "note": "halfway", "artifacts": [], "call_id": f"{launch.launch_id}:cafe:1"}
+        assert await asyncio.to_thread(post, s, launch.launch_id, "team", body, wait_ms=5000) == (200, {"text": "reported checkpoint"})
+        live = await s.team.live(row.id)
+        assert s.runtime.channel(live)["team_tools"] == "connected"  # type: ignore[arg-type]
+        assert [e.payload["team_tools"] for e in await s.events("staff.channel", staff_id=ada.id)] == ["missing", "connected"]
+        health = await s.team.health(live)  # type: ignore[arg-type]
+        assert health.team_tools == "connected" and "team_tools_missing" not in health.problems
+
+
+async def test_after_a_restart_the_team_tools_are_not_called_missing_for_want_of_a_second_hello(settings: Settings, db: Database) -> None:
+    """The tools say hello once, when the CLI starts. A host that takes the launch up after a restart
+    never hears it; it took the silence for missing tools thirty seconds later, and said so on the
+    card of a member that went on calling them. Its reports on record are the proof instead, and
+    without one the next call is."""
+    async with stand(settings, db, team_hello_s=0.5, **claude()) as s:
+        trust(s)
+        ada, bea = await started(s, "echo:ready"), await started(s, "echo:ready", name="Bea")
+        for member in (ada, bea):
+            await s.status_event(member, "turn_done_unseen")
+        ada_row, bea_row = await s.session_row(ada), await s.session_row(bea)
+        ada_launch, bea_launch = await HarnessStore(db).open_launch_for(ada_row.id), await HarnessStore(db).open_launch_for(bea_row.id)
+        assert ada_launch is not None and bea_launch is not None
+        body = {"tool": "report", "kind": "checkpoint", "note": "halfway", "artifacts": [], "call_id": f"{ada_launch.launch_id}:cafe:1"}
+        assert (await asyncio.to_thread(post, s, ada_launch.launch_id, "team", body, wait_ms=5000))[0] == 200
+
+        runtime = s.restart_runtime(ClaudeCodeAdapter())
+        assert await runtime.reconcile(wait=5) == 2
+        # A message after the restart is what made the session "ready" again, and started the clock.
+        for member in (ada, bea):
+            told = await s.team.tell(member, "echo:after the restart", by="operator")
+            await message(s, told["message_id"], "acknowledged")
+        await asyncio.sleep(1.5)  # three times the hello's allowance
+        assert not await s.events("staff.channel", staff_id=ada.id) and not await s.events("staff.channel", staff_id=bea.id)
+        ada_channel = runtime.channel(await s.team.live(ada_row.id))  # type: ignore[arg-type]
+        assert ada_channel["team_tools"] == "connected" and ada_channel["last_team_call_at"]
+        assert runtime.channel(await s.team.live(bea_row.id))["team_tools"] == "waiting"  # type: ignore[arg-type]
+        # Bea's next call settles it.
+        body = {"tool": "report", "kind": "checkpoint", "note": "still here", "artifacts": [], "call_id": f"{bea_launch.launch_id}:beef:1"}
+        assert (await asyncio.to_thread(post, s, bea_launch.launch_id, "team", body, wait_ms=5000))[0] == 200
+        assert runtime.channel(await s.team.live(bea_row.id))["team_tools"] == "connected"  # type: ignore[arg-type]
+
+
 # -- the team's side of a command-line member ---------------------------------------------------------
 
 
@@ -594,6 +670,34 @@ async def test_the_next_task_goes_into_the_idle_session_as_its_next_message(sett
         assert reports[-1].payload["task_id"] == next_id and "the second page is done" in reports[-1].payload["text"]
 
 
+async def test_a_next_task_brief_claude_collapsed_is_acknowledged_by_its_hook(settings: Settings, db: Database) -> None:
+    """The brief of a next task is always four lines or more, so Claude shows it as ``[Pasted text #N
+    +K lines]`` and reports it wrapped in ``<pasted_content>`` tags. The receipt stayed "not delivered"
+    while the member worked the task; it must reach acknowledged from the prompt's own hook, with one
+    Enter and nothing typed twice."""
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:the scouting is done")
+        await s.status_event(ada, "turn_done_unseen")
+        first = await s.session_row(ada)
+        await db.execute("UPDATE board_tasks SET status = 'done' WHERE id = ?", (first.task_id,))
+        next_id = await s.task("Second page;echo:the second page is done;")
+        assert (await s.team.assign(ada, next_id, by="orchestrator"))["state"] == "started"
+        brief = (await s.manager.staff.messages(ada.id))[0]
+        assert brief.origin == "orchestrator" and f"[task {next_id} · assigned by the orchestrator]" in brief.text
+        await message(s, brief.id, "acknowledged")
+        # The hook really carried the tags: the fake submits a collapsed paste as Claude does.
+        prompts = [str(e["data"]["body"].get("prompt") or "") for e in s.ptyd.events if e["type"] == "hook" and e["data"].get("name") == "UserPromptSubmit"]
+        assert prompts[-1].startswith('\n\n<pasted_content id="') and "Your previous task is closed." in prompts[-1]
+        delivery = await HarnessStore(db).delivery(brief.id)
+        assert delivery is not None and delivery.via == "paste" and delivery.enters == 1 and delivery.acknowledged_at
+        assert len([e for e in log(s, "submitted") if "Your previous task is closed." in e["text"]]) == 1
+        # The Feed shows the brief as the orchestrator's turn, in its own words.
+        turns = await s.runtime._turns(await s.team.live(first.id))  # type: ignore[arg-type]
+        handed = [t for t in turns if "Your previous task is closed." in t.text]
+        assert [t.role for t in handed] == ["orchestrator"] and handed[0].text.startswith("[orchestrator] Your previous task is closed.")
+
+
 async def test_after_a_restart_the_next_task_waits_for_the_session_to_be_taken_up_not_relaunched(settings: Settings, db: Database) -> None:
     """What a deploy does to members idle at their prompts with tasks waiting: until the new host has
     taken their sessions up, the tasks wait (a launch now would end the session about to be attached);
@@ -608,9 +712,13 @@ async def test_after_a_restart_the_next_task_waits_for_the_session_to_be_taken_u
         await db.execute("UPDATE staff_sessions SET status = 'no_signal' WHERE id = ?", (first.id,))
         one, two = await s.task("One;echo:one is done;"), await s.task("Two;echo:two is done;")
         runtime = s.restart_runtime(ClaudeCodeAdapter())
-        waits = await s.team.assign(ada, one)
+        waits = await s.team.assign(ada, one, by="orchestrator")
         assert (waits["state"], waits["reason"]) == ("queued", "busy") and "taken up again" in waits["detail"]
         assert (await s.team.assign(ada, two))["state"] == "queued"
+        # A new host's queue is what it rebuilds from the board: it keeps who assigned each task.
+        s.team.queue.withdraw(s.project.id, staff_id=ada.id)
+        assert await s.team.rebuild() == 2
+        assert [e["by"] for e in s.team.queue.queue(s.project.id)] == ["orchestrator", "operator"]
         assert await runtime.reconcile(wait=5) == 1
         await s.team.settle(screens=("working", "no_signal"))
         await s.team.queue.pump(s.project.id)
@@ -620,6 +728,7 @@ async def test_after_a_restart_the_next_task_waits_for_the_session_to_be_taken_u
         [waiting] = s.team.queue.queue(s.project.id)
         assert (waiting["task_id"], waiting["reason"]) == (two, "busy")
         brief = (await s.manager.staff.messages(ada.id))[0]
+        assert brief.origin == "orchestrator" and f"[task {one} · assigned by the orchestrator]" in brief.text
         await message(s, brief.id, "acknowledged")
         assert (await s.statuses(ada)).count("starting") == 1
 

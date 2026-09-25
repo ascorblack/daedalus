@@ -748,6 +748,11 @@ class HarnessManager(HarnessCatalog):
         """Check each reachable environment when its last check is older than ``catalog_ttl_s``."""
         while True:
             for env in self.environments():
+                # Asking for the port is what lets the host read the CLIs' transcripts there (the
+                # extension registers their directories as it makes one). A restart with a fresh
+                # catalog checked nothing, so nothing asked, and every transcript — the Feed, a late
+                # acknowledgement, ReadStaff — was refused as "not under an allowed root".
+                self.ports(env)
                 try:
                     if await self.due(env):
                         await self.check(env)

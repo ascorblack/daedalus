@@ -44,6 +44,8 @@ from the real Claude Code 2.1.282 in a throwaway configuration; the recordings a
 - **Pastes** collapse to ``[Pasted text #N]`` over 800 characters, and to ``[Pasted text #N +K
   lines]`` from four lines on, K counting the line breaks (measured); an Enter right after a paste
   is taken (measured), and ``FAKE_CLAUDE_BURST_MS`` makes a window that swallows one for tests.
+  A collapsed paste is submitted — to ``UserPromptSubmit`` and to the transcript — wrapped in
+  ``<pasted_content id="…">`` tags (measured on 2.1.282); the model reads the text itself.
 - **The transcript** is JSON lines in Claude's record shape under
   ``~/.claude/projects/<cwd with every non-alphanumeric as ->/<session>.jsonl``.
 - **Team tools**: the ``--mcp-config`` servers are started as the real CLI starts them, and the
@@ -346,12 +348,12 @@ class FakeClaude(FakeAgent):
             self.record_plain({"type": "queue-operation", "operation": "dequeue", "timestamp": now_iso(), "sessionId": self.session_id})
         else:
             await self._submit_hook(text)
-        self.record("user", {"role": "user", "content": text})
+        self.record("user", {"role": "user", "content": self.tui.reported.get(text, text)})
         self._register()
 
     async def _submit_hook(self, text: str) -> None:
         self.prompt_id = new_id()
-        answers = await self.hook("UserPromptSubmit", {"prompt": text})
+        answers = await self.hook("UserPromptSubmit", {"prompt": self.tui.reported.get(text, text)})
         for answer in answers:
             if isinstance(answer, dict) and answer.get("decision") == "block":
                 self.tui.say(f"⎿ UserPromptSubmit operation blocked by hook: {answer.get('reason', '')}")

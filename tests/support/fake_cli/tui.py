@@ -487,6 +487,9 @@ class Tui:
         self.notice = ""
         self.dialog: Dialog | None = None
         self.parts: list[str | PastePart] = []
+        self.reported: dict[str, str] = {}
+        """A submitted prompt's text to the prompt as the CLI reports it in its hook and transcript,
+        where that differs (Claude wraps a collapsed paste in tags)."""
         self.queued: list[str] = []
         self.pastes = 0
         self.last_paste_end = 0.0
@@ -576,6 +579,20 @@ class Tui:
 
     def composer_value(self) -> str:
         return "".join(p if isinstance(p, str) else p.text for p in self.parts)
+
+    def composer_reported(self) -> str:
+        """What the CLI reports for the composer's text once submitted. Claude Code (2.1.282,
+        measured) wraps each collapsed paste in ``<pasted_content id="…">`` tags, blank line first."""
+        if self.look.marker_style != "claude":
+            return self.composer_value()
+        out = []
+        for part in self.parts:
+            if isinstance(part, str):
+                out.append(part)
+            else:
+                tag = os.urandom(2).hex()
+                out.append(f'\n\n<pasted_content id="{tag}">\n{part.text}\n</pasted_content id="{tag}">\n')
+        return "".join(out)
 
     def render(self) -> None:
         """Draw on the next turn of the loop, once, however many changes asked for it."""
@@ -764,6 +781,9 @@ class Tui:
         text = self.composer_value()
         if not text.strip():
             return
+        reported = self.composer_reported()
+        if reported != text:
+            self.reported[text] = reported
         if text.strip() == "/exit":
             self.parts.clear()
             self.spawn(self._call(self.quit, 0))

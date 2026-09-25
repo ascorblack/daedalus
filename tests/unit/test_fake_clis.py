@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import socket
 import sys
 import time
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from daedalus.harness.capabilities import CAPABILITIES, parse_version, version_tested
+from daedalus.harness.claude import unpasted
 from tests.support.fake_cli.tui import read_log
 from tests.support.fake_cli.websocket import Socket
 from tests.support.harness_ports import PtydTerminalPort, Rig
@@ -238,7 +240,9 @@ async def test_claude_paste_collapse_burst_guard_and_the_swallowed_enter() -> No
         assert "[Pasted text #1" in await term.screen()
         await term.write(keys=["Enter"])
         await rig.event("hook", where={"name": "UserPromptSubmit"})
-        assert rig.hooks("UserPromptSubmit")[0]["body"]["prompt"] == long  # the marker is only on screen
+        # The marker is only on screen; the hook has the text, wrapped in the tags Claude puts round a collapsed paste.
+        prompt = rig.hooks("UserPromptSubmit")[0]["body"]["prompt"]
+        assert re.fullmatch(r'\n\n<pasted_content id="([0-9a-f]{4})">\n(.*)\n</pasted_content id="\1">\n', prompt, re.S) and unpasted(prompt) == long
         assert [e["reason"] for e in log_events(rig, "enter_swallowed")] == ["burst", "fault"]
         assert len(log_events(rig, "submitted")) == 1
         assert "Pasted text" in screen

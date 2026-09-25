@@ -337,6 +337,18 @@ class HarnessStore:
         rows = await self._db.fetchall(f"SELECT * FROM harness_deliveries WHERE message_id IN ({', '.join('?' for _ in message_ids)})", tuple(message_ids))
         return {r["message_id"]: _delivery(r) for r in rows}
 
+    async def last_team_call(self, launch_id: str) -> str | None:
+        """When the launch last reported through its team tools, from the reports on record: each
+        carries the call id the bridge gave it, and every call id begins with the launch's id. A host
+        that takes a launch up after a restart never hears the tools' hello again, and this is its
+        proof that they were loaded."""
+        prefix = f"{launch_id}:"
+        row = await self._db.fetchone(
+            "SELECT MAX(at) AS at FROM app_events WHERE type = 'staff.report' AND substr(json_extract(payload_json, '$.call_id'), 1, ?) = ?",
+            (len(prefix), prefix),
+        )
+        return str(row["at"]) if row is not None and row["at"] else None
+
     async def by_client_ref(self, launch_id: str, client_ref: str) -> DeliveryRow | None:
         """The message a CLI's echo names, so an acknowledgement finds its message after a restart."""
         if not client_ref:

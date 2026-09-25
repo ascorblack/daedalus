@@ -1253,9 +1253,22 @@ class Team:
                 continue
             task = await self.task(row["task_id"])
             folder = self.folder_for(project, member, task)
-            self.queue.add(Entry(project.id, member.id, member.name, row["task_id"], int(row["priority"]), member.harness != "daedalus", "operator", env=folder.env))
+            by = await self._assigned_by(row["task_id"])
+            self.queue.add(Entry(project.id, member.id, member.name, row["task_id"], int(row["priority"]), member.harness != "daedalus", by, env=folder.env))
             count += 1
         return count
+
+    async def _assigned_by(self, task_id: str) -> str:
+        """Who gave the task to its member, from the last ``task.assigned`` on record. The queue used
+        to take every task it rebuilt after a restart as the operator's, so the brief of a task the
+        orchestrator assigned went out as "assigned by the operator" and was listed as the operator's
+        own message."""
+        row = await self.manager.db.fetchone(
+            "SELECT json_extract(payload_json, '$.actor') AS actor FROM app_events WHERE type = 'task.assigned' AND json_extract(payload_json, '$.task_id') = ? "
+            "ORDER BY seq DESC LIMIT 1",
+            (task_id,),
+        )
+        return "orchestrator" if row is not None and row["actor"] == "orchestrator" else "operator"
 
     # -- the team server of command-line staff --------------------------------------------------------
 

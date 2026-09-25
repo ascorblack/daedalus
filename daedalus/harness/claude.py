@@ -26,7 +26,8 @@ and the fake CLI replays their shapes. What matters to the adapter:
 - **Messages.** Pasted, then Enter. ``UserPromptSubmit`` names the prompt, and fires the moment a
   message is queued in a busy TUI, so it acknowledges a steer as well. The composer is the ``❯`` line
   between the two rules above the footer; a paste over 800 characters or four lines shows there as
-  ``[Pasted text #N]``.
+  ``[Pasted text #N]``, and is submitted — to the hook and to the transcript — wrapped in
+  ``<pasted_content id="…">`` tags, which :func:`unpasted` takes off again.
 - **Interrupt.** One Esc (two open the rewind menu). No hook says the turn stopped; the screen's
   "Interrupted" line does, and the adapter reports it.
 - **The prompt after variadic options.** ``--add-dir`` and ``--mcp-config`` take every following
@@ -116,7 +117,21 @@ DIALOG_MARKERS = (
 IDLE_HINT = "? for shortcuts"
 BUSY_HINT = "esc to interrupt"
 PASTE_MARKER = "[Pasted text #"
+_PASTED_OPEN = re.compile(r'<pasted_content id="[^"]*">\n?')
+_PASTED_CLOSE = re.compile(r'\n?</pasted_content(?: id="[^"]*")?>')
 _RULE = re.compile(r"^\s*─{8,}")
+
+
+def unpasted(prompt: str) -> str:
+    """A prompt as it was sent, without the tags Claude wraps a collapsed paste in.
+
+    Claude Code 2.1.282 submits a paste it showed as ``[Pasted text #N +K lines]`` as
+    ``\\n\\n<pasted_content id="777e">\\n…\\n</pasted_content id="777e">\\n``, in the
+    ``UserPromptSubmit`` hook and in the transcript alike. Matched as it came, no brief of four lines
+    or more was ever acknowledged: the delivery compares the start of what it pasted with the start
+    of what the CLI reports, and the report started with the tag. Every next-task brief was marked
+    "not delivered" while the member worked on it."""
+    return _PASTED_CLOSE.sub("", _PASTED_OPEN.sub("", prompt)).strip()
 
 
 def _now() -> str:
@@ -373,7 +388,7 @@ class ClaudeCodeAdapter:
         if name == "SessionStart":
             return [StaffEvent(EventKind.TRANSCRIPT, at, {"ref": body.get("transcript_path") or "", "session_ref": body.get("session_id") or ""}), StaffEvent(EventKind.READY, at, {"source": body.get("source") or ""})]
         if name == "UserPromptSubmit":
-            prompt = str(body.get("prompt") or "")
+            prompt = unpasted(str(body.get("prompt") or ""))
             if prompt.lstrip().startswith("<task-notification>"):
                 # A background task of the CLI finished and it takes that up by itself: a turn, but
                 # no one's message.
@@ -607,7 +622,7 @@ def parse_transcript(text: str) -> list[Turn]:
         if kind != "user":
             continue
         if isinstance(content, str):
-            words = content.strip()
+            words = unpasted(content)
             if not words or words.startswith(("<task-notification>", "<command-name>", "<local-command")):
                 continue
             close()
@@ -622,7 +637,7 @@ def parse_transcript(text: str) -> list[Turn]:
                     used = current["tools"][index]
                     current["tools"][index] = ToolUse(used.name, used.summary, not bool(result.get("is_error")))
             continue
-        words = "\n".join(str(b.get("text") or "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text").strip()
+        words = unpasted("\n".join(str(b.get("text") or "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text"))
         if words:
             close()
             turns.append(Turn(len(turns), "system" if words.startswith("[Request interrupted") else "user", words, started_at=at, ended_at=at))
@@ -630,4 +645,4 @@ def parse_transcript(text: str) -> list[Turn]:
     return turns
 
 
-__all__ = ["ClaudeCodeAdapter", "composer", "parse_transcript", "summary_of"]
+__all__ = ["ClaudeCodeAdapter", "composer", "parse_transcript", "summary_of", "unpasted"]

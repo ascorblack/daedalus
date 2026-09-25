@@ -846,19 +846,34 @@ class CliStaffRuntime:
         """The team tools must say they loaded within a while of the CLI being ready. If they do not,
         the member's card says so and the orchestrator hears it once; the member works on, with its
         status still coming from hooks and the screen, and messages still reaching it."""
+        if session.plan is None:
+            # Taken up after a restart: the tools said hello to the host before this one, when the
+            # CLI started, and do not say it again. Watching for it here marked every such member
+            # "team tools not connected" thirty seconds after each deploy, while it went on calling
+            # them. What is known of it is on record (``last_team_call``) or comes with its next call.
+            return
         await session.ready.wait()
         wait = self.config().team_hello_s
         deadline = self.clock() + wait
         while self.clock() < deadline:
-            if session.channel.get("hello"):
+            if session.channel.get("hello") or session.channel.get("team_tools") == "connected":
                 return
             await asyncio.sleep(min(1.0, wait / 10))
-        if session.channel.get("hello") or session.finished:
+        if session.channel.get("hello") or session.channel.get("team_tools") == "connected" or session.finished:
             return
         session.channel["team_tools"] = "missing"
         live = await self.lookup(session.staff_session_id)
         if live is not None:
             await self.ingress.channel(live, "missing", f"no team tools {wait:g} s after {self.adapter.capabilities.label} was ready: its reports and questions cannot arrive")
+
+    async def _tools_connected(self, session: CliSession, why: str) -> None:
+        """The team tools are known to work; a member shown without them hears it corrected."""
+        was = session.channel.get("team_tools")
+        session.channel["team_tools"] = "connected"
+        if was == "missing":
+            live = await self.lookup(session.staff_session_id)
+            if live is not None:
+                await self.ingress.channel(live, "connected", why)
 
     def channel(self, live: LiveSession) -> dict[str, Any]:
         """What the host last heard on each of the session's channels, for the staff view."""
@@ -866,7 +881,7 @@ class CliStaffRuntime:
         if session is None:
             return {}
         return {
-            "team_tools": session.channel.get("team_tools") or ("connected" if session.channel.get("hello") else "waiting"),
+            "team_tools": session.channel.get("team_tools") or ("connected" if session.channel.get("hello") or session.channel.get("team") else "waiting"),
             "last_hook_at": session.channel.get("hook") or None,
             "last_team_call_at": session.channel.get("team") or None,
             "team_hello_at": session.channel.get("hello") or None,
@@ -975,15 +990,11 @@ class CliStaffRuntime:
         body = post.body if isinstance(post.body, dict) else {}
         tool = str(body.get("tool") or "")
         if tool == "hello":
-            first = not session.channel.get("hello")
             session.channel["hello"] = post.at or _now()
-            if first or session.channel.get("team_tools") == "missing":
-                was_missing = session.channel.get("team_tools") == "missing"
-                session.channel["team_tools"] = "connected"
-                live = await self.lookup(session.staff_session_id)
-                if live is not None and was_missing:
-                    await self.ingress.channel(live, "connected", "the team tools loaded late")
+            await self._tools_connected(session, "the team tools loaded late")
             return
+        # A real call is better proof than the hello: the tools are loaded and the model uses them.
+        await self._tools_connected(session, "the team tools answered a call")
         live = await self.lookup(session.staff_session_id)
         if live is None:
             if post.reply_id:
@@ -1304,6 +1315,10 @@ class CliStaffRuntime:
                 hooks=hooks,
                 last_signal=self.clock(),
             )
+            called = await self.store.last_team_call(launch.launch_id)
+            if called:
+                session.channel["team"] = called
+                session.channel["team_tools"] = "connected"
             await self.adapter.attach(session.term, launch)
             starting = live.session.status == StaffState.STARTING.value
             await self._take_up_messages(session, live, starting=starting)

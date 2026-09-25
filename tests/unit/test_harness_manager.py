@@ -452,3 +452,30 @@ async def test_an_environment_that_cannot_be_reached_is_refused_before_anything_
         assert await b.manager.due("container") is True
         await b.manager.check("container")
         assert await b.manager.due("container") is False
+
+
+async def test_every_tick_asks_for_each_environments_port_even_with_nothing_to_check(db: Database) -> None:
+    """The port is what registers the transcript directories with the daemon; after a restart with a
+    fresh catalog nothing is due, and the transcripts stayed unreadable until something else asked."""
+    asked: list[str] = []
+
+    def port(env: str) -> None:
+        asked.append(env)
+
+    manager = HarnessManager(HarnessStore(db), ports=port, environments=lambda: ["host", "container"], config=HarnessConfig, live_staff=lambda env, harness: [], folder=lambda folder_id: None)
+
+    async def nothing_due(env: str) -> bool:
+        return False
+
+    manager.due = nothing_due  # type: ignore[method-assign]
+    running = asyncio.create_task(manager.run())
+    try:
+        for _ in range(50):
+            if asked:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+    assert asked == ["host", "container"]
