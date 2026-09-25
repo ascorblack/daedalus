@@ -57,6 +57,10 @@ class StateContext:
     holds the one just resolved."""
     waiting_for: str = ""
     """The current ``waiting_for``, kept when the state does not change."""
+    turn_ended: bool = False
+    """The CLI's turn ended while a request was open (it told the model "pending" and stopped).
+    Answering that request then leaves a CLI with nothing to do, not a working one: its answer goes
+    to it as the next message, which waits for exactly that."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +178,8 @@ def _from_waiting(current: StaffState, event: StaffEvent, context: StateContext,
         if context.open_requests:
             state, waiting_for = _waiting(context.open_requests)
             return Transition(state, waiting_for, signal=signal)
+        if kind is EventKind.REQUEST_RESOLVED and context.turn_ended:
+            return _to(current, StaffState.TURN_DONE_UNSEEN, signal=signal)
         return _to(current, StaffState.WORKING, signal=signal)
     if kind is EventKind.TURN_CANCELLED:
         # A cancelled turn withdraws what it asked; the runtime withdraws the requests themselves.

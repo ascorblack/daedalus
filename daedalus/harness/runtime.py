@@ -97,6 +97,17 @@ CALLS_REMEMBERED = 256
 Lookup = Callable[[str], Awaitable[LiveSession | None]]
 
 
+def _settled_reply(ask: Any) -> dict[str, Any]:
+    """What a replayed team question is told when the question it repeats was already settled: the
+    answer it got, in the words the first post was given, or why it was withdrawn."""
+    resolution = ask.resolution or {}
+    if resolution.get("closed"):
+        return {"text": f"This question was withdrawn: {resolution['closed']}", "error": True}
+    allow = resolution.get("allow")
+    words = str(resolution.get("text") or "").strip() or ", ".join(str(s) for s in resolution.get("selected") or [])
+    return {"text": words or ("yes" if allow else "no" if allow is False else "")}
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -277,6 +288,10 @@ class CliSession:
     worker: DeliveryWorker | None = None
     reported: bool = False
     """A Report arrived in the current turn; a turn that ends without one is reported for it."""
+    turn_ended_waiting: bool = False
+    """The turn ended while a request was still open, and nothing has started since: when that
+    request is answered the CLI is idle, and the answer waits for it as a message. Without this the
+    session went back to ``working`` and the message waited for a turn that had already ended."""
     resend_first: bool = False
     """After a restart during the start: the first message still has to go by channel once ready."""
     channel: dict[str, str] = field(default_factory=dict)
@@ -668,7 +683,11 @@ class CliStaffRuntime:
             current = StaffState(live.session.status)
         except ValueError:
             current = StaffState.WORKING
-        context = StateContext(first_prompt_pending=session.first_prompt_pending, open_requests=tuple(session.open.values()), waiting_for=live.session.waiting_for)
+        if kind is EventKind.TURN_COMPLETED and session.open:
+            session.turn_ended_waiting = True
+        elif kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
+            session.turn_ended_waiting = False
+        context = StateContext(first_prompt_pending=session.first_prompt_pending, open_requests=tuple(session.open.values()), waiting_for=live.session.waiting_for, turn_ended=session.turn_ended_waiting)
         step = next_state(current, event, context)
         if kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
             session.first_prompt_pending = False
@@ -681,7 +700,7 @@ class CliStaffRuntime:
             await self.ingress.permission(live, event.native_id, str(event.payload.get("tool") or ""), str(event.payload.get("summary") or ""))
         elif kind is EventKind.QUESTION_ASKED and event.native_id:
             options = [str(o) for o in event.payload.get("options") or []]
-            await self.ingress.question(live, event.native_id, str(event.payload.get("text") or event.payload.get("summary") or ""), options)
+            await self.ingress.question(live, event.native_id, str(event.payload.get("text") or event.payload.get("summary") or ""), options, call_id=str(event.payload.get("call_id") or "") or None)
             if step.state is StaffState.PERMISSION:
                 # The question is recorded, but the permission still holds the process.
                 await self.ingress.status(live, StaffState.PERMISSION.value, step.waiting_for)
@@ -920,12 +939,24 @@ class CliStaffRuntime:
                     session.held_for.setdefault(earlier, []).append(post.reply_id)
                 self._remember_call(session, call_id, ("ask", earlier))
                 return
+            before = await self.ingress.asked(live, call_id) if call_id else None
+            if before is not None:
+                # The same call again after its question was settled, or after a host restart forgot
+                # the calls it had seen: a replay, never a second question. An open one takes this
+                # post as the one to answer; a settled one is answered at once with what it got.
+                self._remember_call(session, call_id, ("ask", before.request_ref))
+                if before.open:
+                    if post.reply_id:
+                        session.held_for.setdefault(before.request_ref, []).append(post.reply_id)
+                elif post.reply_id:
+                    await session.term.reply(post.reply_id, _settled_reply(before))
+                return
             # The reference names the held post, so the answer finds its way back even after the
             # host restarted; an ask nobody holds gets a reference of its own and goes as a message.
             ref = f"team:{post.reply_id}" if post.reply_id else f"team-message:{uuid.uuid4().hex[:12]}"
             session.asked[normalised(question)] = ref
             self._remember_call(session, call_id, ("ask", ref))
-            await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []]}, native_id=ref, launch_id=session.launch.launch_id))
+            await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []], "call_id": call_id}, native_id=ref, launch_id=session.launch.launch_id))
         elif post.reply_id:
             await session.term.reply(post.reply_id, {"text": f"the team has no tool {tool!r}", "error": True})
 

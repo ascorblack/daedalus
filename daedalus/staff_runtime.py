@@ -245,8 +245,13 @@ class TeamIngress(Protocol):
     async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str) -> str:
         """A permission the executor asks for; routed by the project's autonomy. Returns the request's id."""
 
-    async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str]) -> str:
-        """A question the executor's own dialog asks; routed like a permission. Returns the request's id."""
+    async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str], *, call_id: str | None = None) -> str:
+        """A question the executor's own dialog asks; routed like a permission. Returns the request's id.
+        A team call's question keeps its ``call_id``, so the same call seen again finds it (``asked``)."""
+
+    async def asked(self, live: LiveSession, call_id: str) -> Any:
+        """The request a team call with this ``call_id`` opened in the session, open or settled, or
+        ``None``. It outlives the host: a call replayed after a restart finds what the first one got."""
 
     async def message_state(self, message_id: str, state: str, error: str = "") -> None:
         """A later receipt for a message: a terminal write is ``written``, never ``acknowledged``."""

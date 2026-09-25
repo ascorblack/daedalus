@@ -979,11 +979,16 @@ class LivePtyd(FakePtyd):
         self.emit("hook", launch.terminal_id or None, data)
         if future is None:
             return 204, b"", ""
+        # As the daemon does: a caller that gives up (its own timer is shorter than the hold) closes
+        # the connection, and the post stops waiting, so a later reply is refused rather than lost.
+        gone = asyncio.ensure_future(reader.read(1))
         try:
-            return await asyncio.wait_for(asyncio.shield(future), hold_ms / 1000)
-        except TimeoutError:
+            done, _ = await asyncio.wait({future, gone}, timeout=hold_ms / 1000, return_when=asyncio.FIRST_COMPLETED)
+            if future in done:
+                return future.result()
             return 204, b"", ""
         finally:
+            gone.cancel()
             launch.held.pop(data["reply_id"], None)
 
     # -- streams -----------------------------------------------------------------------------------------
