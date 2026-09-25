@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from daedalus.config import HarnessConfig, Settings, TerminalsConfig
+from daedalus.extensions.harness import catalog_roots
 from daedalus.extensions.staff import Team
 from daedalus.harness.capabilities import capabilities
 from daedalus.harness.contract import (
@@ -299,8 +300,9 @@ def harness_config(**changes: Any) -> HarnessConfig:
 
 def terminals_service(db: Database, manager: SessionManager, run: Path, home: Path, *, cap: int = 20) -> Terminals:
     service = Terminals(db, run_dirs={"container": run, "host": None}, config=lambda: TerminalsConfig(running_cap=cap, kill_grace_ms=300, agent_launch_wait_seconds=60), owners=ManagerOwners(manager), bus=manager.bus)
-    # Where the fake keeps its transcripts, as the Claude adapter will name its own.
-    service.set_extra_roots("container", "claude", [str(home)])
+    # Exactly what the host lets itself read of a home, not the whole home: a transcript directory
+    # missing from that list makes the adapter's reads fail here as they would against the daemon.
+    service.set_extra_roots("container", "harness-catalog", catalog_roots(str(home)))
     return service
 
 
