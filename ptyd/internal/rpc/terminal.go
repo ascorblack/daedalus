@@ -131,6 +131,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	for k, v := range p.Env {
 		extra[k] = v
 	}
+	term.SetPWD(extra, cwd)
 	if _, set := extra["HISTFILE"]; box != nil && !set {
 		extra["HISTFILE"] = sandbox.HistoryFile
 	}

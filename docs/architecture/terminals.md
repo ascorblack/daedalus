@@ -645,7 +645,9 @@ The daemon's environment, minus `DAEDALUS_PTYD_*`, `DAEDALUS_TERMINAL_ID`, `DAED
 `KITTY_*`, `ITERM_*`, `WT_SESSION`, `CLAUDE*` and the caller's `strip_env` patterns (a name, or a
 prefix ending in `*`); plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `CLAUDE_CODE_NO_FLICKER=1`,
 `CLAUDE_CODE_SCROLL_SPEED=3`, `DAEDALUS_TERMINAL_ID=<id>`, `DAEDALUS_SI_NONCE=<nonce>` and `HOME`;
-plus the caller's `env` on top.
+plus the caller's `env` on top; and last, outside Windows, `PWD` set to the working directory, so a
+shell shows the path it was asked for rather than what its links resolve to (on macOS `/tmp` is
+`/private/tmp`).
 When the effective character type (the first of `LC_ALL`, `LC_CTYPE`, `LANG` that is set) is not
 UTF-8, the non-UTF-8 overrides are removed and `LANG=C.UTF-8` is set; a user's `ru_RU.UTF-8` is
 kept.

@@ -271,6 +271,22 @@ func TestCreateValidation(t *testing.T) {
 	}
 }
 
+// A shell started in a directory reached through a link says it is in the directory it was asked
+// for, not in the one the link resolves to: on macOS every temporary directory is such a path.
+func TestTheWorkingDirectoryIsThePathAskedFor(t *testing.T) {
+	f := start(t)
+	target := filepath.Join(f.dir, "target")
+	link := filepath.Join(f.dir, "link")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	f.call(t, "terminal.create", map[string]any{"id": "pwd", "argv": []string{"sh", "-c", "echo at=$(pwd)"}, "cwd": link}, nil)
+	f.waitOutput(t, "pwd", "at="+link+"\n")
+}
+
 func TestWriteKindsFollowTheModes(t *testing.T) {
 	f := start(t)
 	f.call(t, "terminal.create", map[string]any{"id": "c", "argv": []string{"cat", "-v"}}, nil)
