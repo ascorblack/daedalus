@@ -411,6 +411,8 @@ class OpenAICompatibleProvider(ILLMProvider):
         cost = await self._record_usage(request, "structured", usage_raw, normalized, started)
         finish = (data.get("choices") or [{}])[0].get("finish_reason") or "stop"
         parsed = parse_json_text(text)
+        if parsed is None and finish == "stop":
+            parsed = close_unterminated_object(text)
         if parsed is None:
             # The head and the tail are what tell a summary that outgrew its cap from a refusal or a loop.
             logger.warning("%s: structured reply unusable (finish=%s, %s chars): head=%r tail=%r", self.endpoint.id, finish, len(text), text[:160], text[-160:])
@@ -727,6 +729,25 @@ def _message_text(data: dict[str, Any]) -> str:
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def close_unterminated_object(text: str) -> dict[str, Any] | None:
+    """A JSON object the model finished writing but did not close, closed.
+
+    A model in JSON mode sometimes stops (``finish_reason=stop``, not ``length``) right after the closing
+    quote of its last string, without the final brace: a whole compaction summary came back as
+    ``{"summary": "…(UNKNOWN)."`` and was thrown away as "not JSON", and the summariser counted a failure
+    against that unit. Only a reply the model ended itself is closed here — one the output cap cut is
+    unfinished content, and closing it would commit a summary that stops mid-sentence.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith('"'):
+        return None
+    try:
+        value = json.loads(stripped + "}")
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def parse_json_text(text: str) -> dict[str, Any] | None:

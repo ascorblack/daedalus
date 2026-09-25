@@ -425,3 +425,19 @@ async def test_a_context_refusal_carries_the_sizes_the_server_stated() -> None:
             pass
     assert raised.value.context_window is None and raised.value.input_tokens is None
 
+
+async def test_a_summary_the_model_did_not_close_is_closed() -> None:
+    """The live shape: JSON mode, finish=stop, the whole summary written and the final brace missing."""
+    unclosed = '{"summary": "Turn 1: explored the repo; two tool calls; contents not yet read (UNKNOWN)."'
+    body = json.dumps({"choices": [{"message": {"content": unclosed}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    response = await _provider(body).complete_structured(_request(), {"type": "object"})
+    assert json.loads(response.message.text)["summary"].endswith("(UNKNOWN).")
+
+
+async def test_a_summary_the_output_cap_cut_is_still_refused() -> None:
+    from protocore.contracts.llm import LLMProviderError
+
+    cut = '{"summary": "Turn 1: explored the repo; two tool calls; contents not yet"'
+    body = json.dumps({"choices": [{"message": {"content": cut}, "finish_reason": "length"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    with pytest.raises(LLMProviderError, match="truncated"):
+        await _provider(body).complete_structured(_request(), {"type": "object"})
