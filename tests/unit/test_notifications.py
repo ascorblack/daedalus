@@ -122,6 +122,19 @@ async def test_the_summary_counts_what_is_worth_a_badge(service: NotificationSer
     assert [e["title"] for e in (await service.list("all"))["entries"]] == ["Pick one", "Run failed", "Heartbeat: quiet"]
 
 
+async def test_a_repeat_moves_to_the_top_and_the_pages_still_cover_everything_once(service: NotificationService) -> None:
+    # A repeat merges into its earlier row; listing by id used to leave it under older entries.
+    await service.post(Draft("run_finished", "a", dedupe_key="run:a"))
+    await service.post(Draft("system", "b"))
+    await service.post(Draft("system", "c"))
+    await service.post(Draft("run_finished", "a", dedupe_key="run:a"))
+    assert [e["title"] for e in (await service.list("all"))["entries"]] == ["a", "c", "b"]
+    first = await service.list("all", limit=2)
+    rest = await service.list("all", before=first["next_before"], limit=2)
+    assert [e["title"] for e in first["entries"]] == ["a", "c"] and [e["title"] for e in rest["entries"]] == ["b"]
+    assert rest["next_before"] is None
+
+
 async def test_the_views_and_the_page_cursor(service: NotificationService) -> None:
     for n in range(5):
         await service.post(Draft("system", f"n{n}", tone="warning" if n % 2 else "info", project_id="p1" if n < 2 else None))

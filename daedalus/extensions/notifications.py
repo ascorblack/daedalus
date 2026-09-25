@@ -822,10 +822,18 @@ class NotificationService:
         if project_id:
             clauses.append("project_id = ?")
             params.append(project_id)
+        # Newest occurrence first: a repeat merges into its earlier row and moves its `updated_at`, so
+        # ordering by id left a notification that fired a minute ago under hours-old ones. The cursor
+        # stays the last entry's id; the page continues below that entry's (updated_at, id).
         if before is not None:
-            clauses.append("id < ?")
-            params.append(int(before))
-        rows = await self.db.fetchall(f"SELECT * FROM notifications WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?", [*params, limit + 1])
+            anchor = await self.db.fetchone("SELECT updated_at FROM notifications WHERE id = ?", (int(before),))
+            if anchor is None:
+                clauses.append("id < ?")
+                params.append(int(before))
+            else:
+                clauses.append("(updated_at < ? OR (updated_at = ? AND id < ?))")
+                params.extend([anchor["updated_at"], anchor["updated_at"], int(before)])
+        rows = await self.db.fetchall(f"SELECT * FROM notifications WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC, id DESC LIMIT ?", [*params, limit + 1])
         entries = [_view(r, now) for r in rows[:limit]]
         return NotificationPage(
             entries=entries,

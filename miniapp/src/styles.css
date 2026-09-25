@@ -285,7 +285,10 @@ a { color: var(--accent); text-decoration: none; }
 .chip.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
 .chip.select { cursor: pointer; min-height: var(--ctl-h-sm); padding: 4px 11px; color: var(--fg); }
 .chip.select[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: transparent; }
-.chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; margin: 4px 0 8px; }
+/* overflow-x alone makes the row a scroll container on both axes, and in a flex column (the bell's
+   popover) it may then shrink below its chips and scroll them vertically. It never shrinks, and only
+   scrolls sideways. */
+.chips { display: flex; flex-shrink: 0; gap: 6px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding-bottom: 2px; margin: 4px 0 8px; }
 .chips::-webkit-scrollbar { display: none; }
 .chips .chip { flex: none; }
 .bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
