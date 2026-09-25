@@ -1,0 +1,4 @@
+{"t": 0.0, "name": "team", "query": {}, "body": {"tool": "hello", "stage": "extension", "client": {"name": "pi"}}}
+{"t": 0.001, "name": "pi", "query": {}, "body": {"event": "ready", "at": "2026-09-25T00:02:27.253Z", "reason": "startup", "sessionId": "01a0d5de-da96-70fb-9cbe-372818d3ae23", "sessionFile": "/home/someone/.pi/agent/sessions/--work-project--/2026-09-25T00-02-27-094Z_01a0d5de-da96-70fb-9cbe-372818d3ae23.jsonl", "cwd": "/work/project", "model": "unknown/unknown"}}
+{"t": 0.01, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:02:27.262Z", "id": "", "source": "interactive", "text": "hello there", "streamingBehavior": ""}}
+{"t": 6.195, "name": "pi", "query": {}, "body": {"event": "session_end", "at": "2026-09-25T00:02:33.460Z", "reason": "quit"}}

@@ -514,10 +514,13 @@ class PiTooling(Tooling):
     sign_in = ("pi",)
     """pi signs in from inside its TUI (``/login``); the terminal opens it and the operator types it."""
     modes = ()
-    efforts = ("off", "minimal", "low", "medium", "high", "xhigh")
+    # ``--thinking`` as ``pi --help`` lists it (0.84.2); a model without reasoning clamps it to off.
+    efforts = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
     cheap_markers = ("haiku", "mini", "flash", "nano")
 
     def own_update(self, latest: str) -> Plan:
+        # ``pi update --help``: "pi update pi  Update pi only (self works as alias to pi)" — pi alone,
+        # not the packages the operator installed into it.
         return Plan(argv=("pi", "update", "self"), target=latest)
 
     async def login_state(self, env: EnvironmentPort) -> LoginState:
@@ -537,8 +540,12 @@ class PiTooling(Tooling):
             data = json.loads(result.stdout)
         except ValueError:
             data = None
-        if isinstance(data, dict) and isinstance(data.get("authenticated"), bool):
-            return LoginState("yes" if data["authenticated"] else "no", provider)
+        # Measured (0.84.2): ``{"status": "ready", "provider", "authType"}``, or ``{"status":
+        # "not_ready", "provider", "reason": "credentials_not_configured"}`` with exit code 1.
+        if isinstance(data, dict) and data.get("status") in ("ready", "not_ready"):
+            ready = data["status"] == "ready"
+            detail = " · ".join(str(part) for part in (provider, data.get("authType") if ready else data.get("reason")) if part)
+            return LoginState("yes" if ready else "no", detail)
         return LoginState("yes" if result.exit_code == 0 else "no", provider)
 
     async def catalog(self, env: EnvironmentPort, cwd: str | None) -> Catalog:

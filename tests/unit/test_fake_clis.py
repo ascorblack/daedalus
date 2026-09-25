@@ -615,14 +615,14 @@ async def test_pi_bridge_sends_steers_and_acknowledges_by_id() -> None:
 async def test_pi_under_tmux_loses_every_enter_and_credentials_are_a_trap() -> None:
     async with Rig() as rig:
         term = await rig.spawn(["pi", "--approve"], env={"TMUX": "/tmp/tmux-0/default"})
-        await rig.screen_until(term, "enter send")
+        await rig.screen_until(term, "fake/fake-model")
         await term.write(paste="echo:never")
         await term.write(keys=["Enter"])
         await wait(lambda: bool(log_events(rig, "enter_swallowed")))
         assert [e["reason"] for e in log_events(rig, "enter_swallowed")] == ["environment"]
         assert not log_events(rig, "submitted")
         check = await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--json", "--no-refresh"])
-        assert json.loads(check.stdout) == {"provider": "anthropic", "authenticated": True}
+        assert json.loads(check.stdout) == {"status": "ready", "provider": "anthropic", "authType": "oauth"}
         await rig.env_port.run(["pi", "auth", "check", "--provider", "anthropic", "--credentials"])
         assert log_events(rig, "credentials_printed")
 
