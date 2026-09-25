@@ -90,11 +90,22 @@ HOLD_MARGIN_MS = 30_000
 READ_TRANSCRIPT_TURNS = 400
 DIFF_TIMEOUT = 30.0
 SCREEN_TAIL_CHARS = 1200
+"""How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
 CALLS_REMEMBERED = 256
 """Team call ids a session keeps for spotting a repeat; a replay is of the latest posts."""
-"""How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
+PORT_ATTEMPTS = 3
+"""Plans tried for a CLI that serves on a port of its own before its start fails: each chooses a port
+at random in the range, so a taken one is usually followed by a free one."""
 
 Lookup = Callable[[str], Awaitable[LiveSession | None]]
+
+
+class _PortTaken(Exception):
+    """The port a plan chose already has a listener; the launch is undone and planned again."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__(f"port {port} is taken")
+        self.port = port
 
 
 def _settled_reply(ask: Any) -> dict[str, Any]:
@@ -432,6 +443,30 @@ class CliStaffRuntime:
         )
 
     async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
+        """One launch, planned again while the port the plan chose is taken (``PORT_ATTEMPTS``)."""
+        last = _PortTaken(0)
+        for attempt in range(1, PORT_ATTEMPTS + 1):
+            try:
+                return await self._launch_once(req, resume_ref=resume_ref)
+            except _PortTaken as taken:
+                logger.info("%s: port %d is taken (attempt %d of %d); planning another", self.kind, taken.port, attempt, PORT_ATTEMPTS)
+                last = taken
+        raise RuntimeError(f"{self.adapter.capabilities.label} found its port taken {PORT_ATTEMPTS} times (last {last.port}); free ports in harness.opencode_port_range or widen it")
+
+    async def _taken_port(self, env: str, launch_id: str, ports: tuple[int, ...], actor: str) -> int | None:
+        """A port the plan means the CLI to listen on that something already answers on. The CLI
+        would fail to start on it after its whole launch; asking first costs one dial."""
+        for port in ports:
+            try:
+                stream = await self.terminals.net_dial(env, f"tcp:127.0.0.1:{port}", launch_id, actor=actor)
+            except Exception:  # noqa: BLE001 — refused, which is what a free port says
+                continue
+            with contextlib.suppress(Exception):
+                await stream.close()
+            return port
+        return None
+
+    async def _launch_once(self, req: StartRequest, *, resume_ref: str) -> Started:
         actor = self._actor(req.staff_session_id)
         launch_id = "l" + secrets.token_hex(8)
         spec = self._spec(req, launch_id, resume_ref)
@@ -448,6 +483,7 @@ class CliStaffRuntime:
             session_ref=plan.session_ref,
             harness_version=row.installed_version if row is not None else "",
             started_at=_now(),
+            adapter_state=plan.adapter_state,
         )
         # Written before the daemon hears of it: a launch the database does not know is one a
         # restarted host could never take up or end.
@@ -459,6 +495,8 @@ class CliStaffRuntime:
         try:
             daemon_launch = await self.terminals.register_launch(req.env, DaemonLaunch(launch_id=launch_id, files=dict(plan.files), ports=list(plan.ports), hold_max_ms=hold), actor=f"agent:{actor}")
             registered = True
+            if plan.ports and (taken := await self._taken_port(req.env, launch_id, plan.ports, f"agent:{actor}")) is not None:
+                raise _PortTaken(taken)
             directory, dials = daemon_launch.dir, daemon_launch.dial_dir
             cwd = _substitute(plan.cwd, directory, dials) or str(req.cwd)
             title = f"{req.staff.name} · {req.task.title}" if req.task is not None else req.staff.name

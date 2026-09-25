@@ -237,6 +237,50 @@ async def test_a_steer_waits_for_the_turn_and_says_so_and_an_interrupt_ends_it(s
         await s.status_event(ada, "turn_done_unseen")
 
 
+async def test_after_a_host_restart_the_member_is_taken_up_on_its_own_server(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **opencode()) as s:
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+        launch = await HarnessStore(db).open_launch_for(row.id)
+        assert launch is not None
+        # The port and the password outlive the host in the launch row, and never show in its repr.
+        stored = json.loads(launch.adapter_state)
+        assert stored["port"] and stored["password"] and stored["password"] not in repr(launch)
+        # A new adapter knows nothing of the launch: it reads the server back and takes up the session.
+        runtime = s.restart_runtime(OpenCodeAdapter())
+        assert await runtime.reconcile(wait=5) == 1
+        told = await s.team.tell(ada, "echo:after the restart", by="operator")
+        await message(s, told["message_id"], "acknowledged")
+        await s.status_event(ada, "turn_done_unseen")
+        assert (await s.session_row(ada)).cli_session_id == row.cli_session_id
+        assert not [e for e in await s.events("staff.status", staff_id=ada.id) if e.payload["status"] == "error"]
+        # Ended, the launch forgets the password.
+        assert await s.team.release(ada)
+        ended = await HarnessStore(db).launch(launch.launch_id)
+        assert ended is not None and ended.ended_at and ended.adapter_state == ""
+
+
+async def test_a_taken_port_is_planned_again(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    taken, free = free_port(), free_port()
+    squatter = socket.socket()
+    squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    squatter.bind(("127.0.0.1", taken))
+    squatter.listen()
+    chosen = iter([taken, free])
+    monkeypatch.setattr("daedalus.harness.opencode.random.randint", lambda low, high: next(chosen))
+    try:
+        async with stand(settings, db, adapter=OpenCodeAdapter(), opencode_port_range=f"{min(taken, free)}-{max(taken, free)}") as s:
+            ada = await started(s, "echo:on the second port")
+            await s.status_event(ada, "turn_done_unseen")
+            launches = await db.fetchall("SELECT launch_id, ended_at, adapter_state FROM harness_launches ORDER BY started_at")
+            # The first plan was undone before its terminal was made; the second runs.
+            assert len(launches) == 2 and launches[0]["ended_at"] and launches[0]["adapter_state"] == ""
+            assert json.loads(launches[1]["adapter_state"])["port"] == free
+    finally:
+        squatter.close()
+
+
 async def test_the_self_check_runs_an_opencode_session_through_every_channel(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **opencode()) as s:
         env = RuntimeEnvironment(s.terminals, "container", home=str(s.home))
