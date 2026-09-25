@@ -75,7 +75,8 @@ READ = """
     actFs: px(acts[0], 'fontSize'),
     iconbtn: icons.map(box),
     chips: all('.chat-head .chip').map(box),
-    menuBtn: box(one('.sidebar-menu')),
+    menuBtn: box(one('.rail [data-rail="menu"]', '.sidebar-menu')),
+    rail: box(one('.rail')),
   };
 }
 """
@@ -118,25 +119,32 @@ def measure_agents(browser, width: int, height: int, mobile: bool) -> dict:  # t
     return out
 
 
+# The width of what stands left of the conversation: the rail, plus the sidebar when it is open.
+LEFT = """() => {
+  const w = (s) => { const el = document.querySelector(s); return el ? Math.round(el.getBoundingClientRect().width) : 0; };
+  return { rail: w('.rail'), sidebar: w('nav.sidebar'), main: Math.round(document.querySelector('.main').getBoundingClientRect().left) };
+}"""
+
+
 def check_sidebar(browser) -> dict:  # type: ignore[no-untyped-def]
-    """The collapse and the menu, which are behaviour rather than sizes: the strip, its persistence, the popover's keyboard."""
+    """The fold and the menu, which are behaviour rather than sizes: the rail left alone, its persistence, the popover's keyboard."""
     context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark")
     context.add_init_script(OPEN_FOLDERS)
     page = open_page(context, f"agents/{S1}", ".sidebar")
     out: dict = {}
-    out["open"] = page.evaluate("() => Math.round(document.querySelector('.sidebar').getBoundingClientRect().width)")
+    out["open"] = page.evaluate(LEFT)
     page.keyboard.press("Control+\\")
     page.wait_for_timeout(400)
-    out["collapsed"] = page.evaluate("() => Math.round(document.querySelector('.sidebar').getBoundingClientRect().width)")
+    out["collapsed"] = page.evaluate(LEFT)
     page.reload()
-    page.wait_for_selector(".sidebar", timeout=15000)
+    page.wait_for_selector(".rail", timeout=15000)
     page.wait_for_timeout(400)
-    out["collapsedAfterReload"] = page.evaluate("() => Math.round(document.querySelector('.sidebar').getBoundingClientRect().width)")
+    out["collapsedAfterReload"] = page.evaluate(LEFT)
     page.keyboard.press("Control+\\")
     page.wait_for_timeout(400)
-    out["reopened"] = page.evaluate("() => Math.round(document.querySelector('.sidebar').getBoundingClientRect().width)")
+    out["reopened"] = page.evaluate(LEFT)
 
-    page.locator(".sidebar-menu").click()
+    page.locator('.rail [data-rail="menu"]').click()
     page.wait_for_selector(".navmenu[role='menu']", timeout=5000)
     out["menuItems"] = page.locator(".navmenu [role='menuitem']").count()
     out["menuLang"] = page.locator(".navmenu .lang").count()
@@ -148,7 +156,7 @@ def check_sidebar(browser) -> dict:  # type: ignore[no-untyped-def]
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
     out["menuClosed"] = page.locator(".navmenu").count() == 0
-    out["focusBack"] = page.evaluate("() => document.activeElement === document.querySelector('.sidebar-menu')")
+    out["focusBack"] = page.evaluate("() => document.activeElement === document.querySelector('.rail [data-rail=\"menu\"]')")
     page.keyboard.press("Control+Shift+M")
     page.wait_for_timeout(300)
     out["shortcutOpens"] = page.locator(".navmenu[role='menu']").count() == 1
@@ -223,23 +231,31 @@ def judge(m: dict) -> list[str]:
             problems.append(f"{m['vw']}: the timeline is {m['timeline']['w']}px, over the {stripe} stripe")
         if m["vw"] >= 1024 and m["composerBox"] and abs(m["composerBox"]["w"] - m["timeline"]["w"]) > 2:
             problems.append(f"{m['vw']}: the composer is {m['composerBox']['w']}px against a {m['timeline']['w']}px timeline")
-        # Beside the 42 % panel a 1440 window keeps a 677 px conversation column (the plan's own
-        # figure): the timeline inside it is that minus the gutters.
-        if m["vw"] == 1440 and m["timeline"]["w"] < 600:
-            problems.append(f"1440: the timeline is {m['timeline']['w']}px beside the panel, narrower than 600")
+        # Beside the 42 % panel a 1440 window keeps a 647 px conversation column: 1440 less the 52 px
+        # rail and the 272 px sidebar is a 1116 px chat area, 58 % of it the conversation, and the
+        # timeline is that less the gutters. The rail took 52 px the old 677 px figure did not count
+        # (the sidebar's strip then stood only where the column was folded), so the floor is 590.
+        if m["vw"] == 1440 and m["timeline"]["w"] < 590:
+            problems.append(f"1440: the timeline is {m['timeline']['w']}px beside the panel, narrower than 590")
     return problems
 
 
 def judge_sidebar(s: dict) -> list[str]:
     problems: list[str] = []
-    if s["open"] != 272 or s["collapsed"] != 48 or s["collapsedAfterReload"] != 48 or s["reopened"] != 272:
-        problems.append(f"sidebar widths open/collapsed/after reload/reopened: {s['open']}/{s['collapsed']}/{s['collapsedAfterReload']}/{s['reopened']}")
+    # Open: the 52 px rail and the 272 px column beside it. Folded: the rail alone, which is the folded
+    # form now (it replaced the 48 px strip), and the conversation starts where the rail ends.
+    want = {"open": (52, 272, 324), "collapsed": (52, 0, 52), "collapsedAfterReload": (52, 0, 52), "reopened": (52, 272, 324)}
+    for key, (rail, sidebar, main) in want.items():
+        got = s[key]
+        if (got["rail"], got["sidebar"], got["main"]) != (rail, sidebar, main):
+            problems.append(f"{key}: rail/sidebar/conversation start {got['rail']}/{got['sidebar']}/{got['main']}, not {rail}/{sidebar}/{main}")
     if s["menuItems"] < 11:
         problems.append(f"the menu has {s['menuItems']} items")
     if not s["menuLang"]:
         problems.append("the menu has no language switch")
-    if s["menuBox"]["x"] > 16 or s["menuBox"]["bottom"] > 64 or s["menuBox"]["w"] != 300:
-        problems.append(f"the menu is not anchored bottom-left at 300 wide: {s['menuBox']}")
+    # The menu opens from the rail's foot, beside the rail rather than over it.
+    if not 52 <= s["menuBox"]["x"] <= 64 or s["menuBox"]["bottom"] > 16 or s["menuBox"]["w"] != 300:
+        problems.append(f"the menu is not anchored bottom-left beside the rail at 300 wide: {s['menuBox']}")
     if s["menuRow"] != 36:
         problems.append(f"a menu row is {s['menuRow']}px")
     for key in ("menuFocusInside", "arrowMoves", "menuClosed", "focusBack", "shortcutOpens", "gKeyNavigates"):

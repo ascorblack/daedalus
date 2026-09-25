@@ -1,8 +1,10 @@
 // The main chat's own parts: the questions the projects put to the operator, as cards answered where
-// they are shown, and the dispatches as cards that say where each piece of work stands.
+// they are shown, and the dispatches under way as cards that say where each piece of work stands.
+// Both sit in the conversation's flow, after its latest turn.
 //
 // A card is the same request row the project's chat and "Needs you" show; the first answer to reach
-// the host wins, and every window then shows the one line of who answered where. A request that acts
+// the host wins. The project's chat then shows the one line of who answered where, and here the card
+// leaves the flow. A request that acts
 // on the host is answered here, where the whole of it is shown — never from Telegram or a lock screen.
 
 import { useState } from "react";
@@ -15,58 +17,37 @@ import { invalidate, useQuery } from "../store";
 import { relTime } from "../format";
 import { confirmAsync, errorText } from "../ui";
 import { MAIN_KEY } from "./data";
-import { answeredAsks, answeredLine, dispatchState, groupAsks, orderDispatches, takesWords } from "./model";
+import { dispatchState, goingDispatches, groupAsks, takesWords } from "./model";
 
 type Toast = (text: string) => void;
 
-/** Everything above the main chat's conversation: the questions first, then the work handed out. */
-export function MainBoard({ view, toast }: { view: MainView; toast: Toast }) {
+/**
+ * What waits in the main chat, in the conversation's own flow after its latest turn: the questions
+ * still open, the projects being set up, and the work under way. Nothing here is a strip above the
+ * chat any more: the operator found the strip of answered and withdrawn lines and "N finished
+ * dispatches" useless, and on a phone it took the screen. What is resolved leaves the flow — the
+ * reports that closed a dispatch are already lines of the chat, and an answered card is gone.
+ */
+export function MainFlow({ view, toast }: { view: MainView; toast: Toast }) {
   const groups = groupAsks(view.asks);
-  const answered = answeredAsks(view.asks);
-  const dispatches = orderDispatches(view.dispatches);
-  const going = dispatches.filter((d) => d.status === "open" || d.status === "blocked");
-  const over = dispatches.filter((d) => d.status !== "open" && d.status !== "blocked").slice(0, 5);
-  const [showAll, setShowAll] = useState(false);
-  if (!groups.length && !dispatches.length && !answered.length && !view.setup.length) return null;
+  const going = goingDispatches(view.dispatches);
+  if (!groups.length && !going.length && !view.setup.length) return null;
   return (
-    <section className="main-board" aria-label={t("main.board.label")}>
-      {groups.length > 0 && (
-        <div className="main-asks" aria-label={plural("main.questions", view.questions)}>
-          {groups.map((group) => (
-            <div key={group.key} className="main-ask-group">
-              <div className="main-group-head">
-                <Icon name="question" size={13} />
-                <span className="truncate">{group.name}</span>
-              </div>
-              {group.asks.map((ask) => <MainAskCard key={ask.id} ask={ask} toast={toast} />)}
-            </div>
-          ))}
+    <section className="main-flow" aria-label={t("main.board.label")}>
+      {groups.map((group) => (
+        <div key={group.key} className="main-ask-group" aria-label={plural("main.questions", group.asks.length)}>
+          <div className="main-group-head">
+            <Icon name="question" size={13} />
+            <span className="truncate">{group.name}</span>
+          </div>
+          {group.asks.map((ask) => <MainAskCard key={ask.id} ask={ask} toast={toast} />)}
         </div>
-      )}
-      {answered.length > 0 && (
-        <ul className="main-answered">
-          {answered.map((ask) => (
-            <li key={ask.id} className="main-answered-line" data-ask={ask.short_id}>
-              <Icon name="check" size={12} />
-              <span className="truncate">{(ask.project_name ? `${ask.project_name} · ` : "") + ask.text.split("\n")[0]}</span>
-              <span className="main-answered-how">{answeredLine(ask)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      ))}
       {view.setup.map((p) => <SetupLine key={p.project_id} projectId={p.project_id} name={p.name} toast={toast} />)}
       {going.length > 0 && (
         <div className="main-dispatches">
           {going.map((d) => <DispatchCard key={d.id} dispatch={d} toast={toast} />)}
         </div>
-      )}
-      {over.length > 0 && (
-        <details className="main-closed" open={showAll} onToggle={(e) => setShowAll((e.target as HTMLDetailsElement).open)}>
-          <summary>{plural("main.dispatch.closedcount", over.length)}</summary>
-          <div className="main-dispatches">
-            {over.map((d) => <DispatchCard key={d.id} dispatch={d} toast={toast} />)}
-          </div>
-        </details>
       )}
     </section>
   );

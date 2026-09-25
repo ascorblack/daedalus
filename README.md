@@ -728,7 +728,8 @@ subscription window used. Calls nobody priced are counted in `unpriced`, never a
 rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
 the same numbers.
 
-**The main orchestrator.** One chat, pinned first in the app, where you say "in Bakery, add a
+**The main orchestrator.** One chat, the home of the app's orchestration mode (the rail's
+Orchestration item; on a phone, the first row of that mode's list), where you say "in Bakery, add a
 gluten-free menu": it hands the work to that project's orchestrator as a *dispatch* and follows it. It
 never touches files, staff or a board; its tools are `Projects`, `Delegate`, `Progress`, `Cancel`,
 `CreateProject` and `Answer`, beside `Notify`, `StaySilent` and the history tools. A dispatch wakes the

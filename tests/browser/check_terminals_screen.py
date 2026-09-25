@@ -321,8 +321,8 @@ def navigation(browser, problems: list[str]) -> None:  # type: ignore[no-untyped
     except Exception:  # noqa: BLE001
         problems.append(f"g t went to {page.url}")
     page.goto(f"{BASE}/inbox?token=t&scheme=dark&lang=en")
-    page.wait_for_selector(".sidebar-menu", timeout=10000)
-    page.locator(".sidebar-menu").click()
+    page.wait_for_selector(".rail [data-rail='menu']", timeout=10000)
+    page.locator(".rail [data-rail='menu']").click()
     item = page.locator(".navmenu[role='menu'] >> text=Terminals")
     if not item.count():
         problems.append("the menu has no Terminals item")
@@ -342,11 +342,10 @@ def navigation(browser, problems: list[str]) -> None:  # type: ignore[no-untyped
 
     phone = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark", is_mobile=True, has_touch=True)
     page = open_page(phone, term, "agents", ".tabbar")
-    page.locator(".tabbar button").last.click()
-    page.wait_for_selector(".more-grid", timeout=5000)
-    more = page.locator(".more-grid .more-item", has_text="Terminals")
+    # Terminals is a tab of its own on a phone, where the Inbox used to be.
+    more = page.locator(".tabbar a[data-screen='terminals']")
     if not more.count():
-        problems.append("the More sheet has no Terminals")
+        problems.append("the tab bar has no Terminals")
     else:
         more.first.click()
         page.wait_for_selector(".term-card", timeout=10000)

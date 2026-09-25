@@ -109,6 +109,8 @@ GATES: dict[str, object] = {
     "/api/prompt-change": {"models": [{"id": "default", "label": "Test model"}], "proposal": None},
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
+    # The rail's account item opens Settings' security section, which lists the passkeys.
+    "/api/auth/passkeys": [{"id": 1, "name": "Laptop", "created_at": "2026-09-01T10:00:00Z", "last_used_at": "2026-09-25T08:00:00Z", "transports": ["internal"]}],
     "/api/status": {"ok": True},
     # The badge on the Inbox entry of the navigation and on the bell.
     "/api/notifications/summary": {"unseen": 0, "needs_you": 0},

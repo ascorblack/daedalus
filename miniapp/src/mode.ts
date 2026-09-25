@@ -1,13 +1,14 @@
 // The two modes of the app: Agents, the chats and projects the operator works in directly, and
 // Orchestration, the main orchestrator and the projects that have an orchestrator of their own. The
-// operator asked for them apart: nothing of one is drawn in the other's lists, and the switch between
-// them is the only place where one mode speaks of the other — as a count of what waits there.
+// operator asked for them apart: nothing of one is drawn in the other's lists, and the two mode items
+// of the rail (the first two tabs on a phone) are the only place where one mode speaks of the other —
+// as a count of what waits there.
 //
 // Everything here is pure, so which session belongs where, what the switch counts and where a link
 // lands are answered by tests without a browser.
 
 import type { MainView, ProjectFolder, ProjectRef, SessionSummary } from "./api";
-import { ORCHESTRATION, projectHome, projectSessionPath, type Route } from "./router";
+import { ORCHESTRATION, ORCHESTRATION_LIST, projectHome, projectSessionPath, type Route } from "./router";
 
 export type Mode = "agents" | "orchestration";
 
@@ -38,9 +39,12 @@ export function rememberMode(mode: Mode): void {
   }
 }
 
-/** Where switching into a mode lands: the start canvas, or the main orchestrator's chat. */
-export function modeHome(mode: Mode): string {
-  return mode === "orchestration" ? ORCHESTRATION : "/app/agents";
+/** Where switching into a mode lands: the start canvas, or orchestration's home. On a desktop that
+ *  is the main orchestrator's chat, with the list of projects in the column beside it; a phone has no
+ *  column, so there it is the list — Main first, then the projects — and the main chat is one tap in. */
+export function modeHome(mode: Mode, wide = true): string {
+  if (mode === "agents") return "/app/agents";
+  return wide ? ORCHESTRATION : ORCHESTRATION_LIST;
 }
 
 /** Whether a project belongs to orchestration mode: its orchestrator is switched on. A project whose

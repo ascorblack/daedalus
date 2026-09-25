@@ -55,6 +55,13 @@ describe("the mode of a route", () => {
     expect(modeHome("agents")).toBe("/app/agents");
   });
 
+  it("opens orchestration on a phone at its list, and on a desktop at the main chat", () => {
+    // The desktop's column is the list, so the centre can be the main chat; a phone has no column.
+    expect(modeHome("orchestration", false)).toBe("/app/orchestration/projects");
+    expect(modeHome("orchestration", true)).toBe("/app/orchestration");
+    expect(modeHome("agents", false)).toBe("/app/agents");
+  });
+
   it("reads the phone's list of projects apart from the main chat", () => {
     const list = parse("/app/orchestration/projects", "");
     expect([list.screen, list.detail, list.project]).toEqual(["orchestration", "projects", null]);

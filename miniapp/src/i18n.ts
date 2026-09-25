@@ -175,7 +175,6 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "shell.projects.all": { en: "All projects", ru: "Все проекты" },
   "shell.projects.add": { en: "Add a project", ru: "Добавить проект" },
   "shell.search": { en: "Search…", ru: "Поиск…" },
-  "shell.search.title": { en: "Search and go (Ctrl/⌘ K)", ru: "Поиск и переход (Ctrl/⌘ K)" },
   "shell.search.label": { en: "Search and go", ru: "Поиск и переход" },
   "shell.search.placeholder": { en: "Go to, open, create…", ru: "Перейти, открыть, создать…" },
   "shell.search.nomatch": { en: "Nothing matches.", ru: "Ничего не нашлось." },
@@ -185,9 +184,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "shell.search.team": { en: "Team of {name}", ru: "Команда проекта «{name}»" },
   "shell.sidebar.label": { en: "Sessions", ru: "Сессии" },
   "shell.sidebar.collapse": { en: "Fold the sidebar (Ctrl/⌘ \\)", ru: "Свернуть боковую панель (Ctrl/⌘ \\)" },
-  "shell.sidebar.expand": { en: "Unfold the sidebar (Ctrl/⌘ \\)", ru: "Развернуть боковую панель (Ctrl/⌘ \\)" },
   "nav.menu": { en: "Menu", ru: "Меню" },
-  "nav.menu.title": { en: "Menu (Ctrl/⌘ ⇧ M)", ru: "Меню (Ctrl/⌘ ⇧ M)" },
   "shell.back": { en: "Back", ru: "Назад" },
   "shell.waiting": { en: "{n} waiting", ru: "{n} ждут вас" },
 
@@ -3314,7 +3311,6 @@ Object.assign(DICT, {
   "main.dispatch.done": { en: "done", ru: "готово" },
   "main.dispatch.blocked": { en: "blocked", ru: "заблокировано" },
   "main.dispatch.cancelled": { en: "cancelled", ru: "отменено" },
-  "main.dispatch.closedcount": { en: "{n} finished dispatch|{n} finished dispatches", ru: "{n} завершённое поручение|{n} завершённых поручения|{n} завершённых поручений" },
   "main.dispatch.cancel": { en: "Cancel", ru: "Отменить" },
   "main.dispatch.cancel.confirm": { en: "Stop \"{title}\"? The project's orchestrator is told to stop that work.", ru: "Остановить «{title}»? Оркестратору проекта скажут прекратить эту работу." },
   "main.dispatch.cancelled.toast": { en: "Dispatch cancelled", ru: "Поручение отменено" },
@@ -3339,7 +3335,10 @@ Object.assign(DICT, {
 
 // The two modes: Agents, and Orchestration with the main orchestrator and the orchestrated projects.
 Object.assign(DICT, {
-  "mode.label": { en: "Mode", ru: "Режим" },
+  "rail.label": { en: "Navigation", ru: "Навигация" },
+  "rail.home": { en: "Home", ru: "Главная" },
+  "rail.toggle": { en: "Toggle sidebar", ru: "Показать боковую панель" },
+  "rail.account": { en: "Account", ru: "Аккаунт" },
   "mode.agents": { en: "Agents", ru: "Агенты" },
   "mode.orchestration": { en: "Orchestration", ru: "Оркестрация" },
   "mode.to.orchestration": { en: "Switch to orchestration", ru: "Перейти в оркестрацию" },

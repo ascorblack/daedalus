@@ -968,6 +968,9 @@ def scroll_to_voices(page: Page) -> None:
 
 def open_projects(page: Page) -> None:
     """The switcher over a list already grouped by project: the folders on one side, the agents in them on the other."""
+    # A picture before this one folds the sidebar, and folded there is only the rail: unfold it first.
+    if not page.locator("nav.sidebar").count():
+        page.locator(".rail .rail-home.folded").click()
     page.locator(".sidebar .project-chip").click()
     page.wait_for_selector(".project-row", timeout=5000)
 
@@ -981,13 +984,13 @@ def open_hire(page: Page) -> None:
 
 
 def open_menu(page: Page) -> None:
-    """The menu at the bottom-left: every destination with its count, the language, Settings — over the conversation."""
-    page.locator(".sidebar-menu").click()
+    """The menu from the rail's foot: every destination with its count, the language, Settings — over the conversation."""
+    page.locator(".rail [data-rail='menu']").click()
     page.wait_for_selector(".navmenu[role='menu']", timeout=5000)
 
 
 def fold_sidebar(page: Page) -> None:
-    """The sidebar as a strip: the same controls as icons, and a dot for every agent that is working or waiting."""
+    """The sidebar folded away: the rail alone beside the conversation, its Home turned into the way to unfold."""
     page.keyboard.press("Control+\\")
     page.wait_for_timeout(400)
 
@@ -1451,8 +1454,9 @@ def run_focus() -> int:
 
 
 def run_main() -> int:
-    """The main orchestrator's chat, orchestration mode's home: the projects' questions grouped by
-    project, the work it handed out, and the reports it was woken with (``ONLY=main``)."""
+    """The main orchestrator's chat, orchestration mode's home on a desktop: the reports it was woken
+    with, then in the flow the projects' questions grouped by project and the work under way; and on a
+    phone the list the Orchestration tab opens, then the chat as a detail of it (``ONLY=main``)."""
     OUT.mkdir(parents=True, exist_ok=True)
     main = MainStub(LANG)
 
@@ -1472,13 +1476,14 @@ def run_main() -> int:
         desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', '0'); } catch (e) {}")
         page = desk.new_page()
         page.route("**/api/**", handle)
-        shot(page, "main", "orchestration", wait=".main-board .ask-card", settle=900)
+        shot(page, "main", "orchestration", wait=".main-flow .ask-card", settle=900)
         desk.close()
-        # On a phone the main chat keeps the app's tabs under it: they hold the switch between the modes.
+        # On a phone the Orchestration tab lands on the list, Main first; the chat is a detail of it.
         phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
         page = phone.new_page()
         page.route("**/api/**", handle)
-        shot(page, "phone-main", "orchestration", wait=".main-board .ask-card", settle=900)
+        shot(page, "phone-orchestration", "orchestration/projects", wait=".orch-list .main-entry", settle=900)
+        shot(page, "phone-main", "orchestration", wait=".main-flow .ask-card", settle=900)
         phone.close()
         browser.close()
     return UNHANDLED.report()
@@ -1664,9 +1669,9 @@ def run() -> int:
         shot(page, "team", f"project/{P1}/team", wait=".staff-row")
         shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
         # The start canvas under a folded sidebar has neither a list nor a chat, so waiting for
-        # either timed out here and stopped every picture after this one; the sidebar is what the
-        # switcher opens from.
-        shot(page, "projects", "agents", wait=".sidebar", before=open_projects)
+        # either timed out here and stopped every picture after this one; the rail is there either
+        # way, and the switcher opens from the sidebar it unfolds.
+        shot(page, "projects", "agents", wait=".rail", before=open_projects)
         shot(page, "voice", "voice")
         shot(page, "voice-settings", "settings/voice", wait=".stt-list .stt-card", before=scroll_to_voices, settle=700)
         shot(page, "board", "board")

@@ -3,7 +3,7 @@
 // On a desktop it is a column of the chat grid; on a phone the same tabs in a full-height sheet.
 // The state is a value (panel.ts); this file draws it and wires the pointer and the keys.
 
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Sheet, useLayer } from "./dialogs";
 import { Icon, IconName } from "./icons";
 import {
@@ -16,6 +16,7 @@ import {
   applyPanelQuery,
   canGoBack,
   canGoForward,
+  boundPanelPct,
   clampPanelPct,
   closePanel,
   crumbsOf,
@@ -38,8 +39,7 @@ import { navigate, pathFor } from "./router";
 import { PreviewSource, Viewer, ViewerInfo } from "./preview";
 import { HtmlNavigation } from "./htmlpreview";
 import { SPLIT_MIN, TREE_W, TREE_W_MIN, TREE_W_MAX } from "./explorer";
-import { usePaneWidth } from "./layout";
-import { PaneHandle } from "./layout";
+import { PaneHandle, clampWidth, pixelDrag, usePaneWidth, type PaneDrag } from "./layout";
 import { t } from "./i18n";
 
 export type PanelHostProps = {
@@ -65,8 +65,8 @@ export type PanelHostProps = {
   badges?: Partial<Record<PanelTab, number>>;
   /** Phones: the tabs in a full sheet instead of a column. */
   sheet?: boolean;
-  /** Desktop: drag the left edge; `dx` is in pixels. */
-  onDrag?: (dx: number) => void;
+  /** Desktop: what dragging the left edge does. */
+  drag?: PaneDrag;
 };
 
 /** What the panel keeps for itself: a reload counter for the viewer, the phone-width toggle,
@@ -125,7 +125,7 @@ function Column(props: HostProps) {
   });
   return (
     <aside ref={box} inert={props.local.closing} className={`panel ${props.local.closing ? "panel-closing" : ""} ${state.expanded ? "full" : ""} ${visible ? "shown" : ""} ${props.local.narrow ? "phone-width" : ""}`} aria-label={t("panel.label")}>
-      {props.onDrag && !state.expanded && <PaneHandle side="right" onDrag={props.onDrag} />}
+      {props.drag && !state.expanded && <PaneHandle side="right" drag={props.drag} />}
       <Tabs {...props} />
       <Toolbar {...props} />
       <Body {...props} />
@@ -213,6 +213,8 @@ function Body(props: HostProps) {
   const box = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(false);
   const [width, setWidth] = usePaneWidth("tree", TREE_W, TREE_W_MIN, TREE_W_MAX);
+  const files = useRef<HTMLDivElement>(null);
+  const treeDrag = pixelDrag(() => files.current, "width", () => files.current?.getBoundingClientRect().width ?? width, (w) => clampWidth(w, TREE_W_MIN, TREE_W_MAX), setWidth);
   useEffect(() => {
     if (!box.current) return;
     const observer = new ResizeObserver(([e]) => setWide(e.contentRect.width >= SPLIT_MIN));
@@ -228,7 +230,7 @@ function Body(props: HostProps) {
     <div ref={box} id={`${local.ids}-body`} role="tabpanel" aria-labelledby={`${local.ids}-tab-${state.tab}`} tabIndex={-1} className={`panel-body tab-${state.tab} ${split ? "split" : ""}`}>
       {loading && <div className={`preview-progress ${progress == null ? "busy" : ""}`} role="progressbar" aria-label={t("common.loading")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress == null ? undefined : Math.round(progress * 100)}><i style={progress == null ? undefined : { width: `${progress * 100}%` }} /></div>}
       {state.tab === "details" && props.details?.(local.ids)}
-      {props.files !== undefined && <div className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" onDrag={(dx) => setWidth(width + dx)} />}</div>}
+      {props.files !== undefined && <div ref={files} className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" drag={treeDrag} />}</div>}
       {state.tab === "preview" && (entry ? <Viewer key={`${entry.base}:${entry.path}:${entry.lines ?? ""}:${local.gen}`} src={entry as PreviewSource} onInfo={local.setInfo} onNavigation={local.setNav} className="panel-viewer" /> : <div className="empty">{t("panel.preview.empty")}</div>)}
       {state.tab === "jobs" && props.jobs}
       {state.tab && props.project?.[state.tab]}
@@ -368,15 +370,26 @@ function queryString(q: Record<string, string | null>): string {
     .join("&");
 }
 
-/** The panel's share of the chat area, dragged and remembered as a percentage. */
-export function usePanelWidth(): [number, (dx: number, areaWidth: number) => void] {
+/** The panel's share of the chat area, dragged and remembered as a percentage. The drag writes
+ *  `--panel-w` on the chat area itself while the pointer moves (see PaneDrag); the state follows once,
+ *  when it lets go. */
+export function usePanelWidth(area: RefObject<HTMLElement | null>): [number, PaneDrag] {
   const [pct, setPct] = useState(() => readPanelPct());
-  const drag = useCallback((dx: number, areaWidth: number) => {
-    setPct((p) => {
-      const next = clampPanelPct(p - (dx / Math.max(1, areaWidth)) * 100, areaWidth);
+  const areaWidth = () => area.current?.clientWidth || window.innerWidth;
+  const share = (w: number) => (w / Math.max(1, areaWidth())) * 100;
+  const drag: PaneDrag = {
+    // What is on the page, not the stored share: the stylesheet holds the panel to 360 px at least.
+    begin: () => area.current?.querySelector<HTMLElement>(":scope > .panel")?.getBoundingClientRect().width ?? (areaWidth() * pct) / 100,
+    show: (w) => area.current?.style.setProperty("--panel-w", `${boundPanelPct(share(w), areaWidth()).toFixed(3)}%`),
+    commit: (w) => {
+      const next = clampPanelPct(share(w), areaWidth());
       rememberPanelPct(next);
-      return next;
-    });
-  }, []);
+      setPct(next);
+      // React writes the same value back only when it differs from the last render's; a drag that
+      // ends where it began would otherwise leave the unrounded share on the page.
+      area.current?.style.setProperty("--panel-w", `${next}%`);
+    },
+    sign: -1,
+  };
   return [pct, drag];
 }

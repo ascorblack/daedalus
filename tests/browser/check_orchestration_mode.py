@@ -1,12 +1,12 @@
 """Orchestration as a mode of its own, at 1440 px and on a 390 px phone, in both languages.
 
-What is checked is what the operator asked for. The switch between Agents and Orchestration sits at
-the top of the column (on a phone, in the tab bar), is remembered by the device, and has addresses of
-its own. Switching into orchestration opens the main orchestrator's chat at once, and the column then
-holds Main and only the projects with an orchestrator, each with what it is doing, its team and how
-many requests wait. Agents mode holds none of them — not the project, not its orchestrator or staff,
-not the main chat — and says only, as one quiet count on the switch, how many requests wait over
-there. A project opens in its focus mode and its way back returns to orchestration's home. Old links
+What is checked is what the operator asked for. The two modes are the rail's Agents and
+Orchestration items (on a phone, the first two tabs); the mode is remembered by the device and has
+addresses of its own. On a desktop, switching into orchestration opens the main orchestrator's chat
+at once, and the column then holds Main and only the projects with an orchestrator, each with what it
+is doing, its team and how many requests wait; on a phone it opens that list, Main first. Agents mode
+holds none of them — not the project, not its orchestrator or staff, not the main chat — and says
+only, as one quiet count on the rail's Orchestration icon, how many requests wait over there. A project opens in its focus mode and its way back returns to orchestration's home. Old links
 (the host's notifications, Telegram, a plain session address) land in orchestration mode; Terminals
 stays reachable from both; the palette and the `g` keys work in both. Nothing scrolls sideways.
 """
@@ -112,13 +112,13 @@ def desktop(page: Page, lang: str) -> None:
     serve(page, focus, main, lang)
     go(page, "/agents", lang)
 
-    # Agents mode: the switch on top, nothing of orchestration in the column, one quiet count.
+    # Agents mode: the rail's mode items, nothing of orchestration in the column, one quiet count.
     side = page.locator("nav.sidebar")
-    switch = side.locator(".mode-switch")
-    expect(switch).to_be_visible()
-    expect(switch.locator(".mode-tab[data-mode='agents']")).to_have_class(re.compile(r"\bon\b"))
-    expect(switch.locator(".mode-tab[data-mode='agents']")).to_contain_text(words["agents"])
-    expect(switch.locator(".mode-tab[data-mode='orchestration'] .mode-count")).to_have_text(WAITING)
+    rail = page.locator("nav.rail")
+    expect(page.locator(".mode-switch")).to_have_count(0)
+    expect(rail.locator("[data-rail='agents']")).to_have_class(re.compile(r"\bon\b"))
+    expect(rail.locator("[data-rail='agents']")).to_have_attribute("aria-label", words["agents"])
+    expect(rail.locator("[data-rail='orchestration'] .rail-badge.quiet")).to_have_text(WAITING)
     expect(side.locator(f".folder[data-project='{GARDEN}']")).to_be_visible()
     expect(side.locator(f"[data-project='{PID}']")).to_have_count(0)
     expect(side.locator(".main-entry, .main-entry-strip")).to_have_count(0)
@@ -127,15 +127,15 @@ def desktop(page: Page, lang: str) -> None:
     fits(page, f"{lang} agents mode")
 
     # Into orchestration: the main chat at once, and a column of Main and the orchestrated projects.
-    switch.locator(".mode-tab[data-mode='orchestration']").click()
+    rail.locator("[data-rail='orchestration']").click()
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
-    expect(page.locator(".main-board")).to_be_visible()
+    expect(page.locator(".main-flow")).to_be_visible()
     expect(page.locator(".chat .chat-title")).to_have_text("Main")
     assert ("/api/main", {}) in main.posts, "switching in opens the main chat's session"
     orch = page.locator("nav.orch-sidebar")
     expect(orch).to_be_visible()
-    expect(orch.locator(".mode-tab[data-mode='orchestration']")).to_have_class(re.compile(r"\bon\b"))
-    expect(orch.locator(".mode-count")).to_have_count(0)
+    expect(rail.locator("[data-rail='orchestration']")).to_have_class(re.compile(r"\bon\b"))
+    expect(rail.locator(".rail-badge.quiet")).to_have_count(0)
     expect(orch.locator(".orch-main .main-entry")).to_have_class(re.compile(r"\bcurrent\b"))
     rows = orch.locator(".orch-row")
     expect(rows).to_have_count(1)
@@ -148,7 +148,7 @@ def desktop(page: Page, lang: str) -> None:
     assert page.evaluate("localStorage.getItem('daedalus.mode')") == "orchestration"
     fits(page, f"{lang} orchestration home")
 
-    # Remembered by the device: a bare /app opens orchestration again.
+    # Remembered by the device: a bare /app opens orchestration again, at the main chat on a desktop.
     go(page, "/", lang)
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
     expect(page.locator("nav.orch-sidebar")).to_be_visible()
@@ -166,18 +166,21 @@ def desktop(page: Page, lang: str) -> None:
     keys(page, "g", "t")
     page.wait_for_url("**/app/terminals")
     expect(page.locator("nav.orch-sidebar")).to_be_visible()
+    expect(rail.locator("[data-rail='orchestration']")).to_have_class(re.compile(r"\bmode\b"))
+    expect(rail.locator("[data-rail='terminals']")).to_have_class(re.compile(r"\bon\b"))
     keys(page, "g", "a")
     page.wait_for_url("**/app/agents")
-    expect(page.locator("nav.sidebar .mode-tab[data-mode='agents']")).to_have_class(re.compile(r"\bon\b"))
+    expect(rail.locator("[data-rail='agents']")).to_have_class(re.compile(r"\bon\b"))
     keys(page, "g", "t")
     page.wait_for_url("**/app/terminals")
-    expect(page.locator("nav.sidebar .mode-tab[data-mode='agents']")).to_have_class(re.compile(r"\bon\b"))
+    expect(page.locator("nav.sidebar")).to_be_visible()
+    expect(rail.locator("[data-rail='agents']")).to_have_class(re.compile(r"\bmode\b"))
     keys(page, "g", "o")
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
 
     # The palette from Agents mode opens an orchestrated project in orchestration mode.
     go(page, "/agents", lang)
-    expect(page.locator("nav.sidebar .mode-switch")).to_be_visible()
+    expect(page.locator("nav.sidebar")).to_be_visible()
     page.keyboard.press("Control+k")
     page.locator(".palette-sheet input").fill("Bakery")
     page.locator(".palette-row", has_text=words["open"]).first.click()
@@ -190,7 +193,7 @@ def desktop(page: Page, lang: str) -> None:
     expect(page.locator("nav.project-sidebar")).to_be_visible()
     go(page, "/main", lang)
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
-    expect(page.locator(".main-board")).to_be_visible()
+    expect(page.locator(".main-flow")).to_be_visible()
     go(page, "/agents/orch-bakery", lang)
     page.wait_for_url(re.compile(rf"/app/orchestration/project/{PID}(\?|$)"))
     expect(page.locator(".chat.in-project.orchestrator")).to_be_visible()
@@ -217,9 +220,11 @@ def phone(page: Page, lang: str) -> None:
     serve(page, focus, main, lang)
     go(page, "/agents", lang)
 
-    # The tab bar carries both modes; the count waits quietly on Orchestration's tab.
+    # The tab bar carries both modes, then Terminals and the Board (the Inbox is in More); the count
+    # waits quietly on Orchestration's tab.
     bar = page.locator("nav.tabbar")
     expect(bar).to_be_visible()
+    assert bar.locator("a[data-screen]").evaluate_all("els => els.map(e => e.dataset.screen)") == ["agents", "orchestration", "terminals", "board"]
     expect(bar.locator("a[data-screen='agents']")).to_have_class(re.compile(r"\bactive\b"))
     tab = bar.locator("a[data-screen='orchestration']")
     expect(tab).to_contain_text(words["orchestration"])
@@ -231,23 +236,25 @@ def phone(page: Page, lang: str) -> None:
         assert label.evaluate("e => e.scrollWidth <= e.clientWidth + 1"), f"{lang} phone: a tab's label does not fit: {label.inner_text()}"
     fits(page, f"{lang} phone agents")
 
-    # One tap into orchestration: the main chat, with the tabs under its composer.
+    # One tap into orchestration: the list the desktop's column holds, Main first, then the projects.
     tab.click()
+    page.wait_for_url("**/app/orchestration/projects**")
+    expect(bar.locator("a[data-screen='orchestration']")).to_have_class(re.compile(r"\bactive\b"))
+    expect(bar.locator(".mode-count")).to_have_count(0)
+    listing = page.locator(".orch-list")
+    expect(listing.locator("> :first-child .main-entry")).to_be_visible()
+    # Main opens the chat as a detail of the list: no tab bar, and its back returns to the list.
+    listing.locator(".main-entry").click()
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
-    expect(page.locator(".main-board .ask-card").first).to_be_visible()
-    flow = page.locator("nav.tabbar.flow")
-    expect(flow).to_be_visible()
-    expect(flow.locator("a[data-screen='orchestration']")).to_have_class(re.compile(r"\bactive\b"))
-    expect(flow.locator(".mode-count")).to_have_count(0)
-    composer = page.locator(".chat .composer").first.bounding_box()
-    tabs = flow.bounding_box()
-    assert composer and tabs and composer["y"] + composer["height"] <= tabs["y"] + 1, f"{lang} phone: the composer runs under the tabs ({composer}, {tabs})"
+    expect(page.locator(".main-flow .ask-card").first).to_be_visible()
+    expect(page.locator("nav.tabbar")).to_have_count(0)
     fits(page, f"{lang} phone main chat")
-
-    # Back from the main chat is the list the desktop's column holds: Main, then the projects.
     page.locator(".chat-head > button.iconbtn").first.click()
     page.wait_for_url("**/app/orchestration/projects**")
-    listing = page.locator(".orch-list")
+    expect(listing.locator(".main-entry")).to_be_visible()
+    # Remembered by the phone too: a bare /app opens orchestration at its list.
+    go(page, "/", lang)
+    page.wait_for_url("**/app/orchestration/projects**")
     expect(listing.locator(".main-entry")).to_be_visible()
     expect(listing.locator(".orch-row")).to_have_count(1)
     expect(listing.locator(".orch-row .needs-badge")).to_have_text("1")

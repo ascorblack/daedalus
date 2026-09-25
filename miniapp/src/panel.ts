@@ -136,10 +136,16 @@ export const PANEL_DEFAULT_PCT = 42;
 /** The share of the chat area the panel takes, kept between the pixel floor and the percentage ceiling.
  *  With no room for both (a narrow pane), the floor wins: a panel too narrow to read is no panel. */
 export function clampPanelPct(pct: number, areaWidth: number): number {
+  return Math.round(boundPanelPct(pct, areaWidth) * 10) / 10;
+}
+
+/** The same bounds without the rounding, for the width shown under a moving pointer: a tenth of a
+ *  percent of a wide chat area is more than a pixel, and the edge would step behind the pointer. */
+export function boundPanelPct(pct: number, areaWidth: number): number {
   if (!Number.isFinite(pct)) return PANEL_DEFAULT_PCT;
   const floor = areaWidth > 0 ? (PANEL_MIN_PX / areaWidth) * 100 : 0;
   const lo = Math.min(floor, PANEL_MAX_PCT);
-  return Math.round(Math.min(PANEL_MAX_PCT, Math.max(lo, pct)) * 10) / 10;
+  return Math.min(PANEL_MAX_PCT, Math.max(lo, pct));
 }
 
 const WIDTH_KEY = "daedalus.width.panel";

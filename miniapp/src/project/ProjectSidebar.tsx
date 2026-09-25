@@ -2,14 +2,15 @@
 // project, the project and how it is set up, its orchestrator, the team with each member's state and
 // why a launch waits, the one-off helpers, the project's terminals and its pages. It takes the place of
 // the sessions column (App.tsx decides which one is drawn, in one place), and keeps that column's
-// frame — the brand row with the bell, the menu at the foot, the drag handle — so the shell around it
-// does not move when a project is entered.
+// frame — the brand row with the bell and the fold, the drag handle — so the shell around it does not
+// move when a project is entered. Folded, it is gone like the other columns, and the rail is left.
 
 import { useState, type ReactNode, type RefObject } from "react";
 import { Bell } from "../bell";
 import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
-import { PaneHandle } from "../layout";
+import { PaneHandle, type PaneDrag } from "../layout";
+import { FoldButton } from "../sidebar";
 import { relTime } from "../format";
 import { ORCHESTRATION, navigate, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
 import { go } from "../shell";
@@ -26,11 +27,8 @@ export type ProjectSidebarProps = {
   view: FocusView;
   /** The terminal the Terminals page shows, from its route. */
   terminal: string | null;
-  collapsed: boolean;
   onToggle: () => void;
-  width: number;
-  onWidth: (w: number) => void;
-  menu: ReactNode;
+  drag: PaneDrag;
   toast: (text: string) => void;
   /** Room at the top for the entry pinned above every project: the main orchestrator's. */
   pinned?: ReactNode;
@@ -51,50 +49,17 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
   // The page holds both: the orchestrator's alarms and the project's watches that are switched on.
   const wakeups = (orchestratorId ? alarms.filter((w) => w.enabled).length : 0) + watches.filter((w) => w.enabled).length;
   const here = (page: string) => p.view.kind === "page" && p.view.page === page;
-  const toggle = (
-    <button className="iconbtn quiet" onClick={p.onToggle} title={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-label={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-expanded={!p.collapsed}>
-      <Icon name="columns" size={18} />
-    </button>
-  );
   // A project is entered from orchestration mode's list, and its way back leads there.
   const allProjects = ORCHESTRATION;
-
-  if (p.collapsed) {
-    return (
-      <nav className="sidebar collapsed project-sidebar" aria-label={t("focus.label", { name: project?.name ?? "" })}>
-        <div className="sidebar-strip">
-          <a className="brand" href={allProjects} onClick={(e) => go(e, allProjects)} title={t("focus.all")} aria-label={t("focus.all")}>
-            <Icon name="back" size={18} />
-          </a>
-          {toggle}
-          <Bell />
-          {p.pinned}
-          <a className={`iconbtn quiet ${p.view.kind === "orchestrator" ? "on" : ""}`} href={projectHome(p.projectId)} onClick={(e) => go(e, projectHome(p.projectId))} title={t("focus.orchestrator")} aria-label={t("focus.orchestrator")}>
-            <Icon name="conductor" size={18} />
-          </a>
-          <div className="strip-dots" role="list">
-            {[...members, ...oneOff].slice(0, 8).map((m) => (
-              <button key={m.id} role="listitem" className="strip-staff" onClick={() => openMember(p.projectId, m)} title={`${m.name} · ${t(`focus.tone.${staffTone(m)}`)}`}>
-                <StaffAvatar name={m.name} color={m.color} size="small" />
-                <span className={`focus-dot tone-${staffTone(m)}`} aria-hidden />
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="sidebar-foot">{p.menu}</div>
-      </nav>
-    );
-  }
 
   return (
     <nav className="sidebar project-sidebar" aria-label={t("focus.label", { name: project?.name ?? "" })}>
       <div className="sidebar-brand">
         <a className="brand" href={allProjects} onClick={(e) => go(e, allProjects)} title="Daedalus">
-          <img src="/app/icons/icon-192.png" alt="" width={24} height={24} />
           <span className="sidebar-text">Daedalus</span>
         </a>
         <Bell />
-        {toggle}
+        <FoldButton onToggle={p.onToggle} />
       </div>
       {p.pinned && <div className="sidebar-pinned" aria-label={t("focus.pinned")}>{p.pinned}</div>}
       <div className="sidebar-body focus-body">
@@ -168,8 +133,7 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
         <FocusRow icon="journal" label={t("focus.page.journal")} href={projectPagePath(p.projectId, "journal")} current={here("journal")} />
         <FocusRow icon="folder" label={t("focus.page.folders")} href={projectPagePath(p.projectId, "folders")} current={here("folders")} meta={project ? String(project.folders.length) : ""} />
       </div>
-      <div className="sidebar-foot">{p.menu}</div>
-      <PaneHandle side="right" onDrag={(dx) => p.onWidth(p.width + dx)} />
+      <PaneHandle side="right" drag={p.drag} />
       {hiring && team && <StaffSheet team={team} onClose={() => setHiring(false)} onDone={() => invalidate(staffKey(p.projectId).split("?")[0])} toast={p.toast} />}
     </nav>
   );

@@ -9,13 +9,14 @@ export const BASE = "/app";
 export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "orchestration";
 
 export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
-/** Orchestration is a mode of its own rather than a destination of the menu: the switch at the top of
- *  the sidebar (the tab bar on a phone) goes there, and so does everything that belongs to it. */
+/** Orchestration is a mode of its own rather than a destination of the menu: its item on the rail
+ *  (its tab on a phone) goes there, and so does everything that belongs to it. */
 const INNER: Screen[] = ["orchestration"];
 
-/** Orchestration mode's home: the main orchestrator's chat. */
+/** Orchestration mode's home on a desktop: the main orchestrator's chat. */
 export const ORCHESTRATION = `${BASE}/orchestration`;
-/** On a phone, which has no left column, the list the left column holds on a desktop. */
+/** On a phone, which has no left column, the list the left column holds on a desktop: orchestration's
+ *  home there. */
 export const ORCHESTRATION_LIST = `${BASE}/orchestration/projects`;
 
 export type Route = {
@@ -163,15 +164,16 @@ export function useRoute(): Route {
 }
 
 /** Legacy addresses still reach the right screen: /app/#settings, /app/?startapp=session_<id>,
- *  /app/project/<id>. A bare /app opens the mode this device was last in. */
-export function migrateLegacyLocation(startParam?: string | null, mode?: "agents" | "orchestration"): void {
+ *  /app/project/<id>. A bare /app opens the mode this device was last in, orchestration at
+ *  `orchestrationHome` (the main chat on a desktop, the list on a phone). */
+export function migrateLegacyLocation(startParam?: string | null, mode?: "agents" | "orchestration", orchestrationHome = ORCHESTRATION): void {
   const here = window.location.pathname + window.location.search;
   if (canonical(here) !== here) {
     navigate(canonical(here), { replace: true });
     return;
   }
   if (mode === "orchestration" && /^\/app\/?$/.test(window.location.pathname) && !window.location.hash && !startParam) {
-    navigate(ORCHESTRATION + window.location.search, { replace: true });
+    navigate(orchestrationHome + window.location.search, { replace: true });
     return;
   }
   const hash = window.location.hash.replace(/^#/, "");

@@ -68,9 +68,11 @@ export type SessionScreenProps = {
   /** Inside a project's focus mode: the project, and whether this is its orchestrator's chat or a
    *  session of the project (a staff member's, or anyone else's working there). */
   focus?: { projectId: string; kind: "orchestrator" | "member" };
-  /** Under the header, above the conversation: a project's waiting request on a phone, or the main
-   *  chat's questions and dispatches. */
+  /** Under the header, above the conversation: a project's waiting request on a phone. */
   banner?: ReactNode;
+  /** In the conversation's flow, after its latest turn: the main chat's open questions and the work
+   *  under way, which scroll with the chat rather than standing over it. */
+  flow?: ReactNode;
   /** The composer's words while nothing runs, when the chat is not an ordinary agent's. */
   placeholder?: string;
   /** Opened by its plain address in Agents mode: a session that belongs to orchestration mode (the
@@ -78,7 +80,7 @@ export type SessionScreenProps = {
   leaveForOrchestration?: boolean;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, placeholder, leaveForOrchestration = false }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, flow, placeholder, leaveForOrchestration = false }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -115,11 +117,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
   const staffName = useMember(focus && detail?.staff ? detail.staff.id : null).data?.name ?? "";
   const asks = useAsks(orchestrating ? focus!.projectId : null);
   const focusChat = useMemo<FocusChat | null>(() => (focus ? { projectId: focus.projectId, orchestrator: orchestrating, asks, toast } : null), [focus?.projectId, orchestrating, asks, toast]);
-  const [panelPct, dragPanel] = usePanelWidth();
+  const body = useRef<HTMLDivElement>(null);
+  const [panelPct, dragPanel] = usePanelWidth(body);
   // The session's terminals: the dock under the conversation on a desktop, a sheet and a full-screen
   // view on a phone. Listed here because the header's button, the dock and the delete dialog all count them.
   const sessionTerminals = useSessionTerminals(id);
-  const body = useRef<HTMLDivElement>(null);
   const [detailsFocus, setDetailsFocus] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
@@ -1100,6 +1102,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
                 />
                 {busy && <LiveTurn base={tail} live={live} onTurnAction={turnAction} onRender={pinBottom} />}
               </SessionContext.Provider>
+              {flow}
             </div>
           </div>
           {!atBottom && (
@@ -1159,7 +1162,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
             root={detail.project?.name ?? t("session.files.crumb")}
             downloadUrl={(e) => downloadHref(e.base, e.path)}
             sheet={phone}
-            onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
+            drag={dragPanel}
             tabs={panelTabs}
             project={focus ? {
               board: <ProjectBoard projectId={focus.projectId} toast={toast} embedded />,

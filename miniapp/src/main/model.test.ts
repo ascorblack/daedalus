@@ -9,7 +9,7 @@ import type { Dispatch, MainAsk, Preset } from "../api";
 import { setLang } from "../i18n";
 import { parse } from "../router";
 import { eventTone, parseEvents } from "../turns";
-import { answeredAsks, answeredLine, dispatchState, groupAsks, mainPreset, orderDispatches, takesWords } from "./model";
+import { answeredLine, dispatchState, goingDispatches, groupAsks, mainPreset, takesWords } from "./model";
 
 function ask(over: Partial<MainAsk> = {}): MainAsk {
   return {
@@ -55,11 +55,6 @@ describe("the questions of the main chat", () => {
     expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { selected: ["Postgres"], via: "project" } }))).toBe("ответ в чате проекта: Postgres");
   });
 
-  it("keeps the latest answered ones as lines, newest first", () => {
-    const lines = answeredAsks([ask({ id: "old", resolved_at: "2026-09-25T09:00:00Z" }), ask({ id: "open" }), ask({ id: "new", resolved_at: "2026-09-25T11:00:00Z" })]);
-    expect(lines.map((a) => a.id)).toEqual(["new", "old"]);
-  });
-
   it("takes words only for a question", () => {
     expect(takesWords(ask())).toBe(true);
     for (const kind of ["permission", "folder", "project"] as const) expect(takesWords(ask({ kind }))).toBe(false);
@@ -75,14 +70,15 @@ describe("the dispatches", () => {
     expect(dispatchState(dispatch({ status: "cancelled" })).tone).toBe("faint");
   });
 
-  it("puts the work under way first, the longest waiting first, then what closed, newest first", () => {
-    const order = orderDispatches([
+  it("draws only the work under way, the longest waiting first", () => {
+    // A closed dispatch is already a line of the reports in the chat; a card for it said it twice.
+    const order = goingDispatches([
       dispatch({ id: "done-old", status: "done", closed_at: "2026-09-25T09:00:00Z" }),
       dispatch({ id: "open-new", created_at: "2026-09-25T11:00:00Z" }),
       dispatch({ id: "blocked-old", status: "blocked", created_at: "2026-09-25T08:00:00Z" }),
       dispatch({ id: "done-new", status: "done", closed_at: "2026-09-25T12:00:00Z" }),
     ]);
-    expect(order.map((d) => d.id)).toEqual(["blocked-old", "open-new", "done-new", "done-old"]);
+    expect(order.map((d) => d.id)).toEqual(["blocked-old", "open-new"]);
   });
 });
 

@@ -1,123 +1,59 @@
-// The left column on a desktop in Agents mode: the switch to orchestration mode, then the sessions,
-// grouped by project, with the project switcher, search and New at the top and the menu button at the
-// bottom. Orchestration mode has its column of its own (orchestration.tsx). It is the one column beside the
-// conversation — the destinations live in the menu that opens over the content, not in a second
-// column. Folded, it is a 48 px strip: the same controls as icons, and a dot for every agent that is
-// working or waiting.
+// The left column on a desktop in Agents mode: the sessions, grouped by project, with the project
+// switcher, search and New at the top. Orchestration mode has its column of its own
+// (orchestration.tsx). It stands beside the rail (rail.tsx), which holds the modes, the daily
+// destinations and the menu with the rest. Folded, the column is gone and the rail alone is left: the
+// rail is the folded form, so there is no strip of its own to keep in step with it.
 
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type RefObject } from "react";
-import { SessionList, Project } from "./api";
-import { Dot } from "./components";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import type { Project } from "./api";
 import { Icon } from "./icons";
-import { PaneHandle } from "./layout";
-import { ProjectChip } from "./projects";
-import { Screen, navigate, pathFor, sessionPath } from "./router";
-import { SelfDevMode } from "./capabilities";
-import { Counts, go } from "./shell";
-import { useQuery } from "./store";
-import { useStreamUp } from "./events";
+import { PaneHandle, type PaneDrag } from "./layout";
+import { pathFor } from "./router";
+import { go } from "./shell";
 import { t } from "./i18n";
-import { agentName } from "./grouping";
 import { Bell } from "./bell";
-import { agentsListing } from "./mode";
-import { ModeSwitch } from "./orchestration";
 
 const SessionsScreen = lazy(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen })));
 
 export type SidebarProps = {
-  screen: Screen;
   session: string | null;
-  counts: Counts;
-  selfdev: SelfDevMode;
-  collapsed: boolean;
-  /** Folds the column. The agents screen is the start canvas, so this column is the list of chats. */
-  onToggle?: () => void;
-  width: number;
-  onWidth: (w: number) => void;
-  onPalette: () => void;
+  /** Folds the column away; the rail's Home unfolds it. */
+  onToggle: () => void;
+  drag: PaneDrag;
   projects: Project[];
   project: string;
   onProjects: () => void;
   onOpen: (id: string) => void;
   toast: (t: string) => void;
-  menuOpen: boolean;
-  onMenu: () => void;
-  menuButton: RefObject<HTMLButtonElement | null>;
 };
 
-export function Sidebar(p: SidebarProps) {
-  const attention = (p.counts.inbox ?? 0) + (p.counts.changes ?? 0) > 0;
-  const toggle = p.onToggle && (
-    <button className="iconbtn quiet" onClick={p.onToggle} title={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-label={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-expanded={!p.collapsed}>
+/** The fold at the end of a column's brand row. The rail's Home is the way back: pointed at while
+ *  the column is folded, it turns into this same button. */
+export function FoldButton({ onToggle }: { onToggle: () => void }) {
+  return (
+    <button className="iconbtn quiet sidebar-fold" onClick={onToggle} title={t("shell.sidebar.collapse")} aria-label={t("shell.sidebar.collapse")} aria-expanded>
       <Icon name="columns" size={18} />
     </button>
   );
-  const menu = (
-    <button ref={p.menuButton} className={`sidebar-menu ${p.collapsed ? "iconbtn quiet" : ""}`} onClick={p.onMenu} title={t("nav.menu.title")} aria-label={t("nav.menu")} aria-haspopup="menu" aria-expanded={p.menuOpen}>
-      <Icon name="more" size={18} />
-      {!p.collapsed && <span className="sidebar-text">{t("nav.menu")}</span>}
-      {!p.collapsed && <kbd>⌘⇧M</kbd>}
-      {attention && <span className="badge-dot" aria-hidden />}
-    </button>
-  );
-  if (p.collapsed) {
-    return (
-      <nav className="sidebar collapsed" aria-label={t("shell.sidebar.label")}>
-        <div className="sidebar-strip">
-          <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))} title="Daedalus">
-            <img src="/app/icons/icon-192.png" alt="" width={24} height={24} />
-          </a>
-          {toggle}
-          <Bell />
-          <ModeSwitch mode="agents" strip />
-          <ProjectChip projects={p.projects} current={p.project} onOpen={p.onProjects} collapsed />
-          <button className="iconbtn quiet" onClick={p.onPalette} title={t("shell.search.title")} aria-label={t("shell.search.label")}><Icon name="search" size={18} /></button>
-          <button className="iconbtn quiet" onClick={() => navigate(pathFor("agents", null, { new: "1" }))} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={18} /></button>
-          <LiveDots current={p.session} onOpen={p.onOpen} />
-        </div>
-        <div className="sidebar-foot">{menu}</div>
-      </nav>
-    );
-  }
+}
+
+export function Sidebar(p: SidebarProps) {
   return (
     <nav className="sidebar" aria-label={t("shell.sidebar.label")}>
       <div className="sidebar-brand">
         <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))} title="Daedalus">
-          <img src="/app/icons/icon-192.png" alt="" width={24} height={24} />
           <span className="sidebar-text">Daedalus</span>
         </a>
         <Bell />
-        {toggle}
+        <FoldButton onToggle={p.onToggle} />
       </div>
-      <div className="sidebar-mode"><ModeSwitch mode="agents" /></div>
       <div className="sidebar-body">
         <Suspense fallback={null}>
           <SessionsScreen onOpen={p.onOpen} toast={p.toast} current={p.session ?? undefined} compact project={p.project} projects={p.projects} onProjects={p.onProjects} />
         </Suspense>
       </div>
-      <div className="sidebar-foot">{menu}</div>
-      <PaneHandle side="right" onDrag={(dx) => p.onWidth(p.width + dx)} />
+      <PaneHandle side="right" drag={p.drag} />
     </nav>
-  );
-}
-
-/** The strip's view of the list: one dot per agent that is working or waiting, the open one marked.
- *  Orchestration's sessions are not agents of this mode, busy as they are. */
-function LiveDots({ current, onOpen }: { current: string | null; onOpen: (id: string) => void }) {
-  // Every change of state arrives as an event while the stream is up; the slow poll is the net.
-  const streaming = useStreamUp();
-  const { data } = useQuery<SessionList>("/api/sessions", { pollMs: streaming ? 60000 : 5000, staleMs: 3000 });
-  const listing = useMemo(() => (data ? agentsListing(data) : null), [data]);
-  const live = (listing?.sessions ?? []).filter((s) => s.status === "running" || s.status === "waiting").slice(0, 8);
-  if (live.length === 0) return null;
-  return (
-    <div className="strip-dots" role="list">
-      {live.map((s) => (
-        <a key={s.id} role="listitem" className={`strip-dot ${s.id === current ? "current" : ""}`} href={sessionPath(s.id)} onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return; e.preventDefault(); onOpen(s.id); }} title={`${agentName(s)} · ${s.status}`}>
-          <Dot status={s.status} />
-        </a>
-      ))}
-    </div>
   );
 }
 
@@ -130,7 +66,7 @@ export function useSidebar(read: (w: number) => boolean, remember: (c: boolean) 
       return !c;
     });
   }, [remember]);
-  // A choice never made follows the window: a laptop lid at 1100 px gets the strip, docked at 1440 the column.
+  // A choice never made follows the window: a laptop lid at 1100 px gets the rail alone, docked at 1440 the column.
   useEffect(() => {
     const on = () => setCollapsed(read(window.innerWidth));
     window.addEventListener("resize", on);

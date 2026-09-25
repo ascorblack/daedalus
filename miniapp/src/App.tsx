@@ -10,7 +10,7 @@ import { Counts, MoreSheet, Palette, PaletteItem, TabBar, go, screenTitle, useMe
 import { Sidebar, useSidebar } from "./sidebar";
 import { NavMenu } from "./navmenu";
 import { shortcutFor } from "./navigation";
-import { readSidebar, rememberSidebar, usePaneWidth } from "./layout";
+import { clampWidth, pixelDrag, readSidebar, rememberSidebar, usePaneWidth } from "./layout";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
 import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./projects";
 import { projectPath } from "./folders";
@@ -25,11 +25,11 @@ import { startEvents } from "./events";
 import { useSummary } from "./notifications";
 import { NotificationToasts } from "./toasts";
 import { listenForOpen, syncPush } from "./push";
-import { Icon } from "./icons";
 import { focusView, phoneTab } from "./project/focus";
 import { MainEntry } from "./main/MainEntry";
-import { Mode, modeOf, rememberMode, storedMode } from "./mode";
+import { Mode, modeHome, modeOf, rememberMode, storedMode } from "./mode";
 import { OrchestrationList, OrchestrationSidebar, useOrchestrationWaiting } from "./orchestration";
+import { Rail } from "./rail";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -112,6 +112,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+/** The sidebar's width: its default, and the range a drag is held to. */
+const SIDEBAR_W = 272;
+const SIDEBAR_W_MIN = 232;
+const SIDEBAR_W_MAX = 360;
+
 export function App() {
   useLang();
   const route = useRoute();
@@ -142,10 +147,23 @@ export function App() {
     rememberProject(id);
     setProject(id);
   }, []);
-  // The sidebar: a column of sessions, or a strip. Beside the Agents screen — which is the same list,
-  // whole — it is always the strip, so the list is never drawn twice.
-  const [sidebarCollapsed, toggleSidebar] = useSidebar(readSidebar, rememberSidebar);
-  const [sidebarWidth, setSidebarWidth] = usePaneWidth("sidebar", 272, 232, 360);
+  // The sidebar: the current mode's column beside the rail, or folded away with the rail alone left.
+  const [folded, flipSidebar] = useSidebar(readSidebar, rememberSidebar);
+  const [sidebarWidth, setSidebarWidth] = usePaneWidth("sidebar", SIDEBAR_W, SIDEBAR_W_MIN, SIDEBAR_W_MAX);
+  const shell = useRef<HTMLDivElement>(null);
+  // The drag writes --sidebar-w on the shell itself, which the grid and the fixed column both read;
+  // React hears of the width once, when the pointer lets go (see PaneDrag).
+  const sidebarDrag = pixelDrag(() => shell.current, "--sidebar-w", () => sidebarWidth, (w) => clampWidth(w, SIDEBAR_W_MIN, SIDEBAR_W_MAX), setSidebarWidth);
+  // Unfolding plays the column's entrance once; the attribute is on the shell, so a column drawn by a
+  // change of mode or project simply appears.
+  const toggleSidebar = useCallback(() => {
+    const root = shell.current;
+    if (root && folded) {
+      root.dataset.unfolding = "";
+      window.setTimeout(() => delete root.dataset.unfolding, 300);
+    }
+    flipSidebar();
+  }, [folded, flipSidebar]);
   const [menu, setMenu] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const openPalette = useCallback(() => setPalette(true), []);
@@ -262,7 +280,7 @@ export function App() {
 
   useEffect(() => {
     const tg = telegram();
-    migrateLegacyLocation(tg?.initDataUnsafe?.start_param, storedMode());
+    migrateLegacyLocation(tg?.initDataUnsafe?.start_param, storedMode(), modeHome("orchestration", wide));
     if (!tg?.initData) {
       // Outside Telegram the system decides, unless the reader picked a scheme (?scheme=dark sticks).
       const wanted = new URLSearchParams(window.location.search).get("scheme");
@@ -324,14 +342,15 @@ export function App() {
   // the project in the centre. The decision is made here and nowhere else, so every other screen keeps
   // the shell it always had.
   const focusProject = route.screen === "orchestration" ? route.project : null;
-  // Orchestration's home is the main orchestrator's chat; on a phone, which has no left column, the
-  // list the column holds is a page of its own.
+  // Orchestration's home on a desktop is the main orchestrator's chat; on a phone, which has no left
+  // column, the list the column holds is a page of its own and the home, and the chat is a detail of it.
   const orchestrationList = route.screen === "orchestration" && !focusProject && route.detail === "projects";
   const mainChat = route.screen === "orchestration" && !focusProject && !orchestrationList;
   const focusChat = (!!focusProject && (route.page === null || route.page === "s" || route.page === "staff")) || mainChat;
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
-  // Orchestration's home and its list are the mode's top, as the start screen is Agents'.
-  const inDetail = !!route.session || (!!route.detail && !orchestrationList) || !!focusProject;
+  // Orchestration's list is the mode's top on a phone, as the start screen is Agents'; on a desktop the
+  // main chat is, with the list in the column beside it.
+  const inDetail = !!route.session || (!!route.detail && !orchestrationList) || !!focusProject || (mainChat && !wide);
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
@@ -340,7 +359,7 @@ export function App() {
       tg.enableVerticalSwipes?.();
       return;
     }
-    const onBack = () => back(focusProject ? ORCHESTRATION_LIST : pathFor(route.screen));
+    const onBack = () => back(focusProject || route.screen === "orchestration" ? ORCHESTRATION_LIST : pathFor(route.screen));
     tg.BackButton.onClick(onBack);
     tg.BackButton.show();
     tg.disableVerticalSwipes?.();
@@ -406,7 +425,7 @@ export function App() {
     const orchestratedIds = new Set(projectList.filter((p) => p.settings.orchestrator?.enabled).map((p) => p.id));
     return [
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
-      { id: "mode", label: t(mode === "agents" ? "mode.to.orchestration" : "mode.to.agents"), icon: mode === "agents" ? "compass" : "bots", run: () => navigate(mode === "agents" ? ORCHESTRATION : pathFor("agents")) },
+      { id: "mode", label: t(mode === "agents" ? "mode.to.orchestration" : "mode.to.agents"), icon: mode === "agents" ? "compass" : "bots", run: () => navigate(modeHome(mode === "agents" ? "orchestration" : "agents", wide)) },
       { id: "main", label: t("main.title"), icon: "compass", run: () => navigate(ORCHESTRATION) },
       { id: "projects", label: t("shell.projects"), hint: agentProjects.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => { navigate(pathFor("agents")); setSwitching(true); } },
       ...agentProjects.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => { pickProject(p.id); navigate(pathFor("agents")); } })),
@@ -501,68 +520,59 @@ export function App() {
     );
   }
 
-  const strip = sidebarCollapsed;
   // Inside a project the main orchestrator stays one click away, pinned above the project's column.
-  const pinned = <MainEntry current={false} strip={strip} />;
+  const pinned = <MainEntry current={false} />;
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
   const terminalOpen = route.screen === "terminals" && !!route.detail;
   // A project on a phone has its own four tabs in the place of the app's (project/phone.tsx); a
   // session inside it is a detail with a back of its own and no bar under it.
   const projectBar = !wide && focusProject ? phoneTab(focusView(route.page, route.inner)) : null;
-  // The main chat on a phone keeps the app's tabs under it, in the column rather than over it: they
-  // are how the operator switches back to Agents, and the chat is orchestration's home, not a detail.
-  const flowTabs = !wide && mainChat;
-  const menuButtonEl = (
-    <button ref={menuButton} className={`sidebar-menu ${strip ? "iconbtn quiet" : ""}`} onClick={() => setMenu((m) => !m)} title={t("nav.menu.title")} aria-label={t("nav.menu")} aria-haspopup="menu" aria-expanded={menu}>
-      <Icon name="more" size={18} />
-      {!strip && <span className="sidebar-text">{t("nav.menu")}</span>}
-      {!strip && <kbd>⌘⇧M</kbd>}
-      {(counts.inbox ?? 0) + (counts.changes ?? 0) > 0 && <span className="badge-dot" aria-hidden />}
-    </button>
-  );
+  // The main chat on a phone is a detail of orchestration's list, with a back of its own and no bar under it.
+  const tabBar = !wide && !sessionId && !focusProject && !terminalOpen && !mainChat;
   return (
-    <div className={`app ${projectBar || flowTabs ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
-      {wide && focusProject && (
+    <div ref={shell} className={`app ${projectBar ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${folded ? 0 : sidebarWidth}px` } : undefined}>
+      {wide && (
+        <Rail
+          screen={route.screen}
+          detail={route.detail}
+          mode={mode}
+          collapsed={folded}
+          onToggle={toggleSidebar}
+          counts={counts}
+          waiting={waiting}
+          selfdev={selfdev}
+          menuOpen={menu}
+          onMenu={() => setMenu((m) => !m)}
+          menuButton={menuButton}
+        />
+      )}
+      {wide && !folded && focusProject && (
         <ErrorBoundary key={focusProject}>
         <Suspense fallback={<nav className="sidebar project-sidebar" />}>
           <ProjectSidebar
             projectId={focusProject}
             view={focusView(route.page, route.inner)}
             terminal={route.page === "terminals" ? route.query.get("t") : null}
-            collapsed={strip}
             onToggle={toggleSidebar}
-            width={sidebarWidth}
-            onWidth={setSidebarWidth}
-            menu={menuButtonEl}
+            drag={sidebarDrag}
             toast={showToast}
             pinned={pinned}
           />
         </Suspense>
         </ErrorBoundary>
       )}
-      {wide && !focusProject && mode === "orchestration" && (
-        <OrchestrationSidebar onMain={mainChat} collapsed={strip} onToggle={toggleSidebar} width={sidebarWidth} onWidth={setSidebarWidth} onPalette={openPalette} menu={menuButtonEl} />
-      )}
-      {wide && !focusProject && mode === "agents" && (
+      {wide && !folded && !focusProject && mode === "orchestration" && <OrchestrationSidebar onMain={mainChat} onToggle={toggleSidebar} drag={sidebarDrag} />}
+      {wide && !folded && !focusProject && mode === "agents" && (
         <Sidebar
-          screen={route.screen}
           session={sessionId}
-          counts={counts}
-          selfdev={selfdev}
-          collapsed={strip}
           onToggle={toggleSidebar}
-          width={sidebarWidth}
-          onWidth={setSidebarWidth}
-          onPalette={openPalette}
+          drag={sidebarDrag}
           projects={agentProjects}
           project={project}
           onProjects={() => setSwitching(true)}
           onOpen={open}
           toast={showToast}
-          menuOpen={menu}
-          onMenu={() => setMenu((m) => !m)}
-          menuButton={menuButton}
         />
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
@@ -575,7 +585,7 @@ export function App() {
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {switching && <ProjectSwitcher projects={agentProjects} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
-      {!wide && !sessionId && !focusProject && !terminalOpen && <TabBar screen={route.screen} counts={counts} waiting={waiting} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} flow={flowTabs} />}
+      {tabBar && <TabBar screen={route.screen} counts={counts} waiting={waiting} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {projectBar?.bar && focusProject && (
         <ErrorBoundary key={`tabs-${focusProject}`}>
           <Suspense fallback={<nav className="tabbar project-tabs" aria-hidden />}>
@@ -635,7 +645,7 @@ function PasskeyNudge() {
   );
 }
 
-/** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
+/** Whether the layout is the wide one (the rail and the sidebar beside the screen): the same breakpoint as the stylesheet. */
 function useWide(): boolean {
   return useMedia("(min-width: 1024px)");
 }

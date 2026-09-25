@@ -10,6 +10,7 @@ import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 import { plural, t } from "./i18n";
 import { LangPicker } from "./components";
 import { insideTerminal } from "./terminal/keys";
+import { modeHome } from "./mode";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
 
@@ -26,11 +27,12 @@ export function screenTitle(s: Screen): string {
 }
 
 /** On a phone the first two tabs are the two modes: the switch between them is one tap from every
- *  screen that shows the bar, and orchestration's tab carries the count of what waits there. */
-const PRIMARY: Screen[] = ["agents", "orchestration", "inbox", "board"];
+ *  screen that shows the bar, and orchestration's tab carries the count of what waits there. Then
+ *  Terminals and the Board. The Inbox is in More, where its count still shows on the More tab. */
+const PRIMARY: Screen[] = ["agents", "orchestration", "terminals", "board"];
 /** Screens that carry a beta tag beside their name: new, usable, not yet finished. */
 const BETA: Screen[] = ["voice"];
-const MORE: Screen[] = ["voice", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
+const MORE: Screen[] = ["inbox", "voice", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 
 export function countFor(s: Screen, counts: Counts): number {
   if (s === "inbox") return counts.inbox ?? 0;
@@ -68,17 +70,22 @@ export function PageHeader({ title, subtitle, actions, back, children }: { title
 
 /** `waiting`: what waits for the operator in orchestration mode, shown quietly on its tab from
  *  elsewhere. `flow`: the bar stands in the column (under the main chat) rather than over the page. */
-export function TabBar({ screen, counts, selfdev, onMore, moreOpen, waiting = 0, flow = false }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onMore: () => void; moreOpen: boolean; waiting?: number; flow?: boolean }) {
+export function TabBar({ screen, counts, selfdev, onMore, moreOpen, waiting = 0 }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onMore: () => void; moreOpen: boolean; waiting?: number }) {
   const more = visibleScreens(MORE, selfdev);
   const inMore = more.includes(screen);
   const moreCount = more.reduce((n, s) => n + countFor(s, counts), 0);
+  // The Inbox lives in More on a phone, so its unseen count is what the More tab shows as a number;
+  // anything else counted in there (a change waiting) is a dot.
+  const unseen = countFor("inbox", counts);
   return (
-    <nav className={`tabbar five ${flow ? "flow" : ""}`} aria-label={t("shell.nav.primary")}>
+    <nav className="tabbar five" aria-label={t("shell.nav.primary")}>
       {PRIMARY.map((s) => {
         const n = countFor(s, counts);
         const quiet = s === "orchestration" && screen !== "orchestration" ? waiting : 0;
+        // Orchestration opens at its list on a phone (Main first, then the projects), not in the main chat.
+        const href = s === "orchestration" ? modeHome("orchestration", false) : pathFor(s);
         return (
-          <a key={s} href={pathFor(s)} data-screen={s} className={screen === s && !moreOpen ? "active" : ""} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))}>
+          <a key={s} href={href} data-screen={s} className={screen === s && !moreOpen ? "active" : ""} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, href)}>
             <span className="glyph">
               <Icon name={ICONS[s]} size={22} />
               {n > 0 && <span className="tab-badge">{n > 99 ? "99+" : n}</span>}
@@ -91,7 +98,8 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen, waiting = 0,
       <button className={inMore || moreOpen ? "active" : ""} onClick={onMore} aria-haspopup="dialog" aria-expanded={moreOpen}>
         <span className="glyph">
           <Icon name={inMore ? ICONS[screen] : "more"} size={22} />
-          {moreCount > 0 && <span className="tab-badge dot" aria-label={t("shell.waiting", { n: moreCount })} />}
+          {unseen > 0 ? <span className="tab-badge" data-unseen={unseen} aria-label={t("shell.waiting", { n: moreCount })}>{unseen > 99 ? "99+" : unseen}</span>
+            : moreCount > 0 && <span className="tab-badge dot" aria-label={t("shell.waiting", { n: moreCount })} />}
         </span>
         <span className="tab-label">{inMore ? screenTitle(screen) : t("nav.more")}</span>
       </button>

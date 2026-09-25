@@ -88,7 +88,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(page.locator(f".sidebar [data-project='{PID}']")).to_have_count(0)
     expect(page.locator(".sidebar .erow", has_text="Orchestrator · Bakery 2.0")).to_have_count(0)
     chip_before = page.locator(".sidebar .project-chip").inner_text()
-    page.locator(".sidebar .mode-tab[data-mode='orchestration']").click()
+    page.locator(".rail [data-rail='orchestration']").click()
     entry = page.locator("nav.orch-sidebar .orch-row", has_text="Bakery 2.0")
     expect(entry).to_be_visible()
     expect(entry.locator(".orch-row-meta")).to_contain_text(words["staff"])
@@ -215,7 +215,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
     expect(page.locator("nav.project-sidebar")).to_have_count(0)
     expect(page.locator("nav.orch-sidebar")).to_be_visible()
-    page.locator("nav.orch-sidebar .mode-tab[data-mode='agents']").click()
+    page.locator(".rail [data-rail='agents']").click()
     page.wait_for_url("**/app/agents")
     assert page.locator(".sidebar .project-chip").inner_text() == chip_before
 

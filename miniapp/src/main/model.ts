@@ -22,11 +22,6 @@ export function groupAsks(asks: MainAsk[]): { key: string; name: string; asks: M
   return [...groups.values()];
 }
 
-/** Requests answered lately, newest first: each is one line under the open cards. */
-export function answeredAsks(asks: MainAsk[], limit = 6): MainAsk[] {
-  return asks.filter((a) => !!a.resolved_at).sort((a, b) => (b.resolved_at ?? "").localeCompare(a.resolved_at ?? "")).slice(0, limit);
-}
-
 /** Where a request was answered, in the reader's words. */
 export function answeredWhere(via: string | undefined): string {
   const known = ["main", "project", "telegram", "notification", "push", "orchestrator", "dispatcher", "app"];
@@ -54,11 +49,10 @@ export function dispatchState(d: Dispatch): { word: string; tone: "ok" | "warn" 
   return { word: t("main.dispatch.cancelled"), tone: "faint" };
 }
 
-/** Open and blocked dispatches first (oldest first: the one waiting longest), then the closed ones, newest first. */
-export function orderDispatches(list: Dispatch[]): Dispatch[] {
-  const going = list.filter((d) => d.status === "open" || d.status === "blocked").sort((a, b) => a.created_at.localeCompare(b.created_at));
-  const over = list.filter((d) => d.status !== "open" && d.status !== "blocked").sort((a, b) => (b.closed_at ?? b.updated_at).localeCompare(a.closed_at ?? a.updated_at));
-  return [...going, ...over];
+/** The dispatches drawn as cards: the open and blocked ones, the one waiting longest first. A closed
+ *  dispatch is not a card: the report that closed it is already a line in the chat's own flow. */
+export function goingDispatches(list: Dispatch[]): Dispatch[] {
+  return list.filter((d) => d.status === "open" || d.status === "blocked").sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
 /** Whether a request is answered in words as well as with its buttons. */
