@@ -28,7 +28,10 @@ logger = logging.getLogger("keyproxy.claude")
 CLAUDE_API = "https://api.anthropic.com"
 CLAUDE_TOKEN_URL = "https://claude.ai/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.278")
+# The server refuses models to CLI versions it considers too old: a stale default here answers every request
+# with a 400 invalid_request_error (claude_code_version_too_old), not with a degraded reply. Raise it when that
+# refusal appears; the attribution stamp below follows the version on its own.
+CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.282")
 CLAUDE_ENTRYPOINT = os.environ.get("KEYPROXY_CLAUDE_ENTRYPOINT", "sdk-cli")
 # The CLI's attribution stamp: sha256(salt + three characters of the first user text + version)[:3].
 # A fixed "9d8" belonged to 2.1.270. KEYPROXY_CLAUDE_VERSION_HASH still pins one stamp for every call.

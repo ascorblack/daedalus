@@ -52,6 +52,100 @@ _CONTEXT_ERROR_MARKERS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderVerdict:
+    """What a failed request means, pinned on the raised error as ``classified`` for the core to read.
+
+    The core reads it by shape and never imports it. ``retryable`` decides whether the run asks the same
+    endpoint again; ``reason`` decides whether it may step to the next model of its fallback chain. Without a
+    verdict every refusal looked like a blip: a provider that rejected the request outright was retried, and
+    the operator waited through the backoff for an error that was already known on the first reply.
+    """
+
+    reason: str
+    retryable: bool
+
+
+_PERMANENT_ERROR_TYPES = {
+    "invalid_request_error": "format_error",
+    "authentication_error": "auth",
+    "permission_error": "auth",
+    "billing_error": "billing",
+    "not_found_error": "model_not_found",
+}
+"""The error ``type`` a provider writes into the body, for the refusals asking again cannot change.
+
+Read from the body as well as the status because a stream reports its error in a chunk, after the 200."""
+
+_PERMANENT_STATUS = {401: "auth", 402: "billing", 403: "auth", 404: "model_not_found"}
+
+_MODEL_REFUSAL_MARKERS = ("version_too_old", "does not support this model", "model_not_found")
+"""A refusal of the model rather than of the request. Reported as an unknown model, not a malformed request,
+because another model of the fallback chain may be served where this one is not — a server that considers
+the client too old for one model is the case that made this list."""
+
+
+def _error_fields(text: str) -> tuple[str, str, str]:
+    """``(type, code, message)`` from an error body; empty strings for what it does not say.
+
+    Accepts the wrapped shape (``{"error": {...}}``) the status path reads and the bare error object a stream
+    chunk carries.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return "", "", ""
+    if not isinstance(data, dict):
+        return "", "", ""
+    error = data.get("error", data)
+    if isinstance(error, str):
+        return "", "", error
+    if not isinstance(error, dict):
+        return "", "", ""
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    code = details.get("error_code") or error.get("code") or ""
+    return str(error.get("type") or ""), str(code), str(error.get("message") or "")
+
+
+def classify_failure(status: int, text: str) -> ProviderVerdict:
+    """The verdict on a request the endpoint answered with ``status`` and ``text``.
+
+    Rate limits, timeouts, overload and server errors pass on their own and stay retryable. Every other 4xx
+    is the request or the account, and so is an error body that names one of those types whatever status
+    carried it.
+    """
+    kind, code, message = _error_fields(text)
+    lowered = f"{code} {message}".lower()
+    if status == 429 or kind == "rate_limit_error":
+        return ProviderVerdict("rate_limit", True)
+    if status in (408, 504):
+        return ProviderVerdict("timeout", True)
+    if status == 529 or kind == "overloaded_error":
+        return ProviderVerdict("overloaded", True)
+    permanent = kind in _PERMANENT_ERROR_TYPES or (400 <= status < 500)
+    if not permanent:
+        return ProviderVerdict("server_error", True)
+    if any(marker in lowered for marker in _MODEL_REFUSAL_MARKERS):
+        return ProviderVerdict("model_not_found", False)
+    reason = _PERMANENT_STATUS.get(status) or _PERMANENT_ERROR_TYPES.get(kind) or "format_error"
+    return ProviderVerdict(reason, False)
+
+
+def failure_text(endpoint_id: str, status: int, text: str) -> str:
+    """The error as the operator reads it: the provider's own sentence, not the JSON around it."""
+    _kind, code, message = _error_fields(text)
+    if not message:
+        return f"{endpoint_id}: HTTP {status}: {text[:500]}"
+    said = f"{endpoint_id}: HTTP {status}: {message[:500]}"
+    # A numeric code only repeats the status (llama.cpp writes one); a named one is what to search for.
+    return f"{said} ({code})" if code and not code.isdigit() else said
+
+
+def _classified(error: Exception, verdict: ProviderVerdict) -> Exception:
+    error.classified = verdict  # type: ignore[attr-defined]
+    return error
+
+
 def message_shape(messages: list[dict[str, Any]]) -> str:
     """One token per wire message — role, and for an assistant turn whether it has text, tool calls and
     reasoning — so a rejected request can be read from the log without its content."""
@@ -449,14 +543,17 @@ class OpenAICompatibleProvider(ILLMProvider):
             # Rate-limit errors are the core's retryable provider-busy condition, so the existing
             # in-run retry and the host's longer outage recovery do the waiting instead of ending the
             # operator's task.
-            raise LLMRateLimitError(f"{self.endpoint.id}: llama.cpp busy: {text[:300]}")
-        if status == 429:
-            raise LLMRateLimitError(f"{self.endpoint.id}: rate limited: {text[:300]}")
+            raise _classified(
+                LLMRateLimitError(f"{self.endpoint.id}: llama.cpp busy: {text[:300]}"), ProviderVerdict("rate_limit", True)
+            )
         if status in (400, 413, 422) and any(m in lowered for m in _CONTEXT_ERROR_MARKERS):
             raise LLMContextWindowExceeded(f"{self.endpoint.id}: {text[:300]}")
-        if status in (408, 504):
-            raise LLMTimeoutError(f"{self.endpoint.id}: HTTP {status}: {text[:300]}")
-        raise LLMProviderError(f"{self.endpoint.id}: HTTP {status}: {text[:500]}")
+        verdict = classify_failure(status, text)
+        if verdict.reason == "rate_limit":
+            raise _classified(LLMRateLimitError(f"{self.endpoint.id}: rate limited: {text[:300]}"), verdict)
+        if verdict.reason == "timeout":
+            raise _classified(LLMTimeoutError(f"{self.endpoint.id}: HTTP {status}: {text[:300]}"), verdict)
+        raise _classified(LLMProviderError(failure_text(self.endpoint.id, status, text)), verdict)
 
     def _url(self, path: str) -> str:
         return self.endpoint.base_url.rstrip("/") + path

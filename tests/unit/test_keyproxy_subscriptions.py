@@ -141,9 +141,9 @@ def test_claude_chat_body_becomes_messages() -> None:
     out, names = claude_mod.chat_to_messages(body)
     assert out["model"] == "claude-opus-5" and out["stream"] is True and out["thinking"]["type"] == "enabled" and out["thinking"]["budget_tokens"] >= 1024
     assert out["system"][0]["text"].startswith("x-anthropic-billing-header:") and "Claude Agent SDK" in out["system"][1]["text"]
-    assert "2.1.278" in out["system"][0]["text"] and claude_mod.attribution_hash("open x") in out["system"][0]["text"]
-    # Indexes 4, 7 and 20 of this sentence are o, w, s. The digest is the CLI's stamp for 2.1.278.
-    assert claude_mod.attribution_hash("hello world, this is long enough") == "f3c"
+    assert "2.1.282" in out["system"][0]["text"] and claude_mod.attribution_hash("open x") in out["system"][0]["text"]
+    # Indexes 4, 7 and 20 of this sentence are o, w, s. The digest is the CLI's stamp for 2.1.282.
+    assert claude_mod.attribution_hash("hello world, this is long enough") == "783"
     assert out["system"][2]["text"] == "You are Daedalus." and "cache_control" not in out["system"][2]
     assert out["system"][1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert "cache_control" not in out["system"][0]

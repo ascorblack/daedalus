@@ -215,6 +215,8 @@ class SessionState:
     """The kind of the error that ended the current run, from the core's ERROR event (``llm_context_window_exceeded`` …)."""
     last_error_message: str = ""
     """The text of that error, masked, as the fronts were shown it: what the inbox entry quotes."""
+    last_error_permanent: bool = False
+    """The provider's verdict on that error said asking again cannot help (a refused request, key or model)."""
     soft_stop_cause: str = ""
     """Which bound wound the current run down, from the core's ``soft_stop_notified`` state change; empty when none did."""
     soft_stop_detail: str = ""
@@ -1828,6 +1830,7 @@ class SessionManager:
             await self.steer_changed(session_id, reason="cleared")
             state.last_error_kind = ""
             state.last_error_message = ""
+            state.last_error_permanent = False
             state.soft_stop_cause = ""
             state.soft_stop_detail = ""
             result = {"seq": seq, "through": through, "dropped": dropped, "workspace_restored": restored, "untouched": untouched, "kept": len(kept)}
@@ -3029,6 +3032,7 @@ class SessionManager:
         state.run_active_since = time.monotonic()
         state.last_error_kind = ""
         state.last_error_message = ""
+        state.last_error_permanent = False
         state.soft_stop_cause = ""
         state.soft_stop_detail = ""
         if message is not None:
@@ -3275,6 +3279,11 @@ class SessionManager:
             state.outage_streak = 0
         elif status == "failed" and state.last_error_kind == "llm_context_window_exceeded" and not state.running:
             await self._recover_from_overflow(state)
+        elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and state.last_error_permanent:
+            # A refusal is not an outage: the provider said what is wrong with the request, key or model, and
+            # driving the turn again after a wait sends it the same request to refuse the same way. The failed
+            # run with the provider's words is the answer until someone changes what it refused.
+            logger.warning("session %s: the provider refused the run for good; not driving it again", state.session.id)
         elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and not state.running:
             self._schedule_outage_recovery(state)
 
@@ -3594,6 +3603,7 @@ class SessionManager:
             p["message"] = self.redactor.redact(p["message"])
             state.last_error_kind = str(p.get("kind") or state.last_error_kind)
             state.last_error_message = p["message"]
+            state.last_error_permanent = p.get("retryable") is False
             logger.warning("run error in session %s (%s): %s", getattr(getattr(state, "session", None), "id", "?"), p.get("kind") or "-", p["message"][:500])
         elif event.type is EventType.STATE_CHANGED and p.get("reason") in RECOVERY_REASONS:
             if p.get("reason") == "soft_stop_notified":
