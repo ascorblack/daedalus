@@ -14,7 +14,14 @@ import functools
 import logging
 from typing import TYPE_CHECKING, cast
 
-from daedalus.harness import ADAPTERS, claude, codex, opencode  # noqa: F401 — importing an adapter registers it
+from daedalus.harness import (  # noqa: F401 — importing an adapter registers it
+    ADAPTERS,
+    claude,
+    codex,
+    grok,
+    opencode,
+    pi,
+)
 from daedalus.harness.manager import HarnessManager
 from daedalus.harness.ports import TerminalRunner
 from daedalus.harness.runtime import CliStaffRuntime, RuntimeEnvironment, install_runtimes
@@ -29,10 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CATALOG_ROOTS = (".claude/agents", ".codex", ".pi/agent")
-"""What of each environment's home the manager reads, besides the project folders: the user's own
-agent definitions, Codex's profiles, pi's settings (to learn its provider). The daemon's deny list
-keeps every credential file under them unreadable all the same."""
+CATALOG_ROOTS = (".claude/agents", ".codex", ".pi/agent", ".grok/sessions")
+"""What of each environment's home the host reads, besides the project folders: the user's own
+agent definitions, Codex's profiles, pi's settings (to learn its provider) and its sessions, Grok
+Build's sessions (its transcripts). The daemon's deny list keeps every credential file under them
+unreadable all the same."""
 
 
 def build(app: Application, store: HarnessStore) -> HarnessManager:

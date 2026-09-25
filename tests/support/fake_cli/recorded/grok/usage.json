@@ -1,0 +1,52 @@
+{
+  "sessionId": "66666666-2222-4333-8444-555555555556",
+  "updatedAt": "2026-09-25T01:42:22.040997618+00:00",
+  "session": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cachedReadTokens": 0,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 0,
+    "totalTokens": 0,
+    "modelCalls": 0,
+    "turnCount": 3
+  },
+  "turns": [
+    {
+      "turnNumber": 1,
+      "endedAt": "2026-09-25T01:41:44.252924123+00:00",
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cachedReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 0,
+      "totalTokens": 0,
+      "modelCalls": 0,
+      "turnCount": 1
+    },
+    {
+      "turnNumber": 2,
+      "endedAt": "2026-09-25T01:41:59.910418814+00:00",
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cachedReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 0,
+      "totalTokens": 0,
+      "modelCalls": 0,
+      "turnCount": 1
+    },
+    {
+      "turnNumber": 5,
+      "endedAt": "2026-09-25T01:42:22.040997618+00:00",
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cachedReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 0,
+      "totalTokens": 0,
+      "modelCalls": 0,
+      "turnCount": 1
+    }
+  ]
+}

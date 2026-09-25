@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  2.3K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-BASH go                                                                                         6:38 AM
+
+
+     ◆ Run Remove the spike folder
+
+     done after tool                                                                                         6:38 AM
+
+     Worked for 9.7s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ no such tool among []                                                                                          │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Tab/→:accept suggestion  │  Shift+Tab:mode  │  Ctrl+x:shortcuts

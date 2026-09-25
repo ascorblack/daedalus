@@ -192,10 +192,11 @@ async def test_a_check_finds_each_cli_with_its_version_sign_in_agents_and_models
         assert rows["codex"]["unavailable"] == "Codex is not signed in in the container environment"
         assert [a["name"] for a in rows["opencode"]["agents"]] == ["build", "plan", "general"]
         assert (rows["opencode"]["logged_in"], rows["opencode"]["login_detail"]) == ("yes", "Anthropic, OpenAI")
-        assert (rows["pi"]["logged_in"], rows["pi"]["login_detail"], rows["pi"]["models"]) == ("yes", "anthropic", ["anthropic/claude-sonnet-4", "openai/gpt-5"])
+        assert (rows["pi"]["logged_in"], rows["pi"]["login_detail"], rows["pi"]["models"]) == ("yes", "anthropic · oauth", ["anthropic/claude-haiku-4", "openai/gpt-5-mini"])
         grok = rows["grok"]
         assert (grok["installed_version"], grok["install_method"], grok["latest_version"], grok["models"]) == ("1.0.40", "official", "1.0.40", ["grok-code-fast", "grok-4"])
-        assert grok["agents"][0]["name"] == "default"
+        assert (grok["agents"][0]["name"], grok["agents"][0]["source"]) == ("general-purpose", "builtin")
+        assert (grok["logged_in"], grok["login_detail"]) == ("yes", "grok.com")
 
         # The pinned Node is not there, so the npm CLIs could not be installed in the container.
         assert b.manager.node_state("container")["installed"] is False

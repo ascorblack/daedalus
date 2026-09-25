@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  2.4K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-BASH third                                                                                      6:38 AM
+
+
+     ◆ Run Remove the spike folder
+
+     Turn cancelled because a permission prompt was dismissed in 4.0s.
+
+
+
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts

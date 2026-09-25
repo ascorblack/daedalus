@@ -1,0 +1,31 @@
+{"t": 0.0, "name": "team", "query": {}, "body": {"tool": "hello", "stage": "extension", "client": {"name": "pi"}}}
+{"t": 0.002, "name": "pi", "query": {}, "body": {"event": "ready", "at": "2026-09-25T00:00:37.686Z", "reason": "startup", "sessionId": "33333333-2222-4333-8444-555555555555", "sessionFile": "/home/someone/.pi/agent/sessions/--work-project--/2026-09-25T00-00-37-492Z_33333333-2222-4333-8444-555555555555.jsonl", "cwd": "/work/project", "model": "stub/stub-model"}}
+{"t": 0.048, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:37.703Z", "id": "", "source": "interactive", "text": "[team] You are Ada. SPIKE-REPORT please", "streamingBehavior": ""}}
+{"t": 0.048, "name": "team", "query": {"wait_ms": ["5000"]}, "body": {"tool": "report", "kind": "checkpoint", "note": "spike report", "artifacts": [], "call_id": "l1:003f7326:1"}}
+{"t": 0.061, "name": "pi", "query": {}, "body": {"event": "agent_start", "at": "2026-09-25T00:00:37.704Z"}}
+{"t": 0.064, "name": "pi", "query": {}, "body": {"event": "tool_start", "at": "2026-09-25T00:00:37.808Z", "toolName": "Report", "toolCallId": "call_1"}}
+{"t": 0.071, "name": "pi", "query": {}, "body": {"event": "tool_end", "at": "2026-09-25T00:00:37.821Z", "toolName": "Report", "toolCallId": "call_1", "isError": false}}
+{"t": 0.073, "name": "pi", "query": {}, "body": {"event": "agent_end", "at": "2026-09-25T00:00:37.835Z", "lastMessage": "done after tool", "stopReason": "stop", "errorMessage": ""}}
+{"t": 0.075, "name": "pi", "query": {}, "body": {"event": "agent_settled", "at": "2026-09-25T00:00:37.835Z", "lastMessage": "done after tool", "stopReason": "stop", "errorMessage": ""}}
+{"t": 6.9, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:44.660Z", "id": "m1", "source": "extension", "text": "[orchestrator] SPIKE-SLOW work on it", "streamingBehavior": ""}}
+{"t": 6.904, "name": "pi", "query": {}, "body": {"event": "agent_start", "at": "2026-09-25T00:00:44.662Z"}}
+{"t": 9.924, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:47.689Z", "id": "m2", "source": "extension", "text": "[orchestrator] steer: focus on tests", "streamingBehavior": "steer"}}
+{"t": 11.963, "name": "pi", "query": {}, "body": {"event": "agent_end", "at": "2026-09-25T00:00:49.728Z", "lastMessage": "working 0. working 1. working 2. working 3. working 4. working 5.", "stopReason": "aborted", "errorMessage": "Operation aborted"}}
+{"t": 11.964, "name": "pi", "query": {}, "body": {"event": "agent_settled", "at": "2026-09-25T00:00:49.729Z", "lastMessage": "working 0. working 1. working 2. working 3. working 4. working 5.", "stopReason": "aborted", "errorMessage": "Operation aborted"}}
+{"t": 14.996, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:52.759Z", "id": "m3", "source": "extension", "text": "[orchestrator] SPIKE-ASK now", "streamingBehavior": ""}}
+{"t": 14.997, "name": "pi", "query": {}, "body": {"event": "agent_start", "at": "2026-09-25T00:00:52.760Z"}}
+{"t": 15.01, "name": "pi", "query": {}, "body": {"event": "tool_start", "at": "2026-09-25T00:00:52.775Z", "toolName": "AskOrchestrator", "toolCallId": "call_1"}}
+{"t": 15.011, "name": "team", "query": {"wait_ms": ["20000"]}, "body": {"tool": "ask", "question": "Blue or green?", "options": ["blue", "green"], "call_id": "l1:003f7326:2"}}
+{"t": 15.056, "name": "pi", "query": {}, "body": {"event": "tool_end", "at": "2026-09-25T00:00:52.820Z", "toolName": "AskOrchestrator", "toolCallId": "call_1", "isError": false}}
+{"t": 15.07, "name": "pi", "query": {}, "body": {"event": "agent_end", "at": "2026-09-25T00:00:52.836Z", "lastMessage": "done after tool", "stopReason": "stop", "errorMessage": ""}}
+{"t": 15.071, "name": "pi", "query": {}, "body": {"event": "agent_settled", "at": "2026-09-25T00:00:52.836Z", "lastMessage": "done after tool", "stopReason": "stop", "errorMessage": ""}}
+{"t": 18.025, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:55.788Z", "id": "m4", "source": "extension", "text": "[orchestrator] SPIKE-SLOW again", "streamingBehavior": ""}}
+{"t": 18.027, "name": "pi", "query": {}, "body": {"event": "agent_start", "at": "2026-09-25T00:00:55.788Z"}}
+{"t": 20.048, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:00:57.814Z", "id": "m5", "source": "extension", "text": "[orchestrator] SPIKE-QUESTION after", "streamingBehavior": "followUp"}}
+{"t": 38.045, "name": "pi", "query": {}, "body": {"event": "agent_end", "at": "2026-09-25T00:01:15.811Z", "lastMessage": "I looked at it. Should I proceed?", "stopReason": "stop", "errorMessage": ""}}
+{"t": 38.045, "name": "pi", "query": {}, "body": {"event": "agent_settled", "at": "2026-09-25T00:01:15.811Z", "lastMessage": "I looked at it. Should I proceed?", "stopReason": "stop", "errorMessage": ""}}
+{"t": 44.076, "name": "pi", "query": {}, "body": {"event": "input", "at": "2026-09-25T00:01:21.840Z", "id": "m6", "source": "extension", "text": "[orchestrator] SPIKE-ERROR now", "streamingBehavior": ""}}
+{"t": 44.079, "name": "pi", "query": {}, "body": {"event": "agent_start", "at": "2026-09-25T00:01:21.840Z"}}
+{"t": 44.08, "name": "pi", "query": {}, "body": {"event": "agent_end", "at": "2026-09-25T00:01:21.845Z", "lastMessage": "", "stopReason": "error", "errorMessage": "400: {\"message\":\"spike: invalid request\",\"type\":\"invalid_request_error\"}"}}
+{"t": 44.081, "name": "pi", "query": {}, "body": {"event": "agent_settled", "at": "2026-09-25T00:01:21.846Z", "lastMessage": "", "stopReason": "error", "errorMessage": "400: {\"message\":\"spike: invalid request\",\"type\":\"invalid_request_error\"}"}}
+{"t": 47.204, "name": "pi", "query": {}, "body": {"event": "session_end", "at": "2026-09-25T00:01:24.965Z", "reason": "quit"}}

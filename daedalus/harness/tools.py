@@ -514,10 +514,13 @@ class PiTooling(Tooling):
     sign_in = ("pi",)
     """pi signs in from inside its TUI (``/login``); the terminal opens it and the operator types it."""
     modes = ()
-    efforts = ("off", "minimal", "low", "medium", "high", "xhigh")
+    # ``--thinking`` as ``pi --help`` lists it (0.84.2); a model without reasoning clamps it to off.
+    efforts = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
     cheap_markers = ("haiku", "mini", "flash", "nano")
 
     def own_update(self, latest: str) -> Plan:
+        # ``pi update --help``: "pi update pi  Update pi only (self works as alias to pi)" — pi alone,
+        # not the packages the operator installed into it.
         return Plan(argv=("pi", "update", "self"), target=latest)
 
     async def login_state(self, env: EnvironmentPort) -> LoginState:
@@ -537,8 +540,12 @@ class PiTooling(Tooling):
             data = json.loads(result.stdout)
         except ValueError:
             data = None
-        if isinstance(data, dict) and isinstance(data.get("authenticated"), bool):
-            return LoginState("yes" if data["authenticated"] else "no", provider)
+        # Measured (0.84.2): ``{"status": "ready", "provider", "authType"}``, or ``{"status":
+        # "not_ready", "provider", "reason": "credentials_not_configured"}`` with exit code 1.
+        if isinstance(data, dict) and data.get("status") in ("ready", "not_ready"):
+            ready = data["status"] == "ready"
+            detail = " · ".join(str(part) for part in (provider, data.get("authType") if ready else data.get("reason")) if part)
+            return LoginState("yes" if ready else "no", detail)
         return LoginState("yes" if result.exit_code == 0 else "no", provider)
 
     async def catalog(self, env: EnvironmentPort, cwd: str | None) -> Catalog:
@@ -604,23 +611,23 @@ class GrokTooling(Tooling):
         return self.own_update(latest)
 
     async def login_state(self, env: EnvironmentPort) -> LoginState:
-        data = await self._inspect(env)
-        auth = data.get("auth") if isinstance(data, dict) else None
-        if isinstance(auth, dict) and isinstance(auth.get("signedIn"), bool):
-            return LoginState("yes" if auth["signedIn"] else "no", str(auth.get("method") or ""))
-        return LoginState("unknown", "grok inspect says nothing about sign-in")
+        # ``grok inspect --json`` says nothing about sign-in (measured, 1.0.41); ``grok models`` opens
+        # with one line that does: "You are logged in with grok.com.", "You are using XAI_API_KEY.",
+        # or "You are not authenticated."
+        result = await self.run(env, ["grok", "models"], timeout=LIST_TIMEOUT_S)
+        return parse_grok_login(result.stdout)
 
     async def catalog(self, env: EnvironmentPort, cwd: str | None) -> Catalog:
         data = await self._inspect(env, cwd)
         agents = tuple(
-            AgentEntry(name=str(a.get("name")), source="project" if cwd else str(a.get("source") or "user"), description=str(a.get("description") or "")[:300], model=str(a.get("model") or ""))
+            AgentEntry(name=str(a.get("name")), source="project" if cwd else _grok_source(a), description=str(a.get("description") or "")[:300], model=str(a.get("model") or ""))
             for a in (data.get("agents") or [] if isinstance(data, dict) else [])
-            if isinstance(a, dict) and a.get("name") and (cwd is None or a.get("source") == "project")
+            if isinstance(a, dict) and a.get("name") and (cwd is None or _grok_source(a) == "project")
         )
         if cwd is not None:
             return Catalog(agents=agents)
         result = await self.run(env, ["grok", "models"], timeout=LIST_TIMEOUT_S)
-        return Catalog(agents=agents, models=unique(lines_of(result.stdout)) if result.exit_code == 0 else (), modes=self.modes, efforts=self.efforts)
+        return Catalog(agents=agents, models=parse_grok_models(result.stdout) if result.exit_code == 0 else (), modes=self.modes, efforts=self.efforts)
 
     async def _inspect(self, env: EnvironmentPort, cwd: str | None = None) -> dict[str, Any]:
         result = await self.run(env, ["grok", "inspect", "--json"], cwd=cwd)
@@ -629,6 +636,34 @@ class GrokTooling(Tooling):
         except ValueError:
             return {}
         return data if isinstance(data, dict) else {}
+
+
+def _grok_source(agent: dict[str, Any]) -> str:
+    """Where ``grok inspect`` says an agent comes from: ``{"type": "builtin"}`` in 1.0.41."""
+    source = agent.get("source")
+    kind = source.get("type") if isinstance(source, dict) else source
+    return str(kind or "user")
+
+
+def parse_grok_login(text: str) -> LoginState:
+    first = next(iter(lines_of(text)), "")
+    if "not authenticated" in first:
+        return LoginState("no", "")
+    if "logged in with" in first:
+        return LoginState("yes", first.split("logged in with", 1)[1].strip().rstrip("."))
+    if "XAI_API_KEY" in first:
+        return LoginState("yes", "API key")
+    return LoginState("unknown", first[:120])
+
+
+def parse_grok_models(text: str) -> tuple[str, ...]:
+    """``grok models``: the sign-in line, "Default model: …", then "  * name (default)" and "  - name"."""
+    names = []
+    for line in lines_of(text):
+        stripped = line.strip()
+        if stripped[:2] in ("* ", "- "):
+            names.append(stripped[2:].split(" (")[0].strip())
+    return unique(names)
 
 
 def parse_grok_check(text: str) -> dict[str, Any] | None:
@@ -674,6 +709,8 @@ __all__ = [
     "parse_codex_models",
     "parse_frontmatter",
     "parse_grok_check",
+    "parse_grok_login",
+    "parse_grok_models",
     "parse_npm_dist_tags",
     "parse_opencode_agents",
     "parse_opencode_credentials",

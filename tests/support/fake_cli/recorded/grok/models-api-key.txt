@@ -1,0 +1,6 @@
+You are using XAI_API_KEY.
+
+Default model: stub-model
+
+Available models:
+  * stub-model (default)

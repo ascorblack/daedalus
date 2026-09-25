@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  3.2K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-BASH go                                                                                         6:41 AM
+
+
+
+     ❯ SPIKE-SLOW work on it                                                                                 6:42 AM
+
+
+     working 0. working 1. working 2. working 3. working 4. working 5. working 6.                            6:42 AM
+
+     Turn cancelled by user in 7.0s.                                                                                   █
+                                                                                                                       █
+                                                                                                                       █
+     ❯ SPIKE-SLOW again                                                                                      6:42 AM   █
+                                                                                                                       █
+                                                                                                                       █
+     working 0. working 1. working 2. working 3. working 4. working 5.                                       6:42 AM   █
+                ╭─────────────────────────────────────────────────────────────────────────────────────╮                █
+                │line 0 of a long pasted message to see how the composer shows it                     │                █
+     ❯ SPIKE-QUE│line 1 of a long pasted message to see how the composer shows it                     │      6:42 AM   █
+                │line 2 of a long pasted message to see how the composer shows it                     │                █
+                │⋮ (24 more lines)                                                                    │                █
+     I looked at│line 27 of a long pasted message to see how the composer shows it                    │      6:42 AM   █
+                │line 28 of a long pasted message to see how the composer shows it                    │                █
+     Worked for │line 29 of a long pasted message to see how the composer shows it                    │                █
+                ╰─ paste again or double-click to expand ─────────────────────────────────────────────╯                █
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ [Pasted: 30 lines]                                                                                             │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Enter:send  │  Alt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts

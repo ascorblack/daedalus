@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  2.3K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-BASH again                                                                                      6:38 AM
+
+
+     ◆ Run Remove the spike folder
+
+     Turn cancelled because a permission was denied in 4.0s.
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts

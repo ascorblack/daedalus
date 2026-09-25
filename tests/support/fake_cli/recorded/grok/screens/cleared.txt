@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  3.2K / 256K │ [Dashboard]
+
+
+
+
+     ❯ SPIKE-SLOW work on it                                                                                 6:42 AM
+
+
+     working 0. working 1. working 2. working 3. working 4. working 5. working 6.                            6:42 AM
+
+     Turn cancelled by user in 7.0s.
+
+                                                                                                                       █
+     ❯ SPIKE-SLOW again                                                                                      6:42 AM   █
+                                                                                                                       █
+                                                                                                                       █
+     working 0. working 1. working 2. working 3. working 4. working 5.                                       6:42 AM   █
+                                                                                                                       █
+                                                                                                                       █
+     ❯ SPIKE-QUESTION instead                                                                                6:42 AM   █
+                                                                                                                       █
+                                                                                                                       █
+     I looked at it. Should I proceed?                                                                       6:42 AM   █
+                                                                                                                       █
+     Worked for 0.6s                                                                                                   █
+                                                                                                                       █
+
+   Input cleared · ctrl+z to undo
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ no such tool among []                                                                                          │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Tab/→:accept suggestion  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
