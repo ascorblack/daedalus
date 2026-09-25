@@ -16,6 +16,7 @@ import type { WebglAddon } from "@xterm/addon-webgl";
 import { api, TerminalEnv } from "../api";
 import { ConnectionState, guarded, TerminalConnection, TerminalSink, xtermSink } from "./connection";
 import { FitContext, ResizeScheduler, Size } from "./fit";
+import { flushOnlyUnparsed } from "./flush";
 import { keepScrolledHistory } from "./history";
 import { isMac, reservedKey, TerminalAction } from "./keys";
 import { findFileLinks, resolveFileLink, rewriteLoopbackUrl } from "./links";
@@ -480,6 +481,8 @@ export class TerminalInstance {
     term.loadAddon(new kit.GhosttyUnicodeAddon());
     this.disposables.push(kit.swallowQueries(term.parser));
     this.disposables.push(keepScrolledHistory(term));
+    // Before any resize: a window resized during a flood would otherwise parse output twice.
+    this.disposables.push(flushOnlyUnparsed(term));
     this.fitAddon = new kit.FitAddon();
     term.loadAddon(this.fitAddon);
     this.searchAddon = new kit.SearchAddon();
