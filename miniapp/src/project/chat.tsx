@@ -12,6 +12,7 @@ import type { ToolItem } from "../turns";
 import { parseEvents } from "../turns";
 import { errorText } from "../ui";
 import { askIdOf, isOrchestratorStep, stepDetail, stepKey } from "./focus";
+import { answeredLine } from "../main/model";
 
 /** What a turn in focus mode needs beyond its own session: the project, and its requests by short id. */
 export type FocusChat = { projectId: string; orchestrator: boolean; asks: Map<string, Ask>; toast: (text: string) => void };
@@ -70,12 +71,9 @@ export function StepLines({ items }: { items: ToolItem[] }) {
   );
 }
 
-/** Who answered, in words. */
+/** Who answered, and where: the same line in every window that showed the request. */
 function answeredBy(ask: Ask): string {
-  const r = ask.resolution ?? {};
-  const text = r.text || (r.selected ?? []).join(", ") || (r.allow === true ? t("focus.ask.yes") : r.allow === false ? t("focus.ask.no") : "");
-  const who = ask.resolved_by === "operator" || ask.resolved_by === "orchestrator" || ask.resolved_by === "system" ? ask.resolved_by : "system";
-  return who === "operator" ? t("focus.ask.answered", { text }) : t("focus.ask.answered.by", { who: t(`focus.ask.who.${who}`), text });
+  return answeredLine(ask);
 }
 
 /**
@@ -95,11 +93,12 @@ export function AskCard({ ask }: { ask: Ask }) {
     if (busy) return;
     setBusy(true);
     try {
-      await api.post(`/api/asks/${encodeURIComponent(shown.id)}/answer`, body);
-      setLocal({ ...shown, resolved_at: new Date().toISOString(), resolved_by: "operator", resolution: { ...body, text: body.text ?? label } });
+      await api.post(`/api/asks/${encodeURIComponent(shown.id)}/answer`, { ...body, window: "project" });
+      setLocal({ ...shown, resolved_at: new Date().toISOString(), resolved_by: "operator", resolution: { ...body, text: body.text ?? label, via: "project" } });
       focus?.toast(t("focus.ask.sent"));
     } catch (e) {
       focus?.toast(e instanceof ApiError && e.status === 409 ? t("focus.ask.conflict") : errorText(e));
+      if (e instanceof ApiError && e.status === 409) invalidate("/api/main");
     } finally {
       setBusy(false);
       if (focus) invalidate(`/api/asks?project=${encodeURIComponent(focus.projectId)}`);

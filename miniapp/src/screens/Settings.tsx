@@ -16,6 +16,7 @@ import { DependenciesTab } from "./Dependencies";
 import { PromptChange } from "./PromptChange";
 import { AddModel } from "./AddModel";
 import { REASONING_EFFORTS, orchestratorPreset } from "../models";
+import { mainPreset } from "../main/model";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { LangPicker } from "../components";
@@ -1123,6 +1124,26 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
                   ))}
                 </select>
                 <div className="sub faint">{t("settings.orchestrator.hint")}</div>
+              </div>
+            )}
+            {Object.keys(s.presets ?? {}).length > 0 && (
+              <div className="card" data-card="main-orchestrator">
+                <div className="section-title" style={{ marginTop: 0 }}>{t("settings.main.title")}</div>
+                <div className="sub">{t("settings.main.sub")}</div>
+                <label className="field" htmlFor="main-preset">{t("settings.orchestrator.model")}</label>
+                <select
+                  id="main-preset"
+                  className="field"
+                  value={mainPreset(s.presets, s.dispatcher?.preset, s.dispatcher?.middle)}
+                  onChange={(e) => save({ dispatcher: { preset: e.target.value } })}
+                >
+                  {Object.entries(s.presets).map(([id, p]) => (
+                    <option key={id} value={id}>
+                      {(p.label || `${p.provider}/${p.model}`) + (id === s.dispatcher?.middle ? ` · ${t("settings.main.middle")}` : "")}
+                    </option>
+                  ))}
+                </select>
+                <div className="sub faint">{t("settings.main.hint")}</div>
               </div>
             )}
             <div className="card">

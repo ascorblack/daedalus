@@ -12,6 +12,7 @@ import { invalidate, useQuery } from "../store";
 import { useMedia } from "../shell";
 import { enterSends, errorText } from "../ui";
 import { t } from "../i18n";
+import { MainEntry } from "../main/MainEntry";
 
 export function StartScreen({ onOpen, toast, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const phone = !useMedia("(min-width: 1024px)");
@@ -28,6 +29,8 @@ export function StartScreen({ onOpen, toast, project = "", projects = [], onProj
       </div>
       {phone && (
         <div className="start-list">
+          {/* The main orchestrator comes first on a phone: it is where work is handed out and questions wait. */}
+          <div className="start-main"><MainEntry current={false} /></div>
           <div className="start-list-head">
             <div className="section-title">{t("start.chats")}</div>
             {onProjects && <button type="button" className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}

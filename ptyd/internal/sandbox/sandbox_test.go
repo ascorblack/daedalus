@@ -1,3 +1,5 @@
+//go:build unix
+
 package sandbox
 
 import (
@@ -221,7 +223,7 @@ func TestProberPeekDoesNotWait(t *testing.T) {
 
 func TestProberElsewhere(t *testing.T) {
 	never := func(context.Context, []string) (string, bool) { t.Error("probed"); return "", true }
-	if s := NewTestProber("/b/bwrap", "windows", never, time.Now).Status(context.Background()); s != "not available on windows" {
+	if s := NewTestProber("/b/bwrap", "windows", never, time.Now).Status(context.Background()); s != "not available on Windows" {
 		t.Fatalf("windows: %q", s)
 	}
 	if s := NewTestProber("", "linux", never, time.Now).Status(context.Background()); s != "bwrap is not installed" {

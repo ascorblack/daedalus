@@ -421,6 +421,13 @@ where that needs polkit, it prints the one `sudo loginctl enable-linger` to run)
   remove`, which also deletes the unit and the binary. `bash deploy/host-terminal.sh status` says where
   it stands, and `daedalus doctor` names the fix for each way it can be down.
 
+### Host terminals on the desktop
+
+A native desktop install has host terminals only: shells on your own machine, as you, served by the
+`ptyd` each release carries beside the launcher. Restarting or updating the agent leaves them running;
+quitting the launcher ends them, as it ends the agent. On Windows the shell is PowerShell.
+[desktop/README.md](desktop/README.md#host-terminals) has the details.
+
 ### The install ends in the app: add a model
 
 **Whichever way you installed it.** A provider key is an address, not a choice of model, so nothing
@@ -721,6 +728,35 @@ subscription window used. Calls nobody priced are counted in `unpriced`, never a
 rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
 the same numbers.
 
+**The main orchestrator.** One chat, pinned first in the app, where you say "in Bakery, add a
+gluten-free menu": it hands the work to that project's orchestrator as a *dispatch* and follows it. It
+never touches files, staff or a board; its tools are `Projects`, `Delegate`, `Progress`, `Cancel`,
+`CreateProject` and `Answer`, beside `Notify`, `StaySilent` and the history tools. A dispatch wakes the
+project's orchestrator at once and is closed by exactly one `ProjectReport` with its id (done or
+blocked); a progress report is a message on it. The main orchestrator is woken only by those reports
+and by a dispatch that went quiet for `dispatcher.stalled_minutes` (30) while nobody in its project
+worked, and it tells you in a line or two — pushed to your phone when you are not looking at its chat.
+A question a project puts to you about a dispatch (`AskOperator(dispatch_id=…)`) is shown in the main
+chat as well as the project's, as one request answered once wherever you answer it; its model is not
+woken for it. It answers one for you only when your latest message says the answer (`Answer` quotes
+your words), and never a permission. Its model is Settings → Models → Main orchestrator, a mid-tier
+preset unless you choose one; the model chip in its chat writes that setting. `GET /api/main` is the
+chat as the app draws it (the session, the dispatches, the questions), `POST /api/main` opens it the
+first time and `POST /api/main/replace` gives it a fresh chat; `GET /api/dispatches/{id}` and `POST
+/api/dispatches/{id}/cancel` (`{"reason"}`) are a dispatch's card. With a Telegram bot it lives in the
+General topic of a forum — plain text there is for it, and a reply to another session's post in
+General still goes to that session — or, without a forum, it speaks in the private chat under "🧭 Main";
+a reply to one of its posts reaches it and `/main` makes it the chat's session. Its questions are
+posted there once, with buttons, and never in the project's topic.
+
+`CreateProject` makes a project only after you confirm it on a card in the main chat — a misheard
+name never becomes a folder. A container folder must lie under `dispatcher.container_roots` (by default
+the folders your container projects already live in); a host folder is looked at on your machine
+through the host terminal, and a card for one is answered in the app alone. On "Create" the folders
+are made if asked, the project's orchestrator is switched on and handed dispatch #1: survey the folders
+and write the brief. Until that dispatch is done — or you press "Finish setup" (`POST
+/api/projects/{id}/setup/finish`) — every question the project asks is shown in the main chat too.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
@@ -740,6 +776,14 @@ passed on with its last words. `GET /api/staff/{id}/session`, `…/transcript`, 
 `…/changes` are what the staff view reads, and `POST /api/staff/{id}/messages` and `…/seen` its
 composer and its "read". The self-check after an update runs one short session, with one tiny prompt
 on the cheapest model.
+
+Codex and OpenCode work as staff through their own servers rather than through their screens. Codex
+runs its app server as a second terminal beside the TUI; the host starts the thread on it with the
+member's instructions and the TUI attaches to that thread, so every message the host sends by the
+server shows in the TUI, and approvals and questions come to the host as the server's requests.
+OpenCode's TUI carries its server inside it, on a loopback port of the launch and behind a password
+made for that launch; messages go to it under ids the host chooses and come back as its events. The
+team tools, the instructions and the skill are launch configuration in both, never your own.
 
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the

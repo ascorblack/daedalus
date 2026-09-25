@@ -356,6 +356,8 @@ class AskAnswerBody(BaseModel):
     allow: bool | None = None
     text: str | None = None
     selected: list[str] | None = None
+    window: Literal["main", "project"] | None = None
+    """Which chat of the app the card was answered in, so every other window can say where."""
 
 
 class TeamReportBody(BaseModel):
@@ -648,6 +650,8 @@ class SettingsBody(BaseModel):
     compaction: dict[str, Any] | None = None
     orchestrator: dict[str, Any] | None = None
     """The project orchestrator's defaults: its model preset, its wake-up batching and its limits."""
+    dispatcher: dict[str, Any] | None = None
+    """The main orchestrator: its model preset, its wake-up batching, when a dispatch counts as stalled."""
     terminals: dict[str, Any] | None = None
     """``running_cap`` from Settings; the terminals service reads the configuration on every admission."""
     answer_language: str | None = None
@@ -1638,7 +1642,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def answer_ask(ask_id: str, body: AskAnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """The operator's answer. The first answer to reach a request wins; a later one is a 409 naming who was first."""
         team = team_or_503()
-        return await team_call(team.answer(ask_id, allow=body.allow, text=body.text, selected=body.selected, by="operator", via="app"))  # type: ignore[no-any-return]
+        return await team_call(team.answer(ask_id, allow=body.allow, text=body.text, selected=body.selected, by="operator", via=body.window or "app"))  # type: ignore[no-any-return]
 
     async def team_live(staff_session_id: str, request: Request) -> Any:
         """A command-line member's team server, authenticated by the token minted for its launch —
@@ -4109,6 +4113,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # The chip on an orchestrator's chat chooses the project's orchestrator model: the next
             # orchestrator of the project, after a replacement, runs the same one.
             await orchestrators.model_chosen(session_id, body.get("preset") or None, clear=bool(body.get("clear")))
+        dispatcher = app.extensions.get("dispatcher")
+        if dispatcher is not None and (body.get("preset") or body.get("clear")):
+            # The chip on the main chat chooses the main orchestrator's model in Settings.
+            await dispatcher.model_chosen(session_id, body.get("preset") or None, clear=bool(body.get("clear")))
         return {"ok": True, "model": await session_model_label(state), **(await session_thinking(state))}
 
     # -- MCP per session --------------------------------------------------------------
@@ -5040,6 +5048,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         data["search_backends"] = websearch.catalogue()
         # What an empty orchestrator preset means, so the setting can show it preselected.
         data["orchestrator"]["strongest"] = app.config.strongest_preset() or ""
+        # And what an empty main orchestrator preset means: a mid-tier one.
+        data["dispatcher"]["middle"] = app.config.middle_preset() or ""
         return mask_provider_keys(data)
 
     def _keyproxy_origin() -> str:
@@ -5364,7 +5374,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         raw["model"]["chain"] = [c for c in raw["model"].get("chain", []) if c != preset_id]
         # Removing the last model is allowed: an installation with none is a state the app knows —
         # it asks for one — and refusing would leave a wrong entry no one can take out.
-        for section in ("model", "vision", "voice", "orchestrator"):
+        for section in ("model", "vision", "voice", "orchestrator", "dispatcher"):
             if raw[section].get("preset") == preset_id:
                 raw[section]["preset"] = ""
         return await _save_provider_config(type(app.config).model_validate(raw))

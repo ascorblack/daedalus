@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -152,6 +154,22 @@ func TestTeamToolsAgainstARunningDaemon(t *testing.T) {
 	body, replyID := hookEvent()
 	if body["tool"] != "report" || body["note"] != "tests pass" || replyID == "" || !strings.HasPrefix(fmt.Sprint(body["call_id"]), "team1:") {
 		t.Fatalf("%v %q", body, replyID)
+	}
+	// The announcements are posted beside the calls, not before them, so they may still be on their
+	// way once the report has arrived; nothing else is in flight here, so every event now is one.
+	for len(hellos) < 2 {
+		ev, err := c.WaitEvent("hook", "w1", 5*time.Second)
+		if err != nil {
+			break
+		}
+		var data struct {
+			Body map[string]any `json:"body"`
+		}
+		_ = json.Unmarshal(ev.Data, &data)
+		if data.Body["tool"] != "hello" {
+			t.Fatalf("an unexpected hook while waiting for the announcements: %v", data.Body)
+		}
+		hellos = append(hellos, fmt.Sprint(data.Body["stage"]))
 	}
 	sort.Strings(hellos)
 	if fmt.Sprint(hellos) != "[initialize tools/list]" {

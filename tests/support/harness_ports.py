@@ -25,6 +25,7 @@ from typing import Any
 from daedalus.harness.contract import Environment, EnvironmentUnavailable, ExecResult, HookPost, ProgramNotFound
 from daedalus.terminals import wire
 from daedalus.terminals.client import PtydClient, Unavailable
+from daedalus.terminals.sidechannels import ByteStream
 from tests.support import fake_cli
 from tests.support.live_ptyd import LivePtyd
 
@@ -95,10 +96,13 @@ class PtydTerminalPort:
             return False
         return True
 
-
     async def put_file(self, name: str, data: bytes) -> str:
         result = await self.client.call("hooks.put_file", {"launch_id": self.launch_id, "name": name, "data": base64.b64encode(data).decode()})
         return str(result["path"])
+
+    async def dial(self, target: str) -> ByteStream:
+        result = await self.client.call("net.dial", {"target": target, "launch_id": self.launch_id})
+        return ByteStream(self.client.channel(int(result["channel"])), env=self._env, launch_id=self.launch_id, target=target)
 
 
 class PtydEnvironmentPort:

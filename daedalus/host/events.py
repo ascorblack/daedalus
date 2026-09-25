@@ -273,6 +273,43 @@ class ProjectChanged(TypedDict):
     actor: NotRequired[str]
 
 
+class DispatchCreated(TypedDict):
+    dispatch_id: str
+    seq: int
+    title: str
+    text: str
+    kind: str
+    """``work``, or ``setup``: the survey that writes a new project's brief."""
+    from_session: NotRequired[str]
+
+
+class DispatchMessage(TypedDict):
+    dispatch_id: str
+    author: str
+    """``dispatcher`` (a follow-up for the project) · ``orchestrator`` (a progress report) · ``operator`` · ``system``."""
+    kind: str
+    text: str
+
+
+class DispatchUpdated(TypedDict):
+    dispatch_id: str
+    status: str
+    change: NotRequired[str]
+
+
+class DispatchClosed(TypedDict):
+    dispatch_id: str
+    status: str
+    """``done`` · ``blocked`` · ``cancelled``."""
+    result: str
+    by: NotRequired[str]
+
+
+class DispatchStalled(TypedDict):
+    dispatch_id: str
+    minutes: int
+
+
 class NotifyDeliver(TypedDict):
     push: bool
     desktop: bool
@@ -375,6 +412,11 @@ REGISTRY: dict[str, EventSpec] = {
     "watch.fired": EventSpec(WatchFired),
     "webhook.received": EventSpec(WebhookReceived),
     "project.changed": EventSpec(ProjectChanged),
+    "dispatch.created": EventSpec(DispatchCreated),
+    "dispatch.message": EventSpec(DispatchMessage),
+    "dispatch.updated": EventSpec(DispatchUpdated),
+    "dispatch.closed": EventSpec(DispatchClosed),
+    "dispatch.stalled": EventSpec(DispatchStalled),
     "notify": EventSpec(Notify),
     "notify.seen": EventSpec(NotifySeen),
     "notify.resolved": EventSpec(NotifyResolved),

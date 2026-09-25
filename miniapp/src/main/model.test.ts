@@ -1,0 +1,121 @@
+// @vitest-environment jsdom
+// The main chat decided without a browser: one card per request, grouped by project and oldest
+// first; the one line an answered request collapses to, the same in every window; the dispatches in
+// the order the operator reads them; the model preselected in Settings; and the main orchestrator's
+// own chat kept out of the list it is pinned above.
+
+import { afterEach, describe, expect, it } from "vitest";
+import type { Dispatch, MainAsk, Preset, ProjectFolder, SessionSummary } from "../api";
+import { arrange } from "../grouping";
+import { setLang } from "../i18n";
+import { parse } from "../router";
+import { eventTone, parseEvents } from "../turns";
+import { answeredAsks, answeredLine, dispatchState, groupAsks, mainPreset, orderDispatches, takesWords } from "./model";
+
+function ask(over: Partial<MainAsk> = {}): MainAsk {
+  return {
+    id: "ask-1", short_id: "q1abcd", project_id: "p1", origin: "orchestrator", kind: "question", staff_id: null, task_id: null,
+    text: "Postgres or SQLite?", detail: { options: ["Postgres", "SQLite"] }, routed_to: "operator", suggestion: "",
+    created_at: "2026-09-25T10:00:00Z", resolved_at: null, resolved_by: null, resolution: {}, dispatch_id: "d1",
+    project_name: "Bakery", asker: "orchestrator", host: false, ...over,
+  };
+}
+
+function dispatch(over: Partial<Dispatch> = {}): Dispatch {
+  return {
+    id: "d1", project_id: "p1", project_name: "Bakery", seq: 1, kind: "work", title: "Menu", text: "Add a menu", status: "open", result: "",
+    created_at: "2026-09-25T10:00:00Z", updated_at: "2026-09-25T10:00:00Z", closed_at: null, stalled_at: null, ...over,
+  };
+}
+
+afterEach(() => setLang("en"));
+
+describe("the questions of the main chat", () => {
+  it("groups the open ones by project, oldest first, and leaves the answered ones out", () => {
+    const groups = groupAsks([
+      ask({ id: "a3", project_id: "p2", project_name: "Garden", created_at: "2026-09-25T10:03:00Z" }),
+      ask({ id: "a2", created_at: "2026-09-25T10:02:00Z" }),
+      ask({ id: "a1", created_at: "2026-09-25T10:01:00Z" }),
+      ask({ id: "a0", resolved_at: "2026-09-25T10:05:00Z", resolved_by: "operator" }),
+      ask({ id: "new", project_id: null, project_name: "", origin: "dispatcher", kind: "project", created_at: "2026-09-25T10:04:00Z" }),
+    ]);
+    expect(groups.map((g) => [g.name, g.asks.map((a) => a.id)])).toEqual([
+      ["Bakery", ["a1", "a2"]],
+      ["Garden", ["a3"]],
+      ["New project", ["new"]],
+    ]);
+  });
+
+  it("says where and how a request was answered, the same wherever it was shown", () => {
+    expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { selected: ["Postgres"], via: "main" } }))).toBe("answered in the main chat: Postgres");
+    expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { text: "SQLite, small data", via: "telegram" } }))).toBe("answered in Telegram: SQLite, small data");
+    expect(answeredLine(ask({ kind: "permission", resolved_at: "x", resolved_by: "operator", resolution: { allow: false, via: "push" } }))).toBe("answered from a notification: no");
+    expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { text: "Postgres", via: "dispatcher" } }))).toBe("answered through the main orchestrator: Postgres");
+    expect(answeredLine(ask({ resolved_at: "x", resolved_by: "system", resolution: { closed: "dispatch d1 was closed as done" } }))).toBe("withdrawn");
+    setLang("ru");
+    expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { selected: ["Postgres"], via: "project" } }))).toBe("ответ в чате проекта: Postgres");
+  });
+
+  it("keeps the latest answered ones as lines, newest first", () => {
+    const lines = answeredAsks([ask({ id: "old", resolved_at: "2026-09-25T09:00:00Z" }), ask({ id: "open" }), ask({ id: "new", resolved_at: "2026-09-25T11:00:00Z" })]);
+    expect(lines.map((a) => a.id)).toEqual(["new", "old"]);
+  });
+
+  it("takes words only for a question", () => {
+    expect(takesWords(ask())).toBe(true);
+    for (const kind of ["permission", "folder", "project"] as const) expect(takesWords(ask({ kind }))).toBe(false);
+  });
+});
+
+describe("the dispatches", () => {
+  it("names each state, a quiet open one as stalled", () => {
+    expect(dispatchState(dispatch()).tone).toBe("info");
+    expect(dispatchState(dispatch({ stalled_at: "2026-09-25T10:40:00Z" }))).toEqual({ word: "stalled", tone: "warn" });
+    expect(dispatchState(dispatch({ status: "done" })).tone).toBe("ok");
+    expect(dispatchState(dispatch({ status: "blocked" })).tone).toBe("bad");
+    expect(dispatchState(dispatch({ status: "cancelled" })).tone).toBe("faint");
+  });
+
+  it("puts the work under way first, the longest waiting first, then what closed, newest first", () => {
+    const order = orderDispatches([
+      dispatch({ id: "done-old", status: "done", closed_at: "2026-09-25T09:00:00Z" }),
+      dispatch({ id: "open-new", created_at: "2026-09-25T11:00:00Z" }),
+      dispatch({ id: "blocked-old", status: "blocked", created_at: "2026-09-25T08:00:00Z" }),
+      dispatch({ id: "done-new", status: "done", closed_at: "2026-09-25T12:00:00Z" }),
+    ]);
+    expect(order.map((d) => d.id)).toEqual(["blocked-old", "open-new", "done-new", "done-old"]);
+  });
+});
+
+describe("the main chat in the app", () => {
+  it("has an address of its own that is not a destination of the menu", () => {
+    const route = parse("/app/main", "");
+    expect([route.screen, route.session, route.project]).toEqual(["main", null, null]);
+  });
+
+  it("reads the main orchestrator's wake-ups as a card of reports", () => {
+    const batch = parseEvents("[reports · 2 since 14:02]\n- 14:02 Bakery closed dispatch d1abc \"Menu\" as done: six dishes\n- 14:03 dispatch d2xyz of Garden has been quiet for 31 min and nobody there is working — tell the operator; do not prod the project yourself");
+    expect(batch?.count).toBe(2);
+    expect(batch?.lines.map((l) => l.tone)).toEqual(["ok", "warn"]);
+    expect(batch?.lines[1].text.endsWith("nobody there is working")).toBe(true);
+    expect(eventTone("Bakery closed dispatch d1 as blocked: needs a password")).toBe("bad");
+  });
+
+  it("keeps its chat out of the list it is pinned above, and its project while it holds nothing else", () => {
+    const main = { id: "p-main", name: "Main", system: "dispatcher", created_at: "2026-09-01T00:00:00Z", settings: { snapshots: false, system: "dispatcher" }, folders: [], total: 1, active: 0, loops: 0, last_message_at: "" } as unknown as ProjectFolder;
+    const session = (id: string, metadata: Record<string, unknown>) => ({ id, title: id, project_id: "p-main", status: "idle", last_message_at: "2026-09-25T10:00:00Z", created_at: "2026-09-25T10:00:00Z", metadata }) as unknown as SessionSummary;
+    expect(arrange([session("now", { dispatcher: true })], [main]).folders).toEqual([]);
+    const replaced = arrange([session("now", { dispatcher: true }), session("before", { dispatcher_retired: true })], [main]).folders;
+    expect(replaced.map((f) => f.rows.map((r) => r.s.id))).toEqual([["before"]]);
+  });
+});
+
+describe("the model it runs", () => {
+  const presets = { small: {} as Preset, mid: {} as Preset, big: {} as Preset };
+  it("shows the chosen preset, else the host's mid-tier pick, else the first", () => {
+    expect(mainPreset(presets, "big", "mid")).toBe("big");
+    expect(mainPreset(presets, "", "mid")).toBe("mid");
+    expect(mainPreset(presets, "gone", "mid")).toBe("mid");
+    expect(mainPreset(presets, undefined, undefined)).toBe("small");
+  });
+});

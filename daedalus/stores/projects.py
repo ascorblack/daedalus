@@ -212,6 +212,9 @@ class Project:
     created_at: datetime
     settings: ProjectSettings = field(default_factory=ProjectSettings)
     folders: tuple[ProjectFolder, ...] = ()
+    setup_by: str = ""
+    """``dispatcher`` while the main orchestrator is setting the project up: every request of the
+    project is then shown in its chat too. Empty once the setup is over."""
 
     @property
     def primary(self) -> ProjectFolder:
@@ -235,6 +238,7 @@ class Project:
             "settings": self.settings.dump(),
             "system": self.settings.system,
             "folders": [f.view() for f in self.folders],
+            "setup_by": self.setup_by,
         }
 
 
@@ -392,6 +396,7 @@ class ProjectStore:
             created_at=datetime.fromisoformat(row["created_at"]),
             settings=ProjectSettings.load(settings, default_env=self.local_env),
             folders=tuple(folders),
+            setup_by=str(row["setup_by"] or "") if "setup_by" in row.keys() else "",
         )
 
     async def list(self) -> list[Project]:
@@ -782,6 +787,19 @@ class ProjectStore:
             won = cursor.rowcount == 1
             await cursor.close()
         return won
+
+    async def set_setup(self, project_id: str, by: str, *, expect: str | None = None) -> bool:
+        """Mark a project as being set up by ``by`` (empty: the setup is over). With ``expect``, only
+        when it is still marked that way; whether the row changed."""
+        if expect is None:
+            sql, params = "UPDATE projects SET setup_by = ? WHERE id = ?", (by, project_id)
+        else:
+            sql, params = "UPDATE projects SET setup_by = ? WHERE id = ? AND setup_by = ?", (by, project_id, expect)
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(sql, params)
+            changed = cursor.rowcount == 1
+            await cursor.close()
+        return changed
 
     async def delete(self, project_id: str) -> None:
         """Forget an empty project, with its folders, brief and journal. Nothing on disk is touched."""

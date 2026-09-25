@@ -38,7 +38,7 @@ WORDS = {
         "all": "All projects", "orchestrator": "Orchestrator", "team": "Team", "oneoff": "One-off", "terminals": "Terminals", "board": "Board", "brief": "Brief",
         "wakeups": "Wake-ups", "journal": "Journal", "folders": "Folders", "machine": "the machine's terminal limit is reached", "placeholder": "Write to the orchestrator…",
         "lev": "Write to Lev…", "folder": "Folder added", "created": "Task created", "assigned": "Assigned", "watch": "Watch set", "asked": "Asked you",
-        "answered": "Answered: Before delivery", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
+        "answered": "answered in the project's chat: Before delivery", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
         "note": "Add a note", "enable": "Switch the orchestrator on", "on": "Switch on", "cost": "fifteen times", "pause": "Pause after the turn", "accepted": "accepted",
         "entry": "orchestrator", "needs": "1 needs you", "autonomy": "autonomy: normal",
         "spent": "$2.05 today", "levspend": "$1.20 today · 412k tokens", "iraspend": "subscription · window 23 %", "totals": "Today $2.05 · 7 days $10.90 · All $33.80",
@@ -48,7 +48,7 @@ WORDS = {
         "all": "Все проекты", "orchestrator": "Оркестратор", "team": "Команда", "oneoff": "Разовые", "terminals": "Терминалы", "board": "Доска", "brief": "Бриф",
         "wakeups": "Будильники", "journal": "Журнал", "folders": "Папки", "machine": "достигнут предел терминалов машины", "placeholder": "Напишите оркестратору…",
         "lev": "Написать сотруднику Lev…", "folder": "Папка добавлена", "created": "Задача создана", "assigned": "Назначено", "watch": "Наблюдение поставлено", "asked": "Спросил вас",
-        "answered": "Ответ: До доставки", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
+        "answered": "ответ в чате проекта: До доставки", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
         "note": "Добавить заметку", "enable": "Включить оркестратор", "on": "Включить", "cost": "в пятнадцать раз", "pause": "После хода — пауза", "accepted": "принято",
         "entry": "оркестратор", "needs": "1 ждёт вас", "autonomy": "самостоятельность: обычная",
         "spent": "$2.05 сегодня", "levspend": "$1.20 сегодня · токенов: 412k", "iraspend": "подписка · окно 23 %", "totals": "Сегодня $2.05 · 7 дней $10.90 · Всего $33.80",
@@ -143,7 +143,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(ask.locator(".ask-own input")).to_be_visible()
     ask.get_by_role("button", name=invented["ask.before"]).click()
     expect(ask.locator(".ask-answer")).to_have_text(words["answered"])
-    assert focus.answers == [("ask-spring", {"selected": [invented["ask.before"]]})], focus.answers
+    assert focus.answers == [("ask-spring", {"selected": [invented["ask.before"]], "window": "project"})], focus.answers
     fits(page, f"{lang} {width} orchestrator")
 
     # The panel beside the orchestrator is the project's: four tabs, the board first.

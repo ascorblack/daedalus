@@ -1090,6 +1090,14 @@ file writes, no subagents. An allowlist rather than a list of refusals, so a too
 an orchestrator's until someone decides it should be."""
 
 
+DISPATCHER_TOOLS = ["Projects", "Delegate", "Progress", "Cancel", "CreateProject", "Answer", "Notify", "StaySilent", "HistorySearch", "HistoryExpand", "Recall"]
+"""Everything the main orchestrator may call. It routes the operator's words to projects and follows
+what it handed over; it never touches files, staff or a board itself, and it never blocks on a
+question (no AskUser: a main orchestrator paused on a question could not hear its projects report).
+Its own tools share names with other roles' tools (the voice concierge's Delegate and Projects, the
+project orchestrator's Answer), so they live in a registry of their own and this list is the whole of it."""
+
+
 class WebhookConfig(BaseModel):
     """One inbound webhook provider: how it is authenticated and where its events run."""
 
@@ -1147,6 +1155,26 @@ class StaffConfig(BaseModel):
     signal_write_seconds: int = Field(default=5, ge=0)
     """The least time between two writes of a staff session's last signal. Every event of a busy
     session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
+
+
+class DispatcherConfig(BaseModel):
+    """The main orchestrator: the one session that hands the operator's requests to projects."""
+
+    preset: str = ""
+    """Its model preset; empty is a mid-tier preset (:meth:`RuntimeConfig.middle_preset`). It routes and
+    follows, which a mid-tier model does as well as the strongest, and it runs on every report."""
+    batch_seconds: int = Field(default=10, ge=1, le=600)
+    """Reports on dispatches arriving together are told in one turn."""
+    max_wakes_per_hour: int = Field(default=20, ge=1)
+    stalled_minutes: int = Field(default=30, ge=5, le=24 * 60)
+    """An open dispatch with nothing happening on it this long, while nobody in its project works, is stalled."""
+    state_max_chars: int = Field(default=4000, ge=1000, le=20_000)
+    max_iterations: int = Field(default=20, ge=5)
+    """Model calls in one of its turns: it routes and ends its turn."""
+    usd_per_run: float | None = Field(default=None, ge=0)
+    container_roots: list[str] = Field(default_factory=list)
+    """Where ``CreateProject`` may find or make a container folder. Empty: the folders that already
+    hold container projects (the parents of their folders), which are the mounts the operator set up."""
 
 
 class OrchestratorConfig(BaseModel):
@@ -1506,6 +1534,7 @@ class RuntimeConfig(BaseModel):
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
     watches: WatchesConfig = Field(default_factory=WatchesConfig)
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
@@ -1566,6 +1595,32 @@ class RuntimeConfig(BaseModel):
             return (int(p.thinking), effort.get(p.reasoning_effort, 0), p.context_window, p.max_output_tokens, int(pid == self.model.preset), -order.index(pid))
 
         return max(order, key=strength)
+
+    def middle_preset(self) -> str | None:
+        """A preset in the middle of the table by the same measure as :meth:`strongest_preset`: for
+        work that is routing and following rather than judgement, where the strongest is waste. With
+        two presets the weaker one; with one, that one."""
+        if not self.presets:
+            return None
+        strongest = self.strongest_preset()
+        effort = {name: rank for rank, name in enumerate(REASONING_EFFORTS)}
+        order = list(self.presets)
+
+        def strength(pid: str) -> tuple[int, int, int, int, int]:
+            p = self.presets[pid]
+            return (int(p.thinking), effort.get(p.reasoning_effort, 0), p.context_window, p.max_output_tokens, -order.index(pid))
+
+        ranked = sorted(order, key=strength)
+        if len(ranked) > 1 and ranked[-1] != strongest:
+            ranked.remove(strongest)  # type: ignore[arg-type]
+            ranked.append(strongest)  # type: ignore[arg-type]
+        return ranked[(len(ranked) - 1) // 2]
+
+    def dispatcher_preset(self) -> str | None:
+        """The preset the main orchestrator runs: the one chosen in Settings, else a mid-tier one."""
+        if self.dispatcher.preset and self.dispatcher.preset in self.presets:
+            return self.dispatcher.preset
+        return self.middle_preset()
 
     def orchestrator_preset(self, project_choice: str = "") -> str | None:
         """The preset a project orchestrator runs: its project's choice, else the Settings default, else the strongest."""
@@ -1846,6 +1901,8 @@ __all__ = [
     "PeersConfig",
     "StaffConfig",
     "OrchestratorConfig",
+    "DispatcherConfig",
+    "DISPATCHER_TOOLS",
     "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",

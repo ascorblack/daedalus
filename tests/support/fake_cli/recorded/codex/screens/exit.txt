@@ -1,0 +1,29 @@
+╭─────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.155.1)                              │
+│                                                         │
+│ model:     gpt-6-astra   /model to change               │
+│ directory: /work/proj │
+╰─────────────────────────────────────────────────────────╯
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+⚠ 1 startup issue · ctrl + t for details
+
+• You have 1 usage limit reset available. Run /usage to use one.
+
+
+› Call the Report tool with kind checkpoint and note self-check, then reply with the single word ready.
+
+
+■ You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at
+Sep 27th, 2026 9:46 PM.
+Disconnected from this task. Any running work continues.
+Reconnect: codex --remote unix:///run/dial/codex.sock resume 01a0d59e-aee3-7fa2-81c5-60ccc0b5d05c
+Stop the current turn: run codex --remote unix:///run/dial/codex.sock agents, select this task, and press ctrl + x.
+EXIT 0

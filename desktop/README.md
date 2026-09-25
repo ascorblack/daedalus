@@ -177,7 +177,9 @@ installation up is copying one directory and removing it is deleting one directo
       node/                 an extra, fetched on demand
       browsers/             an extra, fetched on demand
       cache/                uv's wheel cache; safe to delete, and the next sync refills it
-      logs/                 the supervisor's and the key proxy's output, rolled by the launcher
+      logs/                 the supervisor's, the key proxy's and the terminal daemon's output, rolled by the launcher
+      ptyd/run/             the terminal daemon's endpoint and token (sealed with the rest of runtime/)
+      ptyd/state/           its launches, shell scripts and journal of agent writes
       installed/            which version and which hash each tool was unpacked from
     state/                  the database, the sessions, the pairing links, the known-good history
     workspaces/             one per session
@@ -520,6 +522,30 @@ on Windows where there are not; the zombie reaper reads `/proc` and is therefore
 owner-restoring `chown` exists because a container runs as root over a host mount, which is not the
 case when it is your own process writing your own files.
 
+### Host terminals
+
+A native install's terminals are **host terminals**: shells on this machine, as you, in your home,
+with your own logins and PATH (the runtime's tools come after yours). They are served by `ptyd`, the
+terminal daemon, which each release archive carries beside the launcher (`ptyd`, `ptyd.exe`, or
+`Contents/MacOS/ptyd` in the Mac bundle). The launcher starts it first, as a child of its own beside
+the supervisor rather than under it, so **applying a change or restarting the agent leaves every
+terminal running** and the app reattaches. **Quitting the launcher ends them**, as it ends the agent:
+nothing of the installation keeps running behind a closed launcher. A daemon that crashes is started
+again with the supervisor's backoff; the terminals it held are gone, and the app shows them lost.
+
+- On Linux and macOS the daemon listens on a socket in `data/runtime/ptyd/run/` (loopback TCP when
+  the folder is so deep that the socket's path would be too long); on Windows on a loopback port,
+  with the directory's access list giving it to you alone. The directory is sealed from the agent.
+- **Updating it** is updating the launcher: a new release carries its daemon, and the restart that
+  installs it ends the terminals like any quit.
+- A build without the daemon (`go build` in `desktop/`, most often) still runs; the app shows host
+  terminals unavailable with "this build carries no ptyd". `DAEDALUS_PTYD=/path/to/ptyd` names one
+  built by hand (`ptyd/release.sh`, or `go build ./cmd/ptyd` for a daemon without the screen emulator).
+- On Windows the shell is PowerShell 7 when it is installed, else Windows PowerShell; there is no
+  sandbox toggle there, and no process statistics.
+- Docker mode on a desktop has container terminals only (the `terminals` service); the launcher starts
+  nothing for them.
+
 ### Windows
 
 Implemented and cross-compiled, with the path and argument logic under tests of its own, but **not
@@ -534,7 +560,13 @@ limitation, not a choice, and it is stated here rather than hidden.
 
 - Everything Windows: the MinGit unpack, `sh -c`, the loopback supervisor, `taskkill` stopping the
   tree. Compiled, unit-tested for the path and argument logic, never run on Windows.
+- The terminal daemon on Windows: the pseudoconsole, the job object, the access list, PowerShell
+  and its shell marks, the hard-linked hook command. Cross-compiled with the emulator for amd64 and
+  arm64, its text rules unit-tested everywhere; its tests of a real console run only on the release
+  workflow's Windows runner. Older console hosts may drop the shell's marks.
 - macOS: the `xcode-select` probe and the folder dialog. Compiled, unit-tested, never run on a Mac.
+  The terminal daemon has only been vetted for macOS; its tests and the signing of the nested binary
+  run for the first time on the workflow's Mac runner.
 - The folder picker's dialogs (`osascript`, `FolderBrowserDialog`, `zenity`/`kdialog`) — each needs
   its own desktop.
 

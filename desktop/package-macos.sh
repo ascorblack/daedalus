@@ -15,6 +15,10 @@
 #
 # usage: package-macos.sh VERSION AMD64_BINARY ARM64_BINARY OUTPUT_DIR
 #
+# PTYD_AMD64 and PTYD_ARM64, when both are set, are the terminal daemon's two slices; they are joined
+# into Contents/MacOS/ptyd, beside the launcher, which is where it looks for them. A bundle without
+# them runs, and says host terminals are unavailable.
+#
 # Signing and notarization happen when all five of these are set; without them the bundle is signed
 # ad-hoc and the script says so, so that a release is never held up by a missing secret:
 #   APPLE_CERTIFICATE_P12       base64 of a Developer ID Application .p12
@@ -58,6 +62,13 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # to answer about their own hardware.
 lipo -create -output "$executable" "$amd64_binary" "$arm64_binary"
 chmod +x "$executable"
+ptyd=""
+if [ -n "${PTYD_AMD64:-}" ] && [ -n "${PTYD_ARM64:-}" ]; then
+  ptyd="$app/Contents/MacOS/ptyd"
+  lipo -create -output "$ptyd" "$PTYD_AMD64" "$PTYD_ARM64"
+  chmod +x "$ptyd"
+  lipo -info "$ptyd"
+fi
 
 # The Mini App travels in the bundle's Resources, where the launcher looks for it. Without it a
 # native installation on a Mac with no Node would have to fetch a toolchain to build 1.7 MB of
@@ -156,6 +167,12 @@ if [ "$signed" = "developer-id" ]; then
   fi
   # The hardened runtime is what notarization requires; the entitlements ask for nothing beyond the
   # default, and are passed because codesign takes the two together.
+  # Every executable inside is signed before the bundle, innermost first: notarization rejects a
+  # bundle holding a binary without its own hardened-runtime signature, and --deep is not how Apple
+  # says to get one.
+  if [ -n "$ptyd" ]; then
+    codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$ptyd"
+  fi
   codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$executable"
   codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$app"
   codesign --verify --strict --verbose=2 "$app"
