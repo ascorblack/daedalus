@@ -175,6 +175,11 @@ LAUNCH_DIR = "{launch_dir}"
 creates the directory when the launch is registered, so the adapter cannot know its path; the
 runtime substitutes it before the terminal is created."""
 
+DIAL_DIR = "{dial_dir}"
+"""Stands for the launch's dial directory, where a program the launch starts puts the unix socket the
+host reaches through ``TerminalPort.dial``. Substituted like ``LAUNCH_DIR``: the daemon makes it with
+the launch, beside the launch directory rather than inside it."""
+
 
 @dataclass(frozen=True, slots=True)
 class LaunchSpec:
@@ -218,6 +223,8 @@ class LaunchSpec:
     report_hold_ms: int = 15_000
     permission_hold_ms: int = 300_000
     """How long a CLI's permission or question hook may be held for an answer given elsewhere."""
+    port_range: tuple[int, int] = (18300, 18399)
+    """Loopback ports a CLI that serves on one (OpenCode) may take, ``harness.opencode_port_range``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +366,16 @@ class EnvironmentUnavailable(RuntimeError):
     says nothing about whether a CLI is installed in it."""
 
 
+class ByteStreamPort(Protocol):
+    """Bytes to and from a program's socket. ``read`` returns ``b""`` once either side closed it."""
+
+    async def read(self) -> bytes: ...
+
+    async def write(self, data: bytes) -> None: ...
+
+    async def close(self) -> None: ...
+
+
 class TerminalPort(Protocol):
     """The one terminal an adapter drives. Every write goes through the daemon's writer queue and the
     audit, and waits for the human's quiet time unless the caller is the human."""
@@ -390,6 +407,12 @@ class TerminalPort(Protocol):
 
     async def put_file(self, name: str, data: bytes) -> str:
         """Add a file to the launch directory (a message too long to type) and return its path."""
+        ...
+
+    async def dial(self, target: str) -> ByteStreamPort:
+        """A byte stream to ``unix:<name>`` in the launch's dial directory or to
+        ``tcp:127.0.0.1:<port>`` among the launch's ports: a CLI's own server, reached through the
+        daemon, which is the one way in from the host's side in both environments."""
         ...
 
 
@@ -497,9 +520,11 @@ class HarnessAdapter(Protocol):
 
 __all__ = [
     "ANSWER_CHOICES",
+    "DIAL_DIR",
     "LAUNCH_DIR",
     "AgentEntry",
     "Answer",
+    "ByteStreamPort",
     "Catalog",
     "CheckResult",
     "CheckStep",

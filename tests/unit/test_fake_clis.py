@@ -19,6 +19,7 @@ import pytest
 
 from daedalus.harness.capabilities import CAPABILITIES, parse_version, version_tested
 from tests.support.fake_cli.tui import read_log
+from tests.support.fake_cli.websocket import Socket
 from tests.support.harness_ports import PtydTerminalPort, Rig
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="pseudo-terminals and process groups as on Linux")
@@ -336,8 +337,10 @@ async def test_without_bracketed_paste_a_pasted_line_feed_submits() -> None:
 
 
 class CodexClient:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self.reader, self.writer = reader, writer
+    """A minimal app-server client, over the WebSocket the real server speaks on its socket."""
+
+    def __init__(self, socket: Socket) -> None:
+        self.socket = socket
         self.next = 0
         self.notes: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
@@ -347,14 +350,13 @@ class CodexClient:
 
     @classmethod
     async def connect(cls, path: str) -> CodexClient:
-        reader, writer = await asyncio.open_unix_connection(path, limit=1 << 22)
-        client = cls(reader, writer)
+        client = cls(await Socket.connect(path))
         await client.call("initialize", {"clientInfo": {"name": "daedalus", "version": "test"}})
-        writer.write(b'{"method": "initialized"}\n')
+        await client.socket.send('{"method": "initialized"}')
         return client
 
     async def read(self) -> None:
-        while line := await self.reader.readline():
+        while (line := await self.socket.receive()) is not None:
             message = json.loads(line)
             if "method" in message and "id" in message:
                 self.requests.append(message)
@@ -368,7 +370,7 @@ class CodexClient:
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.next += 1
         ident = self.next
-        self.writer.write((json.dumps({"id": ident, "method": method, "params": params}) + "\n").encode())
+        await self.socket.send(json.dumps({"id": ident, "method": method, "params": params}))
         await self.until(lambda: ident in self.replies)
         return self.replies[ident]
 
@@ -381,27 +383,26 @@ class CodexClient:
         return next((n for n in self.notes if n["method"] == method and all(n["params"].get(k) == v for k, v in where.items())), None)
 
     def answer(self, request: dict[str, Any], result: dict[str, Any]) -> None:
-        self.writer.write((json.dumps({"id": request["id"], "result": result}) + "\n").encode())
+        asyncio.ensure_future(self.socket.send(json.dumps({"id": request["id"], "result": result})))
 
     async def close(self) -> None:
-        self.writer.close()
+        self.socket.close()
         self.task.cancel()
 
 
-async def codex_session(rig: Rig, *, approvals: str = "all", trusted: bool = True, update_check: bool = False) -> tuple[CodexClient, PtydTerminalPort, str]:
+async def codex_session(rig: Rig, *, approvals: str = "all", update_check: bool = False) -> tuple[CodexClient, PtydTerminalPort, str]:
+    """The way the adapter runs Codex: the server, the host's client starting the thread and writing
+    to it, then the TUI attaching to that thread."""
     launch = await rig.register()
     sock = f"{launch['dial_dir']}/codex.sock"
-    overrides = []
-    if trusted:
-        overrides += ["-c", f'projects."{rig.work}".trust_level="trusted"']
-    if not update_check:
-        overrides += ["-c", "check_for_update_on_startup=false"]
-    server = await rig.spawn(["codex", "app-server", "--listen", f"unix://{sock}", *overrides], launch_id=launch["launch_id"], env={"FAKE_CODEX_APPROVALS": approvals})
+    server = await rig.spawn(["codex", "app-server", "--listen", f"unix://{sock}"], launch_id=launch["launch_id"], env={"FAKE_CODEX_APPROVALS": approvals})
     await rig.screen_until(server, "listening on unix://")
     client = await CodexClient.connect(sock)
     started = await client.call("thread/start", {"cwd": str(rig.work), "approvalPolicy": "on-request", "sandbox": "workspace-write"})
     thread = started["result"]["thread"]["id"]
-    tui = await rig.spawn(["codex", "--remote", f"unix://{sock}", "resume", thread], launch_id=launch["launch_id"])
+    await client.call("thread/inject_items", {"threadId": thread, "items": [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "hello"}]}]})
+    settings = [] if update_check else ["-c", "check_for_update_on_startup=false"]
+    tui = await rig.spawn(["codex", "--remote", f"unix://{sock}", *settings, "resume", thread], launch_id=launch["launch_id"])
     return client, tui, thread
 
 
@@ -471,14 +472,40 @@ async def test_codex_answered_in_the_tui_resolves_for_the_host() -> None:
         await client.close()
 
 
-async def test_codex_trust_and_update_prompts_unless_the_launch_answers_them() -> None:
+async def test_codex_asks_no_trust_and_its_update_prompt_is_the_tuis_own_setting() -> None:
     async with Rig(extra_env={"FAKE_CODEX_LATEST": "0.156.1"}) as rig:
-        _, tui, _ = await codex_session(rig, trusted=False, update_check=True)
-        await rig.screen_until(tui, f"You are running Codex in {rig.work}")
-        await tui.write(text="1")
+        _, tui, _ = await codex_session(rig, update_check=True)
         await rig.screen_until(tui, r"Update available! 0\.155\.1 -> 0\.156\.1")
         await tui.write(text="2")
         await rig.screen_until(tui, "resumed thread")
+        assert "trust" not in (await tui.screen()).lower()
+
+
+async def test_codex_threads_speak_websocket_and_cannot_be_resumed_before_they_are_written() -> None:
+    async with Rig() as rig:
+        launch = await rig.register()
+        sock = f"{launch['dial_dir']}/codex.sock"
+        server = await rig.spawn(["codex", "app-server", "--listen", f"unix://{sock}"], launch_id=launch["launch_id"])
+        await rig.screen_until(server, "listening on unix://")
+        # A bare JSON line, without the upgrade, is met with a closed connection.
+        reader, writer = await asyncio.open_unix_connection(sock)
+        writer.write(b'{"id": 1, "method": "initialize", "params": {}}\n')
+        assert await reader.read() == b""
+        writer.close()
+        owner, other = await CodexClient.connect(sock), await CodexClient.connect(sock)
+        thread = (await owner.call("thread/start", {"cwd": str(rig.work)}))["result"]["thread"]["id"]
+        await other.until(lambda: other.note("thread/started") is not None)  # every client hears of it
+        refused = await other.call("thread/resume", {"threadId": thread})
+        assert refused["error"]["message"] == f"no rollout found for thread id {thread}"
+        tui = await rig.spawn(["codex", "--remote", f"unix://{sock}", "-c", "check_for_update_on_startup=false", "resume", thread], launch_id=launch["launch_id"])
+        await rig.screen_until(tui, "Failed to resume session")
+        await owner.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "echo:hi"}], "clientUserMessageId": "m1"})
+        await owner.until(lambda: owner.note("turn/completed") is not None)
+        # The status reached the unsubscribed client; the turn did not.
+        assert other.note("thread/status/changed") is not None and other.note("turn/started") is None
+        assert "result" in await other.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+        await owner.close()
+        await other.close()
 
 
 # -- OpenCode ---------------------------------------------------------------------------------------------

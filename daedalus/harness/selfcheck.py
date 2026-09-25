@@ -28,6 +28,7 @@ from typing import Any
 
 from daedalus.config import HarnessConfig
 from daedalus.harness.contract import (
+    DIAL_DIR,
     LAUNCH_DIR,
     CheckResult,
     CheckStep,
@@ -40,7 +41,14 @@ from daedalus.harness.contract import (
     StaffEvent,
 )
 from daedalus.harness.env import terminal_environment
-from daedalus.harness.runtime import GATE_ANSWERS_MAX, GATE_REPEAT_S, LAUNCH_COLS, LAUNCH_ROWS, RuntimeTerminal
+from daedalus.harness.runtime import (
+    GATE_ANSWERS_MAX,
+    GATE_REPEAT_S,
+    LAUNCH_COLS,
+    LAUNCH_ROWS,
+    RuntimeTerminal,
+    port_range,
+)
 from daedalus.terminals.model import LaunchSpec as DaemonLaunch
 from daedalus.terminals.model import Owner, TerminalError, TerminalSpec
 from daedalus.terminals.service import Terminals
@@ -87,6 +95,7 @@ async def session_check(
     folder = f"{env.home.rstrip('/')}/{FOLDER}/{adapter.name}"
     launch_id = "c" + secrets.token_hex(8)
     term_id = ""
+    companions: list[str] = []
     registered = False
     feeder: asyncio.Task[None] | None = None
     try:
@@ -95,24 +104,38 @@ async def session_check(
             harness=adapter.name, env=env.name, cwd=folder, launch_id=launch_id, first_prompt=None, model=model,
             title="self-check", team_block="This is a self-check of the command-line agent. Do only what the prompt asks.",
             ask_hold_ms=cfg.ask_hold_s * 1000, report_hold_ms=cfg.report_hold_s * 1000, permission_hold_ms=0,
+            port_range=port_range(cfg.opencode_port_range),
         )
         plan = adapter.launch_plan(spec)
         daemon = await terminals.register_launch(env.name, DaemonLaunch(launch_id=launch_id, files=dict(plan.files), ports=list(plan.ports), hold_max_ms=cfg.report_hold_s * 1000 + 30_000), actor=ACTOR)
         registered = True
-        environment = terminal_environment({k: v.replace(LAUNCH_DIR, daemon.dir) for k, v in plan.env.items()}, capabilities=adapter.capabilities)
-        view = await terminals.create(
-            TerminalSpec(
-                env=env.name, owner=Owner("free"), cwd=folder, argv=[a.replace(LAUNCH_DIR, daemon.dir) for a in plan.argv],
-                env_vars=environment.set, strip_env=list(environment.strip), title=f"{adapter.capabilities.label} self-check",
-                cols=LAUNCH_COLS, rows=LAUNCH_ROWS, profile=f"harness:{adapter.name}", launch_id=launch_id, created_by="operator",
-            ),
-            confirm_over_cap=True,
-        )
-        term_id = str(view["id"])
+
+        def placed(value: str) -> str:
+            return value.replace(LAUNCH_DIR, daemon.dir).replace(DIAL_DIR, daemon.dial_dir)
+
+        async def create(argv: tuple[str, ...], values: dict[str, str], title: str) -> str:
+            environment = terminal_environment({k: placed(v) for k, v in values.items()}, capabilities=adapter.capabilities)
+            view = await terminals.create(
+                TerminalSpec(
+                    env=env.name, owner=Owner("free"), cwd=folder, argv=[placed(a) for a in argv],
+                    env_vars=environment.set, strip_env=list(environment.strip), title=title,
+                    cols=LAUNCH_COLS, rows=LAUNCH_ROWS, profile=f"harness:{adapter.name}", launch_id=launch_id, created_by="operator",
+                ),
+                confirm_over_cap=True,
+            )
+            return str(view["id"])
+
+        # A companion first (Codex's app server), as a staff launch starts it: the CLI talks to it.
+        for companion in plan.companions:
+            companions.append(await create(companion.argv, dict(companion.env), f"{adapter.capabilities.label} self-check · {companion.role}"))
+            if companion.ready_pattern and (await terminals.wait_for(companions[-1], regex=companion.ready_pattern, timeout=cfg.ready_timeout_s)).get("matched") != "regex":
+                steps.add("launch", False, f"the {companion.role} did not start within {cfg.ready_timeout_s:g} s")
+                return CheckResult(False, tuple(steps.steps), version, _ms(started))
+        term_id = await create(plan.argv, dict(plan.env), f"{adapter.capabilities.label} self-check")
         steps.add("launch", True, f"terminal {term_id}")
         hooks: asyncio.Queue[HookPost | None] = asyncio.Queue()
         term = RuntimeTerminal(terminals, term_id, env.name, actor=ACTOR, launch_id=launch_id, hooks=hooks)
-        record = Launch(launch_id, "", adapter.name, env.name, term_id, None, daemon.dir, plan.session_ref, version, "")
+        record = Launch(launch_id, "", adapter.name, env.name, term_id, companions[0] if companions else None, daemon.dir, plan.session_ref, version, "")
         seen: dict[str, Any] = {}
         events: asyncio.Queue[StaffEvent] = asyncio.Queue()
 
@@ -157,6 +180,7 @@ async def session_check(
         ready = await _gate(adapter, term, cfg, until)
         if not steps.add("ready", ready is None, ready or "the CLI said it was ready"):
             return CheckResult(False, tuple(steps.steps), version, _ms(started))
+        await adapter.after_spawn(term, record, plan)
         if adapter.capabilities.team_tools == "mcp":
             loop = asyncio.get_running_loop()
             deadline = loop.time() + cfg.team_hello_s
@@ -184,9 +208,10 @@ async def session_check(
     finally:
         if feeder is not None:
             feeder.cancel()
-        with contextlib.suppress(Exception):
-            if term_id and (await terminals.get(term_id))["status"] == "running":
-                await terminals.kill(term_id, actor=ACTOR)
+        for terminal_id in [term_id, *companions]:
+            with contextlib.suppress(Exception):
+                if terminal_id and (await terminals.get(terminal_id))["status"] == "running":
+                    await terminals.kill(terminal_id, actor=ACTOR)
         with contextlib.suppress(Exception):
             if registered:
                 await terminals.unregister_launch(env.name, launch_id, actor=ACTOR)

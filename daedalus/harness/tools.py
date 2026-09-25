@@ -407,8 +407,11 @@ class CodexTooling(Tooling):
     # container is; it signs in with the ChatGPT subscription.
     sign_in = ("codex", "login", "--device-auth")
     modes = ("read-only", "workspace-write", "danger-full-access")
-    efforts = ("minimal", "low", "medium", "high")
-    cheap_markers = ("mini", "nano")
+    # As ``codex debug models`` listed them for 0.155.1: the newest models take all six, older ones
+    # fewer; ``minimal`` is gone.
+    efforts = ("low", "medium", "high", "xhigh", "max", "ultra")
+    # "Luna" is the fast and affordable line ("Fast and affordable model for easier tasks").
+    cheap_markers = ("luna", "mini", "nano")
 
     def own_update(self, latest: str) -> Plan:
         return Plan(argv=("codex", "update"), target=latest)
@@ -440,7 +443,9 @@ class CodexTooling(Tooling):
 
 
 def parse_codex_models(text: str) -> tuple[str, ...]:
-    """``codex debug models`` prints JSON: ``{"models": [{"id": …}]}``, or a bare list."""
+    """``codex debug models`` prints JSON, ``{"models": [{"slug": …, "visibility": "list"|"hide"}]}``
+    (measured on 0.155.1); a model with ``visibility: hide`` is Codex's own (a reviewer, a reserve)
+    and is not offered."""
     try:
         data: Any = json.loads(text)
     except ValueError:
@@ -448,7 +453,8 @@ def parse_codex_models(text: str) -> tuple[str, ...]:
     items = data.get("models") if isinstance(data, dict) else data
     if not isinstance(items, list):
         return ()
-    return unique(str(item.get("id") or item.get("slug") or "") if isinstance(item, dict) else str(item) for item in items)
+    shown = [item for item in items if not (isinstance(item, dict) and item.get("visibility") == "hide")]
+    return unique(str(item.get("slug") or item.get("id") or "") if isinstance(item, dict) else str(item) for item in shown)
 
 
 class OpenCodeTooling(Tooling):
