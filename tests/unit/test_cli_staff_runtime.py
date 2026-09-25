@@ -534,6 +534,18 @@ async def test_silence_is_shown_as_no_signal_and_the_idle_composer_ends_the_turn
         assert not [e for e in read_log(s.log) if e["event"] == "hook" and e["name"] == "Stop"]
 
 
+async def test_a_member_whose_task_is_handed_in_is_never_called_silent(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, adapter=StubClaude("silent"), extra_env={"FAKE_CLI_TIME_SCALE": "1"}, no_signal_after_s=0.5, reconcile_gap_ms=200) as s:
+        trust(s)
+        ada = await s.hire()
+        task_id = await s.task()
+        await s.team.assign(ada, task_id)
+        await s.status_event(ada, "working")
+        await s.manager.db.execute("UPDATE board_tasks SET status = 'review' WHERE id = ?", (task_id,))
+        await asyncio.sleep(3)
+        assert await s.statuses(ada) == ["starting", "working"]
+
+
 async def test_a_cli_that_exits_by_itself_ends_its_session(settings: Settings, db: Database) -> None:
     async with stand(settings, db, extra_env={"FAKE_CLI_FAULTS": "exit_after:1"}) as s:
         trust(s)

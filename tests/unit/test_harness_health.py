@@ -58,6 +58,9 @@ def test_silence_counts_only_while_a_member_is_expected_to_speak() -> None:
     assert verdict(status="idle", signal=at(hours=3)).silent_s is None
     assert verdict(status="turn_done_unseen", signal=at(hours=3)).problems == ()
     assert verdict(status="no_signal", signal=at(seconds=5)).silent is True
+    # Working, but on a task already handed in: nothing is owed, so nothing is counted.
+    handed_in = channel_health(status="working", team_tools="mcp", channel={}, last_signal_at=at(hours=1), messages=[], now=NOW, silence_after_s=300, expected=False)
+    assert (handed_in.silent_s, handed_in.silent, handed_in.problems) == (None, False, ())
     # The team tools are waited for until the runtime says otherwise; a Daedalus member and a CLI
     # without them have nothing to wait for.
     assert verdict(channel={}).team_tools == "waiting"

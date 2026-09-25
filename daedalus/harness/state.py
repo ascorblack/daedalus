@@ -11,7 +11,9 @@ Three rules shape the table more than any other:
   hundreds of phantom "needs input" badges.
 - Silence is grey, never red. A working session with no signal is checked on screen, and only two
   identical readings of an idle composer infer that the turn ended; anything less certain is
-  ``no_signal``.
+  ``no_signal``. Only a turn that is running can fall silent: activity that is not a turn (a
+  summary the CLI writes of an idle prompt, a server's chatter between turns) never makes an idle
+  member working.
 - A session waiting on a request stays waiting while any request of it is still open, whatever else
   arrives: the operator must not lose the one thing that needs them under a burst of activity.
 """
@@ -144,6 +146,13 @@ def _next(current: StaffState, event: StaffEvent, context: StateContext) -> Tran
     if kind is EventKind.PROMPT_ACKNOWLEDGED:
         # The one way out of ``error``: someone gave it work again.
         return _to(current, StaffState.WORKING, signal=signal)
+    if kind is EventKind.ACTIVITY and current in (StaffState.IDLE, StaffState.TURN_DONE_UNSEEN):
+        # Bare activity says the CLI is alive, not that a turn began: Claude Code writes an "away
+        # summary" three minutes into an idle prompt and its hooks fire for it. Taking that for work
+        # set three finished members working, the silence check then found them quiet, and the
+        # orchestrator was woken to hear that idle members had "gone silent". A turn starts with a
+        # prompt, a turn start or a tool, each of which says so.
+        return _stay(current, context, signal=signal)
     if kind in _ACTIVITY:
         if current in (StaffState.IDLE, StaffState.TURN_DONE_UNSEEN, StaffState.NO_SIGNAL):
             return _to(current, StaffState.WORKING, signal=signal)

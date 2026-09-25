@@ -111,12 +111,15 @@ def channel_health(
     messages: Iterable[MessageLike],
     now: datetime,
     silence_after_s: int,
+    expected: bool = True,
 ) -> ChannelHealth:
     """The verdict for one live session.
 
     ``team_tools`` is the harness's capability (``mcp``, ``extension``, ``none``) or ``builtin`` for a
     Daedalus member; ``channel`` is what the CLI runtime last heard (``CliStaffRuntime.channel``);
-    ``messages`` are the session's messages, newest first.
+    ``messages`` are the session's messages, newest first. ``expected`` false says that nothing is
+    owed even in a speaking status (a working member whose task is handed in), so no silence is
+    counted: the health line and the silence checks never disagree about who has gone quiet.
     """
     if team_tools == "builtin":
         tools: TeamTools = "builtin"
@@ -129,7 +132,7 @@ def channel_health(
     heard = [s for s in (last_signal_at, channel.get("last_hook_at"), channel.get("last_team_call_at")) if s]
     newest = max(heard, key=lambda s: _parse(s) or datetime.min.replace(tzinfo=now.tzinfo)) if heard else None
     silent_s: int | None = None
-    if status in SILENT_STATUSES:
+    if status in SILENT_STATUSES and expected:
         at = _parse(newest)
         silent_s = max(0, int((now - at).total_seconds())) if at is not None else None
     silent = status == "no_signal" or (silent_s is not None and silent_s >= silence_after_s)

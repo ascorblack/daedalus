@@ -39,7 +39,7 @@ TABLE: list[tuple[str, EventKind, dict[str, str], StateContext, tuple[StaffState
     ("turn started", EventKind.TURN_STARTED, {}, NOTHING_OPEN, (W, W, W, W, Q, P, E, X, W)),
     ("tool started", EventKind.TOOL_STARTED, {}, NOTHING_OPEN, (W, W, W, W, Q, P, E, X, W)),
     ("tool finished", EventKind.TOOL_FINISHED, {}, NOTHING_OPEN, (W, W, W, W, Q, P, E, X, W)),
-    ("activity", EventKind.ACTIVITY, {}, NOTHING_OPEN, (S, W, W, W, Q, P, E, X, W)),
+    ("activity", EventKind.ACTIVITY, {}, NOTHING_OPEN, (S, W, D, Id, Q, P, E, X, W)),
     ("permission requested", EventKind.PERMISSION_REQUESTED, {"summary": "npm install grammy"}, NOTHING_OPEN, (P, P, P, P, P, P, P, X, P)),
     ("question asked", EventKind.QUESTION_ASKED, {"summary": "which colour?"}, NOTHING_OPEN, (Q, Q, Q, Q, Q, P, Q, X, Q)),
     ("request resolved, nothing open", EventKind.REQUEST_RESOLVED, {}, NOTHING_OPEN, (S, W, D, Id, W, W, E, X, N)),
@@ -177,3 +177,18 @@ def test_a_scripted_session_reads_as_the_operator_would_tell_it() -> None:
         state = _step(state, kind, payload, context).state
         seen.append(state)
     assert seen == [expected for *_, expected in script]
+
+
+def test_a_finished_member_stays_idle_through_activity_that_is_not_a_turn() -> None:
+    """Three members had reported, finished and sat at their prompts; three minutes later Claude Code
+    wrote its summary of the idle prompt, and its hooks took each of them back to working. Five quiet
+    minutes after that all three were "silent" and the orchestrator was woken for it."""
+    for finished in (D, Id):
+        step = _step(finished, EventKind.ACTIVITY, {"hook": "SubagentStop"})
+        assert (step.state, step.changed, step.signal) == (finished, False, True)
+        assert not _step(finished, EventKind.QUIET).reconcile
+    # A turn still begins the ways a turn begins.
+    for kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
+        assert _step(Id, kind).state is W, kind
+    # And a silent turn that speaks again is working again.
+    assert _step(N, EventKind.ACTIVITY).state is W

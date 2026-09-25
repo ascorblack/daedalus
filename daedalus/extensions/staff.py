@@ -80,6 +80,9 @@ BASIS_MIN = 12
 OPEN_TASK = ("todo", "blocked")
 FINISHED_TASK = ("done", "dropped")
 ABNORMAL = ("error", "no_signal")
+SETTLED_TASK = ("review", "done", "dropped")
+"""A task its member has handed in or that is over: whatever the member does now is not the task's
+work, and its silence is nobody's concern."""
 SENT_BACK = "sent back by the "
 """How a rejection from review is written into a task's notes (see ``review.py``)."""
 
@@ -239,6 +242,16 @@ class Team:
             raise StaffError(f"{HARNESS_NAMES.get(member.harness, member.harness)} staff cannot be started here yet: its runtime is not installed")
         return runtime
 
+    async def silence_watched(self, session: StaffSession) -> bool:
+        """Whether the member's silence means anything: only while a turn of it runs on a task that is
+        still being worked. A member that finished its turn, has no task, or whose task is in review
+        or over is quiet by right. Watching those once woke an orchestrator three times over to hear
+        that members who had filed their reports and sat at their prompts had "gone silent"."""
+        if session.status != "working" or not session.task_id:
+            return False
+        row = await self.manager.db.fetchone("SELECT status FROM board_tasks WHERE id = ?", (session.task_id,))
+        return row is not None and row["status"] not in SETTLED_TASK
+
     async def health(self, live: LiveSession, now: datetime | None = None) -> ChannelHealth:
         """Whether the host still hears the member: the card, the staff view and ``Team(staff)`` all
         read this, so none of them can call a member reachable that another calls silent."""
@@ -260,6 +273,9 @@ class Team:
             messages=messages,
             now=now or datetime.now(UTC),
             silence_after_s=silence,
+            # The same rule as the silence checks: a working member whose task is handed in is not
+            # shown silent here when nothing would ever mark it so.
+            expected=live.session.status != "working" or await self.silence_watched(live.session),
         )
 
     async def task(self, task_id: str) -> BoardTask | None:
@@ -1033,7 +1049,7 @@ class Team:
         now = now or datetime.now(UTC)
         config = self.manager.config.staff
         for session in await self.manager.staff.all_live():
-            if session.status == "working" and _age_seconds(session.last_signal_at, now) > config.silence_minutes * 60:
+            if _age_seconds(session.last_signal_at, now) > config.silence_minutes * 60 and await self.silence_watched(session):
                 live = await self.live(session.id)
                 if live is not None:
                     await self.ingress.status(live, "no_signal", detail=f"no signal for {config.silence_minutes} minutes")
@@ -1125,6 +1141,9 @@ class Ingress:
     @property
     def manager(self) -> SessionManager:
         return self.team.manager
+
+    async def expects_signal(self, live: LiveSession) -> bool:
+        return await self.team.silence_watched(live.session)
 
     async def status(self, live: LiveSession, status: str, waiting_for: str = "", *, detail: str = "", actor: str = "") -> None:
         # Compared with the row as it was, not with the caller's copy of it: two paths report the same

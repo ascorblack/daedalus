@@ -892,6 +892,11 @@ class CliStaffRuntime:
         live = await self.lookup(session.staff_session_id)
         if live is None or live.session.status not in (StaffState.WORKING.value, StaffState.NO_SIGNAL.value):
             return
+        if live.session.status == StaffState.WORKING.value and not await self.ingress.expects_signal(live):
+            # Working without a task still being worked (handed in for review, done, or none at all):
+            # its quiet is nobody's alarm. A session already shown silent is still read below, since
+            # the screen is how it finds its way back to a finished turn.
+            return
         now = self.clock()
         if now - max(session.last_signal, session.quiet_checked) < cfg.no_signal_after_s:
             return

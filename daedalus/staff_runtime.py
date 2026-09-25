@@ -266,6 +266,10 @@ class TeamIngress(Protocol):
     async def usage(self, live: LiveSession, snapshot: UsageSnapshot) -> None:
         """What the session has spent so far, after each turn."""
 
+    async def expects_signal(self, live: LiveSession) -> bool:
+        """Whether the session's silence should be looked into: a turn is running on a task that is
+        still being worked. The runtime's silence check asks before it reads a quiet screen."""
+
     async def signal(self, live: LiveSession) -> None:
         """A sign of life from the executor that changes no status. Written at most every few
         seconds; the team's clock shows a session silent when these stop coming."""

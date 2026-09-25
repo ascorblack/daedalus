@@ -340,6 +340,41 @@ async def test_a_dirty_worktree_refuses_done_and_a_pause_commits_it(settings: Se
         await manager.close()
 
 
+async def test_silence_is_watched_only_while_a_turn_runs_on_a_task_still_being_worked(settings: Settings, db: Database, tmp_path: Path) -> None:
+    """A member that handed its task in, finished its turn, or has no task is quiet by right: nothing
+    marks it silent, and its health line does not call it so."""
+    manager, team, _runtime, project = await fake_team(settings, db, tmp_path)
+    try:
+        ada = await manager.staff.hire(project.id, name="Ada", isolation="shared")
+        task_id = await board_task(manager, project, "Menu")
+        await team.assign(ada, task_id)
+        live = await team.live_of(ada)
+        assert live is not None
+        await team.ingress.status(live, "working")
+        later = datetime.now(UTC) + timedelta(minutes=manager.config.staff.silence_minutes + 1)
+        for settled in ("review", "done", "dropped"):
+            await manager.db.execute("UPDATE board_tasks SET status = ? WHERE id = ?", (settled, task_id))
+            await team.tick(later)
+            assert await status_of(manager, ada) == "working", settled
+            health = await team.health((await team.live_of(ada)) or live, later)
+            assert (health.silent, health.silent_s) == (False, None), settled
+        for quiet in ("idle", "turn_done_unseen"):
+            await manager.db.execute("UPDATE board_tasks SET status = 'doing' WHERE id = ?", (task_id,))
+            await team.ingress.status(live, quiet)
+            await team.tick(later)
+            assert await status_of(manager, ada) == quiet
+        await team.ingress.status(live, "working")
+        await manager.db.execute("UPDATE staff_sessions SET task_id = NULL WHERE id = ?", (live.id,))
+        await team.tick(later)
+        assert await status_of(manager, ada) == "working", "no task, no silence"
+        await manager.db.execute("UPDATE staff_sessions SET task_id = ? WHERE id = ?", (task_id, live.id))
+        assert (await team.health((await team.live_of(ada)) or live, later)).silent is True
+        await team.tick(later)
+        assert await status_of(manager, ada) == "no_signal", "a turn on a task being worked still goes grey"
+    finally:
+        await manager.close()
+
+
 async def test_silence_goes_grey_and_a_request_left_too_long_goes_to_the_operator(settings: Settings, db: Database, tmp_path: Path) -> None:
     manager, team, runtime, project = await fake_team(settings, db, tmp_path)
     try:
