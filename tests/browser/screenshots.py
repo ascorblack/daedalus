@@ -37,6 +37,7 @@ from api_stub import (  # noqa: E402
     FILE_TEXT,
     BoardStub,
     FocusStub,
+    HarnessesStub,
     MainStub,
     TeamStub,
     Unhandled,
@@ -644,6 +645,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
         return respond(route, SILENCE, content_type="audio/wav")
+    if rel.startswith("/api/harnesses"):
+        posted = json.loads(request.post_data or "{}") if request.method == "POST" and request.post_data else None
+        harnesses = HARNESSES.answer(request.method, rel, urlsplit(url).query, posted)
+        if harnesses is not None:
+            return respond(route, harnesses[1], status=harnesses[0])
     team = TEAM.answer(request.method, rel, urlsplit(url).query, None) or TEAM_BOARD.answer(request.method, rel, urlsplit(url).query, None)
     if team is not None:
         return respond(route, team[1], status=team[0])
@@ -865,6 +871,7 @@ STT = {
 
 
 UNHANDLED = Unhandled()
+HARNESSES = HarnessesStub()
 
 # ---- the shots ----------------------------------------------------------------------------
 
@@ -1549,6 +1556,71 @@ def phone_project_shots(context) -> None:  # type: ignore[no-untyped-def]
     page.close()
 
 
+def staff_stand(context):  # type: ignore[no-untyped-def]
+    """Ira, a Claude Code member, in her own view: her terminal with a permission dialog on it."""
+    from terminal_stub import TerminalStub
+
+    focus = FocusStub.bakery(LANG)
+    focus.staff_view_of_ira(LANG)
+    pid = focus.projects[0]["id"]
+    term = TerminalStub(S1)
+    term.add("tm-ira", title="claude · Ira", owner_kind="staff", owner_id="st-ira", project_id=pid, owner_label="Ira", cwd="/home/operator/work/bakery-site")
+    term.emit("tm-ira", IRA_SCREEN)
+    page = context.new_page()
+    page.route("**/api/**", focus_stub(focus))
+    term.install(page)
+    page.add_init_script("try { localStorage.setItem('daedalus.term.renderer', 'dom'); } catch (e) {}")
+    return page, pid
+
+
+def open_harness_rows(page: Page) -> None:
+    """Claude Code's row unfolded to its agents, as M7 draws it."""
+    page.locator(".harness-row[data-harness='claude'] .harness-name").click()
+    page.wait_for_selector(".harness-row-details .harness-agent", timeout=5000)
+
+
+def run_harnesses() -> int:
+    """The Harnesses screen (M7) on a desktop and on a phone (``ONLY=harnesses``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = desk.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "harnesses", "harnesses", wait=".harness-table .harness-row", before=open_harness_rows, settle=500)
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page = phone.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "phone-harnesses", "harnesses", wait=".harness-cards .harness-card", settle=500)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
+def run_staff() -> int:
+    """A command-line member's own view (M5): the terminal with the column beside it on a desktop,
+    the Feed on a desktop, and the Feed with the request above the composer on a phone (``ONLY=staff``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page, pid = staff_stand(desk)
+        shot(page, "staff-view", f"project/{pid}/staff/st-ira", wait=".staff-term .term-view[data-state='live']", settle=1200)
+        page.locator(".staff-mode button[data-mode='feed']").click()
+        page.locator(".feed-turn[data-turn='1'] .feed-tools-head").click()
+        page.wait_for_timeout(600)
+        page.screenshot(path=str(OUT / "staff-feed.png"))
+        print("wrote staff-feed")
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page, pid = staff_stand(phone)
+        shot(page, "phone-staff-feed", f"project/{pid}/staff/st-ira", wait=".staff-request .ask-answers-row .btn", settle=900)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run_phone() -> int:
     """The phone's terminal and a project on the phone (``ONLY=phone``)."""
     OUT.mkdir(parents=True, exist_ok=True)
@@ -1638,12 +1710,14 @@ def run() -> int:
     # with an orchestrated project; each reports what went unanswered.
     notifications = run_notifications()
     phone = run_phone()
+    staff = run_staff()
+    harnesses = run_harnesses()
     main = run_main()
-    return run_focus() or notifications or phone or main
+    return run_focus() or notifications or phone or staff or harnesses or main
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

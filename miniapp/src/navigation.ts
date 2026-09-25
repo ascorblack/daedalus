@@ -6,7 +6,7 @@ import type { Screen } from "./router";
 
 /** The destinations in the order the old rail listed them, one group per key of `nav.group.*`. */
 export const GROUPS: { key: string; items: Screen[] }[] = [
-  { key: "work", items: ["agents", "voice", "inbox", "board", "terminals"] },
+  { key: "work", items: ["agents", "voice", "inbox", "board", "terminals", "harnesses"] },
   { key: "autonomy", items: ["changes", "schedules", "services"] },
   { key: "knowledge", items: ["memory"] },
   { key: "observe", items: ["usage", "health"] },

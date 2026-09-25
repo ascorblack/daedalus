@@ -80,7 +80,8 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     async def staff_session(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """The member's live session with what its runtime knows: the status and what it waits for,
         the terminal, the launch (CLI, version, model, mode, worktree, branch, task), what the CLI
-        can do, the channels' health, the requests open, the spend."""
+        can do, what each channel last said (``channel``) and the verdict on them (``health``), the
+        requests open, the spend."""
         member = await member_of(staff_id)
         session = await manager.staff.live(staff_id)
         out: dict[str, Any] = {"staff": member.view(), "session": session.view() if session is not None else None}
@@ -107,6 +108,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         }
         channel = getattr(runtime, "channel", None)
         out["channel"] = channel(live) if channel is not None and live is not None else {}
+        out["health"] = (await team().health(live)).view() if live is not None else None
         out["requests"] = [a.view() for a in await manager.asks.open_for(member.project_id) if a.staff_session_id == session.id]
         out["usage"] = session.usage or None
         return out

@@ -119,6 +119,8 @@ class Term:
     commands: list[dict[str, Any]] = field(default_factory=list)
     prompt_row: int | None = None
     row: int = 0
+    # Who holds the keyboard, as the daemon arbitrates it: a person typing takes it for a while.
+    keyboard: str = "auto"
 
     def view(self, preview: bool = False) -> dict[str, Any]:
         running = self.status == "running"
@@ -128,7 +130,7 @@ class Term:
             "profile": "shell", "sandbox": self.sandbox, "cwd": self.cwd, "status": self.status,
             "exit_code": self.exit_code, "exit_signal": self.exit_signal, "created_at": self.created_at, "created_by": self.created_by,
             "exited_at": self.exited_at, "last_output_at": None, "last_input_at": self.last_input_at, "cols": self.cols, "rows": self.rows,
-            "live": {"clients": self.clients, "busy": self.busy, "keyboard": {"owner": "auto", "until": None}, "size_owner": self.size_owner, "alt_screen": False} if running else None,
+            "live": {"clients": self.clients, "busy": self.busy, "keyboard": {"owner": self.keyboard, "until": None}, "size_owner": self.size_owner, "alt_screen": False} if running else None,
             "last_command": None, "preview": self.preview if preview else [], "activity": self.activity,
         }
 
@@ -216,6 +218,11 @@ class TerminalStub:
         for client in self.live(id_):
             if client.attached:
                 self.send(client, enc_event(body))
+
+    def hold_keyboard(self, id_: str, owner: str = "human") -> None:
+        """What the daemon tells every client when a person starts typing (or lets go)."""
+        self.terms[id_].keyboard = owner
+        self.broadcast(id_, {"type": "keyboard", "owner": owner, "until": None})
 
     def shell_prompt(self, id_: str, text: str = "$ ", *, early: bool = False) -> None:
         """A prompt: its start marked, then its text."""
@@ -350,7 +357,7 @@ class TerminalStub:
             "type": "hello", "client_id": f"c{client.n}", "read_only": False, "ack_bytes": ACK_BYTES, "window_bytes": self.window,
             "terminal": {"id": term.id, "title": term.title, "cwd": term.cwd, "status": term.status, "cols": term.cols, "rows": term.rows},
             "size": {"cols": term.cols, "rows": term.rows, "owner": term.size_owner if term.size_owner != "human" else "other"},
-            "keyboard": {"owner": "auto", "until": None},
+            "keyboard": {"owner": term.keyboard, "until": None},
             "modes": {"alt_screen": False, "mouse": False, "bracketed_paste": False, "app_cursor": False},
         })
 
@@ -466,6 +473,9 @@ class TerminalStub:
                 return 501, {"detail": "its commands are not recorded (it is not a shell started with its integration)"}
             last = max(1, min(500, int(query.get("last", ["20"])[0] or 20)))
             return 200, {"commands": self.command_records(term, last, query.get("output", ["0"])[0] in ("1", "true"))}
+        if action == "keyboard" and method == "POST":
+            self.hold_keyboard(term.id, str((body or {}).get("owner") or "auto"))
+            return 200, {"owner": term.keyboard, "until": None}
         if action == "ticket":
             return 200, {"ticket": f"tk-{term.id}", "expires_in": 30}
         if action == "kill":

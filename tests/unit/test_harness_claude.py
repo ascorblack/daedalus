@@ -302,6 +302,19 @@ async def test_without_a_hold_the_answer_waits_for_the_dialog_before_its_key(set
         assert "I did not run make build" in screen
 
 
+async def test_always_is_the_dialogs_do_not_ask_again_row(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, permission_hold_s=0, **claude()) as s:
+        trust(s)
+        ada = await started(s, "perm:make build")
+        await s.status_event(ada, "permission")
+        [ask] = await s.manager.asks.open_for(s.project.id)
+        answered = await s.team.answer(ask.short_id, allow=True, always=True, by="operator")
+        assert answered["delivered"] is True and answered["ask"]["resolution"]["always"] is True
+        await s.status_event(ada, "turn_done_unseen")
+        [(kind, label)] = [(e["kind"], e["label"]) for e in log(s, "dialog_answered")]
+        assert kind == "permission" and label.startswith("Yes, and don't ask again"), label
+
+
 async def test_a_permission_answered_in_the_terminal_lets_its_held_hook_go(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **claude()) as s:
         trust(s)
@@ -643,6 +656,20 @@ async def test_the_staff_views_routes(settings: Settings, db: Database, config: 
             view = (await client.get(f"/api/staff/{ada.id}/session", headers=headers)).json()
             assert view["session"]["status"] == "turn_done_unseen" and view["capabilities"]["steer"] == "tui_queue"
             assert view["launch"]["harness"] == "claude" and view["launch"]["launch_id"] and view["channel"]["team_tools"] == "connected"
+            # The verdict on the channels, the same on the view, on the team's card and in Team(staff).
+            health = view["health"]
+            assert (health["team_tools"], health["level"], health["problems"], health["silent"]) == ("connected", "ok", [], False), health
+            assert health["last_hook_at"] and health["last_team_call_at"] and health["silence_after_s"] == s.harness.no_signal_after_s
+            [card] = (await client.get(f"/api/projects/{s.project.id}/staff", headers=headers)).json()["staff"]
+            assert card["health"]["team_tools"] == "connected" and (await client.get(f"/api/staff/{ada.id}", headers=headers)).json()["health"]["level"] == "ok"
+            # Its terminal's card on the Terminals screen says what it is doing.
+            row = await s.session_row(ada)
+            [terminal] = [t for t in (await client.get("/api/terminals", headers=headers)).json()["terminals"] if t["id"] == row.terminal_id]
+            assert terminal["activity"]["status"] == "turn_done_unseen" and "action" not in terminal["activity"]
+            # "Release" gives the keyboard back; only a person's two choices are offered.
+            assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "human"})).json()["owner"] == "human"
+            assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "auto"})).json()["owner"] == "auto"
+            assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "agent"})).status_code == 422
             told = await client.post(f"/api/staff/{ada.id}/messages", headers=headers, json={"text": "echo:and a footer", "mode": "queue"})
             assert told.status_code == 200 and told.json()["state"] == "queued"
             await message(s, told.json()["message_id"], "acknowledged")

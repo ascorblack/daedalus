@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from daedalus.terminals.model import Owner
 
@@ -29,6 +29,14 @@ class Owners(Protocol):
         ...
 
     async def sandbox_writable(self, env: str, owner: Owner, project_id: str | None, cwd: str) -> list[str]: ...
+
+    # Optional: ``activities(terminal_ids) -> {terminal_id: activity}``, what another part of the
+    # application says a terminal is doing. The service asks it when the owners have it.
+
+
+ACTIVITY_LEVELS = {"permission": "warn", "question": "warn", "error": "bad", "no_signal": "idle", "turn_done_unseen": "ok", "idle": "idle"}
+"""How a staff member's status colours its terminal's card: waiting on someone is amber, a failure
+red, silence and rest grey (silence is never a failure), work and a fresh result green."""
 
 
 class ManagerOwners:
@@ -89,6 +97,32 @@ class ManagerOwners:
             if folder.env == env and Path(folder.path).is_absolute():
                 return str(folder.path)
         return None
+
+    async def activities(self, terminal_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """What the staff members working in these terminals are doing, as the Terminals screen's
+        cards show it: the status (the app has words for it), what the member waits for in the host's
+        words, and — when it waits on someone — where it is answered.
+
+        Only the terminal a live session runs in gets one; a companion process (Codex's app-server)
+        is plumbing, and a second "Answer" on it would be the same request twice.
+        """
+        ids = sorted(set(terminal_ids))
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        rows = await self.db.fetchall(
+            "SELECT ss.terminal_id, ss.status, ss.waiting_for, ss.staff_id, s.project_id FROM staff_sessions ss JOIN staff s ON s.id = ss.staff_id "  # noqa: S608 — placeholders only
+            f"WHERE ss.ended_at IS NULL AND ss.terminal_id IN ({marks})",
+            ids,
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            status = str(row["status"])
+            activity: dict[str, Any] = {"status": status, "label": str(row["waiting_for"] or ""), "level": ACTIVITY_LEVELS.get(status, "ok")}
+            if status in ("permission", "question"):
+                activity["action"] = {"kind": "answer", "label": "Answer", "path": f"/app/project/{row['project_id']}/staff/{row['staff_id']}"}
+            out[str(row["terminal_id"])] = activity
+        return out
 
     async def sandbox_writable(self, env: str, owner: Owner, project_id: str | None, cwd: str) -> list[str]:
         """What a sandboxed terminal may write: exactly what the owner's agent may write, when there is

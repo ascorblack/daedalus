@@ -7,7 +7,7 @@
 // 16 px so Safari does not zoom into it.
 
 import { FormEvent, ReactNode, useMemo, useState } from "react";
-import { api, ApiError, type Ask, type TerminalEnvName, type TerminalView as TerminalRow } from "../api";
+import { api, ApiError, type Ask, type StaffSessionView, type TerminalEnvName, type TerminalView as TerminalRow } from "../api";
 import { Skeleton } from "../components";
 import { MenuItem, OverflowMenu, toast } from "../dialogs";
 import { useEvent, useStreamUp } from "../events";
@@ -15,7 +15,9 @@ import { relTime } from "../format";
 import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { go, PageHeader } from "../shell";
-import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath } from "../router";
+import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
+import { answeredBy, canAlways } from "../staff/model";
+import { HealthLine } from "../staff/health";
 import { invalidate, useQuery } from "../store";
 import { PhoneTerminal, type PhoneTerminalProps } from "../terminal/mobile";
 import { HarnessBadge, StaffAvatar } from "../team/parts";
@@ -131,19 +133,25 @@ function askerLine(ask: Ask, names: Map<string, string>): string {
  * "Answer…" for words of the operator's own. The first answer to reach the host wins; one that lost
  * to an answer given elsewhere (Telegram, the desktop) says so, and the request leaves either way.
  */
-export function AskAnswers({ ask, projectId, toast }: { ask: Ask; projectId: string; toast: (text: string) => void }) {
+/**
+ * `always` offers "Always" beside Allow, for a command-line member whose CLI asks permissions (the
+ * staff view decides it from the capability table). A refusal because someone answered first names
+ * who did.
+ */
+export function AskAnswers({ ask, projectId, toast, always = false }: { ask: Ask; projectId: string; toast: (text: string) => void; always?: boolean }) {
   const [writing, setWriting] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const options = Array.isArray(ask.detail?.options) ? ask.detail.options.filter((o): o is string => typeof o === "string") : [];
-  async function send(body: { selected?: string[]; text?: string; allow?: boolean }) {
+  async function send(body: { selected?: string[]; text?: string; allow?: boolean; always?: boolean }) {
     if (busy) return;
     setBusy(true);
     try {
       await api.post(`/api/asks/${enc(ask.id)}/answer`, body);
       toast(t("focus.ask.sent"));
     } catch (e) {
-      toast(e instanceof ApiError && e.status === 409 ? t("focus.ask.conflict") : errorText(e));
+      const who = e instanceof ApiError && e.status === 409 ? answeredBy(e.message) : "";
+      toast(e instanceof ApiError && e.status === 409 ? (who ? t("perm.conflict.by", { who: t(`perm.by.${who}`) }) : t("focus.ask.conflict")) : errorText(e));
     } finally {
       setBusy(false);
       setWriting(false);
@@ -167,6 +175,7 @@ export function AskAnswers({ ask, projectId, toast }: { ask: Ask; projectId: str
           {permission ? (
             <>
               <button className="btn primary" disabled={busy} onClick={() => void send({ allow: true })}>{t(ask.kind === "folder" ? "focus.ask.yes" : "phone.ask.allow")}</button>
+              {always && ask.kind === "permission" && <button className="btn" disabled={busy} data-answer="always" onClick={() => void send({ allow: true, always: true })}>{t("perm.always")}</button>}
               <button className="btn" disabled={busy} onClick={() => void send({ allow: false })}>{t(ask.kind === "folder" ? "focus.ask.no" : "phone.ask.deny")}</button>
             </>
           ) : (
@@ -221,10 +230,11 @@ export function NeedsYouBanner({ projectId, toast }: { projectId: string; toast:
 
 // ── the team ─────────────────────────────────────────────────────────────────────────────────
 
-/** Where a member leads on a phone: into its conversation, its terminal, or its card to edit. */
+/** Where a member leads on a phone: into its conversation, a command-line member's view (its Feed,
+ *  with its terminal a tap away), or its card to edit. */
 function memberPath(projectId: string, member: Staff): string | null {
   if (member.live?.session_id) return projectSessionPath(projectId, member.live.session_id);
-  if (member.live?.terminal_id) return pathFor("terminals", member.live.terminal_id);
+  if (member.harness !== "daedalus" && member.live) return projectStaffPath(projectId, member.id);
   return null;
 }
 
@@ -305,6 +315,7 @@ function PhoneStaffRow({ member, task, spend, onOpen, onEdit }: { member: Staff;
         {/* The spend has a line of its own rather than joining the one above: that line truncates, and
             the money is the part the operator would lose on a narrow phone. */}
         {spend && <span className="phone-staff-line staff-spend truncate">{spend}</span>}
+        <HealthLine health={member.health ?? null} compact />
       </span>
       <span className={`focus-dot tone-${tone}`} aria-label={t(`focus.tone.${tone}`)} role="img" />
     </button>
@@ -402,6 +413,7 @@ export function StaffPhoneTerminal({ staffId, projectId, ...props }: PhoneTermin
     if (pid && event.project_id === pid) invalidate(`/api/asks?project=${enc(pid)}`);
   }, [pid]);
   const mine = oldestOpen((data?.asks ?? []).filter((a) => a.staff_id === staffId)).ask;
+  const { data: view } = useQuery<StaffSessionView>(`/api/staff/${enc(staffId)}/session`, { staleMs: 10000 });
   const name = member?.name ?? "";
   const compose = {
     placeholder: name ? t("term.phone.compose.staff", { name }) : t("term.phone.compose"),
@@ -420,7 +432,7 @@ export function StaffPhoneTerminal({ staffId, projectId, ...props }: PhoneTermin
   const actions = mine && pid ? (
     <div className="term-phone-ask" data-ask={mine.short_id}>
       <div className="term-phone-ask-text truncate">{mine.text}</div>
-      <AskAnswers key={mine.id} ask={mine} projectId={pid} toast={toast} />
+      <AskAnswers key={mine.id} ask={mine} projectId={pid} toast={toast} always={canAlways(mine, view?.capabilities)} />
     </div>
   ) : null;
   return <PhoneTerminal {...props} compose={compose} actions={actions} />;

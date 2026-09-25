@@ -174,7 +174,7 @@ function TerminalCard({ row, projectName, onRemove }: { row: TerminalRow; projec
         {!live ? (
           <button className="btn small ghost" onClick={onRemove}>{t("term.remove")}</button>
         ) : action ? (
-          <button className={`btn small ${row.activity?.level === "warn" || row.activity?.level === "bad" ? "warn" : ""}`} onClick={() => navigate(action.path)}>{action.label}</button>
+          <button className={`btn small ${row.activity?.level === "warn" || row.activity?.level === "bad" ? "warn" : ""}`} onClick={() => navigate(action.path)}>{action.kind === "answer" ? t("term.card.answer") : action.label}</button>
         ) : (
           <button className="btn small" onClick={open}>{t("term.card.open")}</button>
         )}
