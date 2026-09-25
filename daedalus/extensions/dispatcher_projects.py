@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,21 @@ SURVEY = (
 )
 OPTIONS = ["Create", "Don't create"]
 MISSING_ON_HOST = "the folder does not exist on the host"
+_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def unescaped(text: str) -> str:
+    """The operator's words with JSON's ``\\uXXXX`` escapes turned back into the letters they stand for.
+
+    A model sometimes escapes the arguments of its tool call twice: the call arrives as valid JSON
+    whose strings hold the six characters ``\\u041f`` where the operator wrote "П". Parsed once, as
+    it must be, that is still text, and a Russian goal reached the brief, the confirmation card and
+    dispatch #1 as a row of escapes. Nothing an operator types into a goal or a name contains a
+    literal ``\\u`` and four hex digits, so they are decoded here, surrogate pairs included."""
+    if not _ESCAPE_RE.search(text):
+        return text
+    decoded = _ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+    return decoded.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
 
 class ProjectMaker:
@@ -114,7 +130,7 @@ class ProjectMaker:
     # -- the card ---------------------------------------------------------------------------------
 
     async def propose(self, session_id: str, *, name: str, folders: list[dict[str, Any]] | None, goal: str, create_missing: bool, start_orchestrator: bool) -> Ask:
-        label = " ".join((name or "").split())[:80]
+        label = " ".join(unescaped(name or "").split())[:80]
         if not label:
             raise ValueError("a project needs a name")
         existing = [p for p in await self.manager.projects.list() if p.name.casefold() == label.casefold()]
@@ -127,8 +143,8 @@ class ProjectMaker:
             found = await self.check_folder(str(raw["path"]), str(raw.get("env") or ""), create_missing=create_missing, create=False)
             if await self.manager.projects.for_path(Path(found["path"])) is not None:
                 raise ValueError(f"{found['path']} is already a project's folder")
-            checked.append({**found, "readonly": bool(raw.get("readonly")), "label": str(raw.get("label") or "")[:60]})
-        return await self._card(session_id, name=label, folders=checked, goal=" ".join((goal or "").split())[:1000], create_missing=create_missing, start_orchestrator=start_orchestrator)
+            checked.append({**found, "readonly": bool(raw.get("readonly")), "label": unescaped(str(raw.get("label") or ""))[:60]})
+        return await self._card(session_id, name=label, folders=checked, goal=" ".join(unescaped(goal or "").split())[:1000], create_missing=create_missing, start_orchestrator=start_orchestrator)
 
     async def _card(self, session_id: str, *, name: str, folders: list[dict[str, Any]], goal: str, create_missing: bool, start_orchestrator: bool) -> Ask:
         text = f"Create the project {name}?"
@@ -292,4 +308,4 @@ async def install(app: Application) -> list[Any]:
     return []
 
 
-__all__ = ["OPTIONS", "ProjectMaker", "SURVEY", "install", "op_create_project"]
+__all__ = ["OPTIONS", "ProjectMaker", "SURVEY", "install", "op_create_project", "unescaped"]

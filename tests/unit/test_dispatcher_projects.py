@@ -163,3 +163,24 @@ async def test_the_confirmation_is_answered_from_a_notification_too(settings: Se
         assert not garden.settings.orchestrator.enabled and garden.setup_by == ""
     finally:
         await m.r.manager.close()
+
+
+async def test_a_goal_the_model_escaped_twice_keeps_its_cyrillic(settings: Settings, db: Database, tmp_path: Path) -> None:
+    m, _maker, sid = await maker_rig(settings, db, tmp_path)
+    try:
+        roots = tmp_path / "projects"
+        roots.mkdir()
+        m.r.manager.config.dispatcher.container_roots = [str(roots)]
+        # As a model sent it: valid JSON whose string holds the escapes themselves, not the letters.
+        goal = "\\u041f\\u0440\\u043e\\u0435\\u043a\\u0442 labs. \\u041f\\u0430\\u043f\\u043a\\u0430 \\u043d\\u0430 \\u0445\\u043e\\u0441\\u0442\\u0435"
+        await m.call(sid, "create_project", name="Labs", folders=[{"path": str(roots / "labs"), "env": "container", "label": "\\u043b\\u0430\\u0431"}], goal=goal, create_missing=True)
+        [card] = await m.r.manager.asks.of_origin("dispatcher")
+        assert "Goal: Проект labs. Папка на хосте" in card.text and "\\u" not in card.text
+        await m.r.team.answer(card.id, selected=["Create"], by="operator", via="main")
+        [labs] = [p for p in await m.r.manager.projects.list() if p.name == "Labs"]
+        assert labs.primary.label == "лаб"
+        assert (await m.r.manager.projects.brief(labs.id))["goals"].body == "Проект labs. Папка на хосте"
+        [survey] = await m.r.manager.dispatches.open_for(labs.id)
+        assert "The operator's goal for it: Проект labs. Папка на хосте" in survey.text and "\\u" not in survey.text
+    finally:
+        await m.r.manager.close()
