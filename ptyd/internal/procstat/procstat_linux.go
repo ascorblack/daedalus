@@ -1,8 +1,6 @@
 //go:build linux
 
-// Package procstat reads the process table and the machine's memory and CPU from /proc. The daemon
-// uses it to find every process a terminal started (to end them, and to count what they cost) and
-// to report how much of the machine is left.
+// On Linux everything is read from /proc.
 package procstat
 
 import (
@@ -11,9 +9,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-// Supported is true where the process table can be read.
-const Supported = true
 
 // clockTicks is USER_HZ, the unit of the CPU times in /proc. It is 100 on every Linux the daemon
 // runs on; reading it properly needs sysconf, which needs cgo.
@@ -73,59 +68,12 @@ func readStat(pid int, page int64) (Proc, bool) {
 	}, true
 }
 
-// Tree returns root and every process descending from it, found through parent links.
-func Tree(table map[int]Proc, root int) []Proc {
-	children := make(map[int][]int, len(table))
-	for pid, p := range table {
-		children[p.PPid] = append(children[p.PPid], pid)
-	}
-	var out []Proc
-	seen := map[int]bool{}
-	stack := []int{root}
-	for len(stack) > 0 {
-		pid := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[pid] {
-			continue
-		}
-		seen[pid] = true
-		if p, ok := table[pid]; ok {
-			out = append(out, p)
-		}
-		stack = append(stack, children[pid]...)
-	}
-	return out
-}
-
-// Session returns every process whose session id is sid.
-func Session(table map[int]Proc, sid int) []Proc {
-	var out []Proc
-	for _, p := range table {
-		if p.Sid == sid {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// Tagged returns the processes whose environment holds tag ("NAME=value") exactly. Only processes
-// of the same user can be read, which are the only ones a terminal could have started.
-func Tagged(table map[int]Proc, tag string) []Proc {
-	want := []byte(tag)
-	var out []Proc
-	for pid, p := range table {
-		env, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
-		if err != nil {
-			continue
-		}
-		for _, kv := range bytes.Split(env, []byte{0}) {
-			if bytes.Equal(kv, want) {
-				out = append(out, p)
-				break
-			}
-		}
-	}
-	return out
+// environ is the environment a process was started with, as NUL-separated "NAME=value" entries.
+// Only processes of the same user can be read, which are the only ones a terminal could have
+// started.
+func environ(pid int) ([]byte, bool) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
+	return data, err == nil
 }
 
 // cpuTimes reads the busy and total ticks of all CPUs.

@@ -18,6 +18,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
+	"github.com/ascorblack/daedalus/ptyd/internal/procstat/proctest"
 )
 
 type recorded struct {
@@ -227,6 +228,7 @@ func readPid(t *testing.T, path string) int {
 }
 
 func TestKillEndsEscapedDescendants(t *testing.T) {
+	proctest.Setsid(t)
 	h := newHarness(t)
 	// Three ways out of the terminal's process group: its own session (setsid), its own group
 	// (setpgid through job control), and its own session with a parent that has already exited, so

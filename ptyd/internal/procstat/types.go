@@ -1,3 +1,7 @@
+// Package procstat reads the process table and the machine's memory and CPU: from /proc on Linux,
+// from the kernel's sysctl tables and proc_info on macOS. The daemon uses it to find every process
+// a terminal started (to end them, and to count what they cost) and to report how much of the
+// machine is left.
 package procstat
 
 // Proc is one line of the process table.

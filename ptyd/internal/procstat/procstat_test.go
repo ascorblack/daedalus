@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ascorblack/daedalus/ptyd/internal/procstat/proctest"
 )
 
 func TestTreeAndSampler(t *testing.T) {
@@ -54,6 +56,7 @@ func TestEscapedProcessesAndTheDaemonAreCounted(t *testing.T) {
 	if !Supported {
 		t.Skip("no process table here")
 	}
+	proctest.Setsid(t)
 	tag := "PROCSTAT_TEST_TAG=" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	cmd := exec.Command("sh", "-c", "setsid sh -c 'sleep 30 & exit' & sleep 30")
 	cmd.Env = append(os.Environ(), tag)

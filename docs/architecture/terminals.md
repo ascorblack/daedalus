@@ -299,9 +299,9 @@ its last 64 KiB.
   program alone.
 - `terminal.kill` sends `SIGHUP` to the program's group and the foreground group, waits up to the
   grace for the program to exit, then sends `SIGKILL` to the group and to every process of the
-  terminal it can find: on Linux, the process tree, the session, and every process whose environment
-  carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called `setsid` after its
-  parent exited. On macOS only the process group is signalled; Windows is described above.
+  terminal it can find: on Linux and macOS, the process tree, the session, and every process whose
+  environment carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called
+  `setsid` after its parent exited. Windows is described above.
 - A program that exits while a background job still holds the PTY open is reported exited after
   half a second of draining; closing the PTY hangs the job up, as closing a terminal window would.
 - Exited terminals are kept, with their screens, for an hour, then forgotten.
@@ -318,7 +318,11 @@ output ring as allocated now. `daemon` is the daemon's own process, whose memory
 terminal's emulator; a load estimate adds it, shared out over the terminals. `machine` is
 `{mem_total_bytes, mem_available_bytes, cgroup_limit_bytes?, cgroup_used_bytes?, cpus, cgroup_cpus?,
 cpu_percent, load1, load5, load15}`, read from `/proc` and, inside a container, from its cgroup's
-memory and CPU limits. Outside Linux `supported` is false and the numbers are zero.
+memory and CPU limits. On macOS the processes come from the kernel's process table (`kern.proc`,
+`proc_info` and `kern.procargs2` for the environment) and the machine from `hw.memsize` and the
+`vm` page counts (free, speculative and file cache as available); the machine's `cpu_percent` is 0
+there, since macOS keeps it only behind an interface a build without cgo cannot reach. On Windows
+`supported` is false and the numbers are zero.
 
 ## Events
 
