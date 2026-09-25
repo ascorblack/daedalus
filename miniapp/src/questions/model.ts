@@ -23,15 +23,16 @@ export function isPermission(q: Pick<WaitingQuestion, "kind">): boolean {
 }
 
 /** A folder or a project is added or not: one of its options, and never words. */
-export function optionsOnly(q: Pick<WaitingQuestion, "kind" | "allow_free">): boolean {
-  return q.kind === "folder" || q.kind === "project" || !q.allow_free;
+export function optionsOnly(q: Pick<WaitingQuestion, "kind">): boolean {
+  return q.kind === "folder" || q.kind === "project";
 }
 
-/** The field is shown for questions (answer or note) and for a permission refused with a reason. */
+/** The field is shown for every question, always (the answer in the operator's own words, or a note
+ *  beside an option), and for a permission refused with a reason. A question once came with its field
+ *  switched off by the orchestrator, and the operator had no way to say that none of the options fit. */
 export function takesText(q: WaitingQuestion, d: Draft): boolean {
   if (isPermission(q)) return d.choice === "because";
-  if (q.kind === "folder" || q.kind === "project") return false;
-  return q.allow_free || d.selected.length > 0;
+  return !optionsOnly(q);
 }
 
 /** Whether the field is a note beside a chosen option, or the answer itself. */
@@ -69,7 +70,7 @@ export function isReady(q: WaitingQuestion, d: Draft | undefined): boolean {
   if (isPermission(q)) return !!d.choice && (d.choice !== "because" || !!d.text.trim());
   if (q.kind === "folder" || q.kind === "project") return d.selected.length === 1;
   if (d.selected.length > 0) return true;
-  return q.allow_free && !!d.text.trim();
+  return !!d.text.trim();
 }
 
 /** What one ready card sends, in the shape of `POST …/asks/answer`. */

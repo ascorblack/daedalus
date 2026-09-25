@@ -5,8 +5,9 @@ the orchestrator, with the count of what waits; the chat carries one line for th
 of a card per question, and that line opens the tab. Staff who wait (a permission, an escalated
 question) are listed above the orchestrator's own questions. A card has its title, its text folded
 when long, its options as chips — several where the question allows — and one field that is the
-answer itself or a note beside a chosen option; a permission has Allow, Always, Deny and "No,
-because…", which asks for the because. The options are walked with the arrows and chosen with
+answer itself or a note beside a chosen option, always, even for a question asked "options only"; a
+folder has its options alone, and a permission has Allow, Always, Deny and "No, because…", which asks
+for the because. The options are walked with the arrows and chosen with
 Space or Enter, and Ctrl+Enter sends. A half-answered card is a draft, marked as one, and survives a
 reload. A question the orchestrator adds appears at once; one it takes back leaves with a word, and
 says so when a draft of the operator's went with it. Send carries exactly the ready drafts; the
@@ -34,6 +35,8 @@ BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 REASON = "the brief now names the day"
+QUESTIONS = ("qf9n05", "q4r8tz", "qp4y01", "qo9d02")
+"""The cards that are questions, a staff member's and the orchestrator's: each has its field."""
 WORDS = {
     "en": {
         "tab": "Questions", "line": "6 questions waiting", "open": "Open", "requests": "Staff are waiting", "questions": "Questions",
@@ -111,6 +114,10 @@ def desktop(page: Page, feed: EventFeed, lang: str) -> None:
     # A folder is added or not: its options, and no field for words.
     expect(card(page, "qf0ld3").locator(".q-chip")).to_have_text(["Add", "Don't add"])
     expect(card(page, "qf0ld3").locator(".q-field")).to_have_count(0)
+    # Every question has its field for the operator's own words or a note, even one asked "options
+    # only" (the payment question is stored so), which once left the operator nothing to write in.
+    for short in QUESTIONS:
+        expect(card(page, short).locator(".q-field")).to_have_count(1)
     # A long text is folded, and unfolds.
     pay = card(page, "qp4y01")
     expect(pay.locator(".q-text.folded")).to_have_count(1)
@@ -245,6 +252,10 @@ def phone(page: Page, lang: str) -> None:
     expect(sheet.locator(".q-card")).to_have_count(6)
     for box in [c.bounding_box() for c in sheet.locator(".q-chip").all()]:
         assert box and box["height"] >= 39.5, f"{lang} 390: a chip is {box and box['height']}px tall, not a thumb's"
+    for short in QUESTIONS:
+        expect(sheet.locator(f".q-card[data-ask='{short}'] .q-field")).to_have_count(1)
+    expect(sheet.locator(".q-card[data-ask='qf0ld3'] .q-field")).to_have_count(0)
+    expect(sheet.locator(".q-card[data-ask='qg1t04'] .q-field")).to_have_count(0)
     size = sheet.locator(".q-card[data-ask='q4r8tz'] .q-field").evaluate("(e) => parseFloat(getComputedStyle(e).fontSize)")
     assert size >= 16, f"{lang} 390: the answer field is {size}px, and Safari would zoom into it"
     sheet.locator(".q-card[data-ask='qg1t04'] .q-chip[data-option='allow']").tap()

@@ -364,7 +364,6 @@ class _Question:
     text: str
     options: list[str]
     multi: bool
-    allow_free: bool
     urgent: bool
     task_id: str | None
     dispatch_id: str | None
@@ -391,7 +390,6 @@ async def _question(orch: Orchestrators, project: Project, raw: Any, where: str)
         raise Refused(f"{where}'s options are a list of strings")
     labels = list(dict.fromkeys(str(o).strip()[:200] for o in options if str(o or "").strip()))[:8]
     multi = bool(raw.get("multi")) and len(labels) > 1
-    allow_free = raw.get("allow_free") is not False or not labels
     task_id = str(raw["task_id"]) if raw.get("task_id") else None
     if task_id:
         row = await orch.manager.db.fetchone("SELECT 1 FROM board_tasks WHERE id = ? AND project_id = ?", (task_id, project.id))
@@ -408,7 +406,7 @@ async def _question(orch: Orchestrators, project: Project, raw: Any, where: str)
         if dispatch.status not in ("open", "blocked"):
             raise Refused(f"{where}: dispatch {dispatch.id} is {dispatch.status}; ask without it")
         linked = dispatch.id
-    return _Question(title, text[:8000], labels, multi, allow_free, bool(raw.get("urgent")), task_id, linked)
+    return _Question(title, text[:8000], labels, multi, bool(raw.get("urgent")), task_id, linked)
 
 
 async def ask_operator(
@@ -421,7 +419,6 @@ async def ask_operator(
     text: str = "",
     options: list[str] | None = None,
     multi: bool = False,
-    allow_free: bool = True,
     context: str = "",
     task_id: str | None = None,
     urgent: bool = False,
@@ -439,12 +436,15 @@ async def ask_operator(
             raise Refused("give either questions=[…] or one question with its title and text, not both")
         raws: list[Any] = list(questions)
     else:
-        raws = [{"title": title, "text": text, "options": options, "multi": multi, "allow_free": allow_free, "context": context, "task_id": task_id, "urgent": urgent, "dispatch_id": dispatch_id}]
+        raws = [{"title": title, "text": text, "options": options, "multi": multi, "context": context, "task_id": task_id, "urgent": urgent, "dispatch_id": dispatch_id}]
     single = len(raws) == 1
     checked = [await _question(orch, project, raw, "the question" if single else f"question {i + 1}") for i, raw in enumerate(raws)]
     asked: list[Ask] = []
     for q in checked:
-        detail: dict[str, Any] = {"urgent": q.urgent, "multi": q.multi, "allow_free": q.allow_free}
+        # No "only the options" switch: the operator may always answer in their own words, or add a
+        # note to an option. An orchestrator once shut that off for a question whose options did not
+        # fit, and the operator had no way to say so.
+        detail: dict[str, Any] = {"urgent": q.urgent, "multi": q.multi}
         asked.append(await orch.open_request(project, session_id, kind="question", title=q.title, text=q.text, options=q.options, detail=detail, task_id=q.task_id, dispatch_id=q.dispatch_id))
     shown = " Those with a dispatch_id are shown in the main orchestrator's chat too." if any(a.dispatch_id for a in asked) else ""
     if single:

@@ -610,7 +610,7 @@ export type Ask = {
   title?: string;
   /** The title, or the text's first line: what a list shows the request by. */
   heading?: string;
-  detail: { options?: string[]; urgent?: boolean; multi?: boolean; allow_free?: boolean; [k: string]: unknown };
+  detail: { options?: string[]; urgent?: boolean; multi?: boolean; [k: string]: unknown };
   routed_to: "orchestrator" | "operator";
   suggestion: string;
   created_at: string;
@@ -646,7 +646,7 @@ export type DispatchMessage = { id: number; dispatch_id: string; at: string; aut
 export type MainAsk = Ask & { project_name: string; asker: string; host: boolean };
 
 /** One entry of the operator's list (GET /api/questions): a request with what the list draws it by —
- *  its heading, who asks, its options, whether several may be chosen or words given, whether it acts
+ *  its heading, who asks, its options, whether several may be chosen, whether it acts
  *  on the host, whether "Always" exists for it — and the section it sits in. */
 export type WaitingQuestion = Ask & {
   project_name: string;
@@ -654,7 +654,6 @@ export type WaitingQuestion = Ask & {
   section: "requests" | "questions";
   options: string[];
   multi: boolean;
-  allow_free: boolean;
   host: boolean;
   always: boolean;
   urgent: boolean;

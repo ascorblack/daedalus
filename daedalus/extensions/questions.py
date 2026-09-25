@@ -65,9 +65,6 @@ async def _view(app: Application, ask: Ask, names: dict[str, str], members: dict
         "section": section_of(ask),
         "options": options,
         "multi": bool(ask.detail.get("multi")) and len(options) > 1,
-        # Words are an answer only to a question: a folder or a project is added or not, and words
-        # would be taken as neither.
-        "allow_free": ask.kind == "question" and (ask.detail.get("allow_free") is not False or not options),
         "host": host,
         # "Always" exists where the member's CLI has a standing grant to give; a Daedalus member's
         # gate has none.
@@ -127,8 +124,8 @@ def _shape(ask: Ask, item: dict[str, Any]) -> dict[str, Any]:
         raise Unanswerable("a note goes beside a chosen option; without one, write the answer itself")
     if not text:
         raise Unanswerable("choose an option or write an answer")
-    if options and ask.detail.get("allow_free") is False:
-        raise Unanswerable("this question is answered with one of its options")
+    # A question is always open to the operator's own words, whatever its options: rows stored while
+    # an orchestrator could still say "options only" (``allow_free``) are read the same way.
     return {"text": text}
 
 

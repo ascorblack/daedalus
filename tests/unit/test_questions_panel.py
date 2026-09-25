@@ -41,7 +41,7 @@ async def test_a_batch_is_asked_at_once_with_titles_and_a_bad_question_asks_noth
         sid = (await r.orch.enable(r.project.id)).settings.orchestrator.session_id
         database, providers, launch = await ask_three(r, sid)
         assert [a.title for a in (database, providers, launch)] == ["Database", "Payment providers", "Launch day"]
-        assert database.detail["options"] == ["Postgres", "SQLite"] and database.detail["multi"] is False and database.detail["allow_free"] is True
+        assert database.detail["options"] == ["Postgres", "SQLite"] and database.detail["multi"] is False and "allow_free" not in database.detail
         assert providers.detail["multi"] is True and launch.detail["urgent"] is True and launch.detail["options"] == []
         pending = await events(r.manager, "ask.pending")
         assert len(pending) == 3 and pending[1].payload["questions"][0]["multi"] is True
@@ -60,10 +60,10 @@ async def test_a_batch_is_asked_at_once_with_titles_and_a_bad_question_asks_noth
         assert len(await r.manager.asks.open_for(r.project.id, routed_to="operator")) == 3
 
         # The single form still asks one, and says so the way it always did.
-        said = await r.call(sid, "ask_operator", title="Logo", text="Keep the old logo?", options=["Keep", "Redraw"], allow_free=False)
+        said = await r.call(sid, "ask_operator", title="Logo", text="Keep the old logo?", options=["Keep", "Redraw"])
         assert said.startswith("asked the operator as [q")
         logo = (await r.manager.asks.open_for(r.project.id, routed_to="operator"))[-1]
-        assert logo.detail["allow_free"] is False
+        assert logo.detail["options"] == ["Keep", "Redraw"] and "allow_free" not in logo.detail
     finally:
         await r.manager.close()
 
@@ -144,13 +144,20 @@ async def test_a_batch_answer_gives_each_item_its_own_outcome(settings: Settings
         reasons = [item.get("error", "") for item in shapes["results"]]
         assert [item["state"] for item in shapes["results"]] == ["refused", "refused", "refused"]
         assert all("not this project's" in reason for reason in reasons)
-        shapes = await questions.answer(app, [{"ask_id": colour.id, "text": "Green"}, {"ask_id": font.id, "selected": ["Serif", "Sans"]}, {"ask_id": font.id, "note": "any"}], project_id=r.project.id, via="project")
+        shapes = await questions.answer(app, [{"ask_id": font.id, "selected": ["Serif", "Sans"]}, {"ask_id": font.id, "note": "any"}], project_id=r.project.id, via="project")
         assert [item["error"] for item in shapes["results"]] == [
-            "this question is answered with one of its options",
             "choose one option",
             "a note goes beside a chosen option; without one, write the answer itself",
         ]
-        assert colour.id in {a.id for a in await r.manager.asks.open_for(r.project.id, routed_to="operator")}
+        # "Only the options" is gone: the operator may always answer in words, and a stored row that
+        # still says allow_free false (as the orchestrator's "Colour" asked for) is answered so too.
+        assert "allow_free" not in colour.detail
+        await db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.allow_free', json('false')) WHERE id = ?", (colour.id,))
+        listed = {q["id"]: q for q in await questions.waiting(app, r.project.id)}  # type: ignore[arg-type]
+        assert "allow_free" not in listed[colour.id]
+        words = await questions.answer(app, [{"ask_id": colour.id, "text": "Green, none of those"}], project_id=r.project.id, via="project")
+        assert [item["state"] for item in words["results"]] == ["answered"], words
+        assert (await r.manager.asks.get(colour.id)).resolution["text"] == "Green, none of those"  # type: ignore[union-attr]
     finally:
         await r.manager.close()
 
@@ -215,7 +222,7 @@ async def test_permissions_and_escalations_sit_above_the_questions_and_the_main_
         assert by_id[perm.id]["heading"] == "Exec: npm publish" and by_id[perm.id]["title"] == ""
         database = next(q for q in listed if q["title"] == "Database")
         assert database["section"] == "questions" and database["asker"] == "orchestrator" and database["project_name"] == "Bakery"
-        assert database["options"] == ["Postgres", "SQLite"] and database["allow_free"] is True
+        assert database["options"] == ["Postgres", "SQLite"] and "allow_free" not in database
 
         # The main chat's list: every orchestrated project's, and not Garden's, which has no orchestrator.
         everything = await questions.waiting(r.team.app)  # type: ignore[arg-type]

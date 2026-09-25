@@ -3395,7 +3395,6 @@ Object.assign(DICT, {
   "questions.state.ready": { en: "Ready", ru: "Готово" },
   "questions.state.draft": { en: "Draft", ru: "Черновик" },
   "questions.why.reason": { en: "· say why", ru: "· напишите почему" },
-  "questions.why.option": { en: "· choose an option", ru: "· выберите вариант" },
   "questions.clear": { en: "Clear", ru: "Очистить" },
   "questions.dismiss": { en: "Dismiss", ru: "Скрыть" },
   "questions.fate.sent": { en: "Sent", ru: "Отправлено" },

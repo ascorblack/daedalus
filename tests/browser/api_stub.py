@@ -605,7 +605,6 @@ def question_view(ask: dict, project_name: str, *, asker: str = "", always: bool
         "asker": asker or ("main" if origin == "dispatcher" else "orchestrator" if origin == "orchestrator" else "staff"),
         "section": "requests" if origin == "staff" else "questions",
         "options": options, "multi": bool(detail.get("multi")) and len(options) > 1,
-        "allow_free": ask["kind"] == "question" and (detail.get("allow_free", True) is not False or not options),
         "host": bool(ask.get("host")), "always": always, "urgent": bool(detail.get("urgent")),
     }
 
@@ -957,7 +956,8 @@ class FocusStub:
         """What the Questions tab has to show beside the discount question: a batch the orchestrator
         asked (several options at once, one long enough to fold, one that blocks the work), a folder it
         wants, and what staff wait on — Ira's permission, which her CLI can grant always, and Lev's
-        question the orchestrator escalated with a suggestion."""
+        question the orchestrator escalated with a suggestion. The payment question is stored as an
+        orchestrator could once ask it, "options only", which the tab no longer honours."""
         words = FOCUS_WORDS[lang]
         pid = self.projects[0]["id"]
 
@@ -969,7 +969,7 @@ class FocusStub:
             return row
 
         added = [
-            ask("ask-pay", "qp4y01", "2026-09-24T09:56:00Z", title=words["title.pay"], text=words["ask.pay"], detail={"options": ["Stripe", "PayPal", words["cash"]], "multi": True}),
+            ask("ask-pay", "qp4y01", "2026-09-24T09:56:00Z", title=words["title.pay"], text=words["ask.pay"], detail={"options": ["Stripe", "PayPal", words["cash"]], "multi": True, "allow_free": False}),
             ask("ask-open", "qo9d02", "2026-09-24T09:56:30Z", title=words["title.open"], text=words["ask.open"], detail={"urgent": True}),
             ask("ask-labs", "qf0ld3", "2026-09-24T09:57:00Z", kind="folder", title="", text="Add the host folder /home/operator/work/labs to Bakery 2.0? It is also in the project Labs.", detail={"options": ["Add", "Don't add"], "path": "/home/operator/work/labs", "env": "host"}),
             ask("ask-push", "qg1t04", "2026-09-24T09:52:00Z", origin="staff", kind="permission", staff_id="st-ira", staff_session_id="ss-ira", task_id="t-checkout", text="Exec: git push origin agent/ira/checkout"),

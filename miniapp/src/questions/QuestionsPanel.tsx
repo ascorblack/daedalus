@@ -452,7 +452,6 @@ function QuestionCard({ q, draft, fate, fresh, onChange, onClear, onDismiss }: C
 /** What a draft still lacks, in a few words. */
 function whyNotReady(q: WaitingQuestion, d: Draft): string {
   if (isPermission(q)) return d.choice === "because" ? t("questions.why.reason") : "";
-  if (d.selected.length === 0 && d.text.trim() && !q.allow_free) return t("questions.why.option");
   return "";
 }
 

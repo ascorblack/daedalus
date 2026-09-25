@@ -1195,7 +1195,8 @@ class Orchestrators:
                     "question": (f"{title}\n\n{text}" if title else text)[:QUESTION_MAX],
                     "options": [{"label": o, "description": ""} for o in options],
                     "multi": bool(detail.get("multi")),
-                    "custom": kind == "question" and detail.get("allow_free", True) is not False,
+                    # Words are an answer only to a question: a folder or a project is added or not.
+                    "custom": kind == "question",
                 }],
                 "operator_facing": True,
                 "telegram": False,

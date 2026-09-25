@@ -30,14 +30,14 @@ function question(over: Partial<WaitingQuestion> = {}): WaitingQuestion {
     id: "ask-db", short_id: "qdb01", project_id: "p1", origin: "orchestrator", kind: "question", staff_id: null, task_id: null,
     title: "Database", heading: "Database", text: "Which database?", detail: {}, routed_to: "operator", suggestion: "",
     created_at: "2026-09-25T10:00:00Z", resolved_at: null, resolved_by: null, resolution: {},
-    project_name: "Bakery", asker: "orchestrator", section: "questions", options: ["Postgres", "SQLite"], multi: false, allow_free: true,
+    project_name: "Bakery", asker: "orchestrator", section: "questions", options: ["Postgres", "SQLite"], multi: false,
     host: false, always: false, urgent: false, ...over,
   };
 }
 
-const perm = question({ id: "ask-perm", kind: "permission", origin: "staff", section: "requests", title: "", heading: "Exec: npm publish", options: [], allow_free: false, always: true });
+const perm = question({ id: "ask-perm", kind: "permission", origin: "staff", section: "requests", title: "", heading: "Exec: npm publish", options: [], always: true });
 const providers = question({ id: "ask-pay", title: "Providers", options: ["Stripe", "PayPal", "Cash"], multi: true });
-const folder = question({ id: "ask-folder", kind: "folder", options: ["Add", "Don't add"], allow_free: false });
+const folder = question({ id: "ask-folder", kind: "folder", options: ["Add", "Don't add"] });
 
 function memory(): Storage {
   const kept = new Map<string, string>();
@@ -76,10 +76,11 @@ describe("a draft", () => {
     expect(isReady(q, undefined)).toBe(false);
     expect(isReady(q, setText(EMPTY, "   "))).toBe(false);
     expect(isReady(q, setText(EMPTY, "Postgres"))).toBe(true);
-    const optionsOnly = question({ allow_free: false });
-    expect(isReady(optionsOnly, setText(EMPTY, "Postgres"))).toBe(false);
-    expect(takesText(optionsOnly, EMPTY)).toBe(false);
-    expect(takesText(optionsOnly, toggleOption(optionsOnly, EMPTY, "SQLite"))).toBe(true);
+    // A question is always open to words, even one stored when an orchestrator could say "options only".
+    const stored = question({ detail: { allow_free: false } });
+    expect(takesText(stored, EMPTY)).toBe(true);
+    expect(isReady(stored, setText(EMPTY, "Neither: MariaDB"))).toBe(true);
+    expect(takesText(stored, toggleOption(stored, EMPTY, "SQLite"))).toBe(true);
     // A folder is one of its options, and never words.
     expect(takesText(folder, EMPTY)).toBe(false);
     expect(isReady(folder, toggleOption(folder, EMPTY, "Add"))).toBe(true);
