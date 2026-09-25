@@ -980,7 +980,7 @@ class CliStaffRuntime:
                 session.worker.put(Pending("", f"[the {decision.by} answers your question] {words}", "queue", "system"))
         else:
             if ask.kind == "permission":
-                choice = "allow_once" if decision.allow else "deny_with_note" if text else "deny"
+                choice = ("allow_always" if decision.always else "allow_once") if decision.allow else "deny_with_note" if text else "deny"
             else:
                 choice = decision.selected[0] if decision.selected else "text"
             if not await self.adapter.answer(session.term, ref, Answer(choice, note=text)):

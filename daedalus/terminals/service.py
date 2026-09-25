@@ -506,7 +506,13 @@ class Terminals(SideChannels):
                 live[str(info.get("id"))] = info
         owners = [Owner(r["owner_kind"], r["owner_id"]) for r in rows if r["owner_kind"] in ("session", "staff", "project") and r["owner_id"]]
         labels = await self.owners.labels(owners) if owners else {}
-        return [self._view(r, live.get(r["id"]), labels, preview=bool(preview_rows)) for r in rows]
+        staffed = [r["id"] for r in rows if r["owner_kind"] == "staff" and r["status"] == "running"]
+        activities_of = getattr(self.owners, "activities", None)
+        activities = await activities_of(staffed) if staffed and activities_of is not None else {}
+        views = [self._view(r, live.get(r["id"]), labels, preview=bool(preview_rows)) for r in rows]
+        for view in views:
+            view["activity"] = activities.get(view["id"])
+        return views
 
     def _view(self, row: dict[str, Any], info: dict[str, Any] | None, labels: dict[Owner, str], *, preview: bool = False) -> TerminalView:
         owner_id = row["owner_id"]

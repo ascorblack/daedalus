@@ -199,6 +199,13 @@ export function StaffSheet({ team, member, onClose, onDone, toast }: { team: Tea
           </div>
         </fieldset>
       )}
+      {/* A CLI that updated past what its adapter was tested with may be hired, but is said to be
+          unproven until a self-check has passed on the version it now is. */}
+      {!daedalus && entry?.version_guard === "unverified" && (
+        <div className="staff-guard" role="note" data-guard="unverified">
+          {t("harness.guard", { version: entry.version ?? "", low: entry.tested_versions?.[0] ?? "", high: entry.tested_versions?.[1] ?? "" })}
+        </div>
+      )}
 
       <div className="staff-grid">
         <div>

@@ -173,7 +173,10 @@ async def hire(
     await orch._changed(project.id, "journal", "orchestrator")
     details = [_label(member.harness), member.isolation]
     details += [x for x in (member.agent, member.model, member.effort, member.permission_mode) if x]
-    return f"hired {member.name} [{member.id}] ({', '.join(details)}{', one-off' if member.one_off else ''}); Assign gives them a task"
+    told = f"hired {member.name} [{member.id}] ({', '.join(details)}{', one-off' if member.one_off else ''}); Assign gives them a task"
+    warn_of = getattr(orch.app.extensions.get("harness"), "hire_warning", None)
+    warning = str(await warn_of(where, harness) or "") if harness != "daedalus" and warn_of is not None else ""
+    return f"{told}. Warning: {warning}" if warning else told
 
 
 async def staff_edit(

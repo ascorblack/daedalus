@@ -24,6 +24,23 @@ def never_checked(env: str, harness: str) -> dict[str, Any]:
     }
 
 
+def version_guard(view: dict[str, Any]) -> str:
+    """How far the installed version is to be trusted: empty when it is one the adapter was tested
+    against (or nothing is installed); ``verified`` when it is outside that range but the self-check
+    has passed on this very version; ``unverified`` when it is outside and no passing self-check on it
+    exists yet.
+
+    A CLI that updated itself past what the adapter knows may have renamed a hook or redrawn a
+    dialog. The hiring form and the orchestrator's ``Hire`` warn while it is ``unverified``: the
+    member will be hired, but its first launch is the first time anyone sees whether it works.
+    """
+    version = str(view.get("installed_version") or "")
+    if not view.get("installed") or not version or view.get("tested"):
+        return ""
+    check = view.get("self_check") or {}
+    return "verified" if check.get("ok") and check.get("version") == version else "unverified"
+
+
 class HarnessCatalog:
     def __init__(self, store: HarnessStore) -> None:
         self.store = store
@@ -54,6 +71,7 @@ class HarnessCatalog:
             supported=bool(version) and version_supported(caps, version),
             adapter=caps.harness in ADAPTERS,
         )
+        view["version_guard"] = version_guard(view)
         return view
 
 

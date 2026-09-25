@@ -165,6 +165,10 @@ class Decision:
     text: str | None
     selected: list[str]
     by: Origin
+    always: bool = False
+    """An allow that also covers the same request from now on, where the CLI offers that (Claude's
+    "don't ask again", Codex's accept for the session, OpenCode's "always"). A runtime that cannot
+    deliver it gives a plain allow: the operator is asked again next time, which is the safe side."""
 
 
 @dataclass(frozen=True, slots=True)

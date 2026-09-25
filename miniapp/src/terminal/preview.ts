@@ -123,6 +123,10 @@ export function cardStatus(row: TerminalView, now = Date.now()): CardStatus {
     const how = row.exit_signal ? t("term.card.signal", { signal: row.exit_signal }) : t("term.card.code", { code: row.exit_code ?? "?" });
     return { text: ago ? t("term.card.ended", { how, ago }) : how, level: row.exit_signal || (row.exit_code ?? 0) !== 0 ? "bad" : "off" };
   }
+  if (row.activity?.status) {
+    const words = t(`team.status.${row.activity.status}`);
+    return { text: row.activity.label ? `${words} · ${row.activity.label}` : words, level: row.activity.level ?? "ok" };
+  }
   if (row.activity?.label) return { text: row.activity.label, level: row.activity.level ?? "ok" };
   if (row.live && row.live.clients === 0) return { text: t("term.card.unwatched", { t: span(row.last_input_at || row.created_at, now) }), level: "idle" };
   return { text: t("term.card.running", { t: span(row.created_at, now) }), level: "ok" };

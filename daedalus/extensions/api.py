@@ -90,6 +90,7 @@ from daedalus.speech.tts_engine import CACHE as VOICE_CACHE
 from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
+from daedalus.staff_runtime import LiveSession
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.harness import HarnessStore
 from daedalus.stores.media import MEDIA_TENANT
@@ -354,6 +355,7 @@ class AskAnswerBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allow: bool | None = None
+    always: bool = False
     text: str | None = None
     selected: list[str] | None = None
     window: Literal["main", "project"] | None = None
@@ -1107,6 +1109,14 @@ class TerminalSignalBody(BaseModel):
     signal: Literal["INT", "TERM", "HUP", "KILL", "QUIT", "TSTP", "CONT", "WINCH", "USR1", "USR2"]
 
 
+class TerminalKeyboardBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner: Literal["auto", "human"]
+    """``auto`` gives the keyboard back, so the messages that wait for a person to stop typing go in
+    now; ``human`` holds it. Handing it to the agent is the agent's own business, not a button's."""
+
+
 class TerminalTicketBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     read_only: bool = False
@@ -1423,12 +1433,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- staff: the named members of a project's team ------------------------------------------
 
-    def staff_row(member: Staff, live: Any, sessions: int) -> dict[str, Any]:
+    def staff_row(member: Staff, live: Any, sessions: int, health: dict[str, Any] | None = None) -> dict[str, Any]:
         queue = getattr(app.extensions.get("staff"), "queue", None)
         # What the member waits to start, each with why: "queued" alone is the question the
         # operator would then have to ask.
         queued = queue.waiting_for(member.id) if queue is not None else []
-        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions, "queued": queued}
+        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions, "queued": queued, "health": health}
+
+    async def staff_health(member: Staff, session: Any) -> dict[str, Any] | None:
+        """Whether the host still hears a working member, for its card; nothing without a live session."""
+        team = app.extensions.get("staff")
+        if session is None or team is None or not hasattr(team, "health"):
+            return None
+        return (await team.health(LiveSession(member, session))).view()  # type: ignore[no-any-return]
 
     def team_or_503() -> Any:
         team = app.extensions.get("staff")
@@ -1491,7 +1508,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 "orchestrator": orchestrator.enabled,
                 "folders": [{"id": f.id, "path": str(f.path), "label": f.label, "env": f.env, "is_git": f.is_git, "readonly": f.readonly} for f in project.folders],
             },
-            "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0)) for m in members],
+            "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0), await staff_health(m, live.get(m.id))) for m in members],
             "queue": queue.queue(project_id) if (queue := getattr(app.extensions.get("staff"), "queue", None)) is not None else [],
             "counts": {"staff": sum(1 for m in members if m.active), "working": sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)},
             "choices": {
@@ -1526,13 +1543,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except StaffError as exc:
             raise HTTPException(400, str(exc)) from exc
         await staff_changed(member, "staff.hired")
-        return staff_row(member, None, 0)
+        row = staff_row(member, None, 0)
+        warn_of = getattr(harness_manager, "hire_warning", None) if body.harness != "daedalus" else None
+        row["warning"] = str(await warn_of(body.env or project.settings.default_env or manager.projects.local_env, body.harness) or "") if warn_of is not None and body.harness in CAPABILITIES else ""
+        return row
 
     @api.get("/api/staff/{staff_id}")
     async def get_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         member = await staff_member(staff_id)
         live = await manager.staff.live(staff_id)
-        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)))
+        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)), await staff_health(member, live))
 
     @api.patch("/api/staff/{staff_id}")
     async def patch_staff(staff_id: str, body: StaffPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1642,7 +1662,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def answer_ask(ask_id: str, body: AskAnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """The operator's answer. The first answer to reach a request wins; a later one is a 409 naming who was first."""
         team = team_or_503()
-        return await team_call(team.answer(ask_id, allow=body.allow, text=body.text, selected=body.selected, by="operator", via=body.window or "app"))  # type: ignore[no-any-return]
+        return await team_call(team.answer(ask_id, allow=body.allow, always=body.always, text=body.text, selected=body.selected, by="operator", via=body.window or "app"))  # type: ignore[no-any-return]
 
     async def team_live(staff_session_id: str, request: Request) -> Any:
         """A command-line member's team server, authenticated by the token minted for its launch —
@@ -3505,6 +3525,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def terminals_signal(terminal_id: str, body: TerminalSignalBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         await terminal_service().signal(terminal_id, body.signal)
         return {"ok": True}
+
+    @api.post("/api/terminals/{terminal_id}/keyboard")
+    async def terminals_keyboard(terminal_id: str, body: TerminalKeyboardBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Who holds the terminal's keyboard: the staff view's "Release" after the operator typed."""
+        return await terminal_service().keyboard(terminal_id, body.owner)
 
     @api.post("/api/terminals/{terminal_id}/restart")
     async def terminals_restart(terminal_id: str, body: TerminalRestartBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

@@ -68,6 +68,7 @@ const HealthScreen = lazy(screen(() => import("./screens/Settings").then((m) => 
 const MemoryScreen = lazy(screen(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
 const TerminalsScreen = lazy(screen(() => import("./screens/Terminals").then((m) => ({ default: m.TerminalsScreen }))));
 const TerminalFullScreen = lazy(screen(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
+const HarnessesScreen = lazy(screen(() => import("./screens/Harnesses").then((m) => ({ default: m.HarnessesScreen }))));
 const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
 const ProjectScreen = lazy(screen(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
@@ -304,7 +305,7 @@ export function App() {
   const focusProject = route.screen === "project" ? route.project : null;
   // The main orchestrator's chat is a conversation like any other: on a phone it takes the screen.
   const mainChat = route.screen === "main";
-  const focusChat = (!!focusProject && (route.page === null || route.page === "s")) || mainChat;
+  const focusChat = (!!focusProject && (route.page === null || route.page === "s" || route.page === "staff")) || mainChat;
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
   const inDetail = !!route.session || !!route.detail || !!focusProject || mainChat;
   useEffect(() => {
@@ -450,6 +451,7 @@ export function App() {
         {route.screen === "terminals" && !route.detail && <TerminalsScreen toast={showToast} project={project} projects={projectList} />}
         {route.screen === "terminals" && route.detail && <TerminalFullScreen id={route.detail} beside={route.query.get("with")} toast={showToast} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
+        {route.screen === "harnesses" && <HarnessesScreen toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
