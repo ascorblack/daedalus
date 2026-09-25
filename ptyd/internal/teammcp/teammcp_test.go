@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -73,7 +74,13 @@ type fixture struct {
 func listener(t *testing.T) *fixture {
 	t.Helper()
 	rec := &recorder{wake: make(chan struct{}, 1)}
-	reg, err := hooks.NewRegistry(t.TempDir(), "/opt/ptyd/ptyd", rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// The daemon's path must be a real file: on Windows the hook command is a hard link to it, or a
+	// copy. The test binary is one.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := hooks.NewRegistry(t.TempDir(), self, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

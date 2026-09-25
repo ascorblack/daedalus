@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,12 +18,16 @@ func TestSideChannelSettings(t *testing.T) {
 	args := func(extra ...string) []string {
 		return append([]string{"--env", "x", "--run-dir", dir, "--state-dir", dir, "--config", p}, extra...)
 	}
-	write(`{"exec":{"allow":["bun"]},"fs":{"roots":["/srv/extra"],"deny":["**/*.pem"]}}`)
+	// An absolute path on the system the test runs on: "/srv/extra" is not one on Windows.
+	root := filepath.Join(dir, "extra")
+	body, _ := json.Marshal(map[string]any{"exec": map[string]any{"allow": []string{"bun"}},
+		"fs": map[string]any{"roots": []string{root}, "deny": []string{"**/*.pem"}}})
+	write(string(body))
 	c, err := Parse(args())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Side.ExecAllow) != 1 || c.Side.FSRoots[0] != "/srv/extra" || c.Side.FSDeny[0] != "**/*.pem" || c.HooksListen != "127.0.0.1:0" {
+	if len(c.Side.ExecAllow) != 1 || c.Side.FSRoots[0] != root || c.Side.FSDeny[0] != "**/*.pem" || c.HooksListen != "127.0.0.1:0" {
 		t.Fatalf("%+v %q", c.Side, c.HooksListen)
 	}
 	for _, body := range []string{`{"exec":{"allow":["/bin/sh"]}}`, `{"fs":{"roots":["relative"]}}`, `{"fs":{"deny":[""]}}`, `{"fs":{"allow":[]}}`} {

@@ -3,6 +3,8 @@
 package rpc_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,12 +82,38 @@ func startShell(t *testing.T, f *fixture, id, program string, home string, env m
 	if created.ShellIntegration != wantKind {
 		t.Fatalf("shell_integration %q, want %q", created.ShellIntegration, wantKind)
 	}
-	// The first prompt, before typing: PSReadLine loses a line typed while it starts.
+	// The first prompt, before typing: PSReadLine loses a line typed while it starts. Quiet output
+	// alone does not say the prompt is there: a PowerShell starting cold on a busy machine prints
+	// nothing for longer than any idle time, and a line typed into that silence reached the terminal
+	// before PSReadLine did, which took its Enter for a line feed and never ran it. So the prompt's
+	// own mark first, then the idle time in which the line editor takes the terminal over.
+	waitForPromptMark(t, f, id)
 	var idle struct {
 		Matched string `json:"matched"`
 	}
 	f.call(t, "terminal.wait_for", map[string]any{"id": id, "idle_ms": 500, "timeout_ms": 15000}, &idle)
 	return &shellSession{t: t, f: f, id: id, home: home}
+}
+
+// waitForPromptMark waits until the terminal's raw output holds the integration's first prompt mark.
+func waitForPromptMark(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var out output
+		f.call(t, "terminal.read_output", map[string]any{"id": id, "since_seq": 0, "max_bytes": 256 << 10}, &out)
+		raw, err := base64.StdEncoding.DecodeString(out.DataB64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte("\x1b]133;A;")) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never printed its first prompt: %q", id, raw)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *shellSession) info() term.Info {

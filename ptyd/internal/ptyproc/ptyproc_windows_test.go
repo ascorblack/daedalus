@@ -52,7 +52,8 @@ func collect(p *Proc) (func() string, chan struct{}) {
 	}, done
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
+// waitFor polls cond, and on a timeout says what the console showed.
+func waitFor(t *testing.T, what string, cond func() bool, output func() string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -61,7 +62,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	t.Fatalf("timed out waiting for %s; the console showed %q", what, output())
 }
 
 func TestAProgramRunsInAConsoleAndItsExitIsReported(t *testing.T) {
@@ -75,7 +76,7 @@ func TestAProgramRunsInAConsoleAndItsExitIsReported(t *testing.T) {
 	if exit.Code != 7 || exit.Signal != "" {
 		t.Errorf("exit %+v", exit)
 	}
-	waitFor(t, "the output", func() bool { return strings.Contains(output(), "marker-42") })
+	waitFor(t, "the output", func() bool { return strings.Contains(output(), "marker-42") }, output)
 	p.Close()
 	select {
 	case <-read:
@@ -98,7 +99,7 @@ func TestTypedInputReachesTheProgramAndResizeIsAccepted(t *testing.T) {
 	if _, err := io.WriteString(p.Master, "echo typed-%OS%\r"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the echo", func() bool { return strings.Contains(output(), "typed-Windows_NT") })
+	waitFor(t, "the echo", func() bool { return strings.Contains(output(), "typed-Windows_NT") }, output)
 	if _, err := p.Foreground(); err == nil {
 		t.Error("a console reported a foreground group")
 	}
@@ -109,14 +110,23 @@ func TestKillTreeEndsTheWholeJob(t *testing.T) {
 	cmd := comspec(t)
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "alive")
-	// A grandchild that keeps touching a file, started detached from the shell that starts it.
-	script := `start "" /b cmd.exe /d /c "for /l %i in (0,0,1) do (echo x> "` + marker + `" & ping -n 2 127.0.0.1 >nul)" & ping -n 600 127.0.0.1 >nul`
-	p, err := Start(Spec{Path: cmd, Argv: []string{"cmd.exe", "/d", "/c", script}, Dir: dir, Env: os.Environ(), Cols: 80, Rows: 24})
+	// A grandchild that keeps touching a file, started detached from the shell that starts it. The
+	// two are batch files rather than one command line: cmd.exe reads its command line by rules of
+	// its own, which the quoting of an argument (backslash before a quote) is not, and a script
+	// with quotes inside it never ran.
+	child := filepath.Join(dir, "child.cmd")
+	parent := filepath.Join(dir, "parent.cmd")
+	writeScript(t, child, "@echo off", ":loop", `echo x> "`+marker+`"`, "ping -n 2 127.0.0.1 >nul", "goto loop")
+	writeScript(t, parent, "@echo off", `start "" /b cmd.exe /d /c "`+child+`"`, "ping -n 600 127.0.0.1 >nul")
+	p, err := Start(Spec{Path: cmd, Argv: []string{"cmd.exe", "/d", "/c", parent}, Dir: dir, Env: os.Environ(), Cols: 80, Rows: 24})
 	if err != nil {
 		t.Fatal(err)
 	}
-	collect(p)
-	waitFor(t, "the grandchild", func() bool { _, err := os.Stat(marker); return err == nil })
+	// Ended however the test ends, so that nothing is left holding the directory.
+	defer p.Close()
+	defer p.KillTree(0)
+	output, _ := collect(p)
+	waitFor(t, "the grandchild", func() bool { _, err := os.Stat(marker); return err == nil }, output)
 	exit := p.KillTree(500 * time.Millisecond)
 	if exit.Signal == "" {
 		t.Errorf("exit %+v does not say it was ended", exit)
@@ -130,6 +140,13 @@ func TestKillTreeEndsTheWholeJob(t *testing.T) {
 	}
 }
 
+func writeScript(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\r\n")+"\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAnInterruptIsATypedCtrlC(t *testing.T) {
 	cmd := comspec(t)
 	p, err := Start(Spec{Path: cmd, Argv: []string{"cmd.exe", "/d", "/c", "ping -n 600 127.0.0.1"}, Dir: t.TempDir(), Env: os.Environ(), Cols: 80, Rows: 24})
@@ -138,7 +155,7 @@ func TestAnInterruptIsATypedCtrlC(t *testing.T) {
 	}
 	defer p.KillTree(time.Second)
 	output, _ := collect(p)
-	waitFor(t, "ping to start", func() bool { return strings.Contains(output(), "127.0.0.1") })
+	waitFor(t, "ping to start", func() bool { return strings.Contains(output(), "127.0.0.1") }, output)
 	sig, _ := ParseSignal("INT")
 	if err := p.SignalForeground(sig); err != nil {
 		t.Fatal(err)
@@ -146,7 +163,7 @@ func TestAnInterruptIsATypedCtrlC(t *testing.T) {
 	select {
 	case <-p.Done():
 	case <-time.After(15 * time.Second):
-		t.Fatal("Ctrl+C did not end ping")
+		t.Fatalf("Ctrl+C did not end ping; the console showed %q", output())
 	}
 	tstp, ok := ParseSignal("TSTP")
 	if !ok {
