@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -69,7 +71,7 @@ async def test_a_rollback_drops_what_was_queued_behind_it(tmp_path: Path) -> Non
     assert ran == [] and supervisor.queued_rebuild is None
 
 
-def test_a_checkout_without_a_built_app_gets_one_before_the_first_start(tmp_path: Path, monkeypatch: object) -> None:
+def test_a_checkout_without_a_built_app_gets_one_before_the_first_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The bundle is not in git: a fresh clone must not serve 404 at /app until the first rebuild."""
     sup = _load(tmp_path)
     repo = tmp_path / "bot"
@@ -85,7 +87,10 @@ def test_a_checkout_without_a_built_app_gets_one_before_the_first_start(tmp_path
         return 0, ""
 
     sup.run = fake_run
-    sup.shutil.which = lambda name: "/usr/bin/npm"
+    # Through monkeypatch: ``sup.shutil`` is the one ``shutil`` module of the whole test run, and a
+    # bare assignment left every later test with a ``which`` that takes no ``path`` (the staff tests
+    # that spawn real programs then failed, depending only on the order the files ran in).
+    monkeypatch.setattr(sup.shutil, "which", lambda name, *args, **kwargs: "/usr/bin/npm")
     sup.restore_owner = lambda repo: None
     sup.build_app_if_missing(repo)
     assert [s[:2] for s in ran] == [["npm", "ci"], ["npm", "run"]]
