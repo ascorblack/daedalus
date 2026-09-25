@@ -15,6 +15,7 @@ import { NeedsYouBanner, PhoneBoard, PhoneTeam, PhoneTerminals } from "./phone";
 const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 const TeamPage = lazy(() => import("../team/TeamPage").then((m) => ({ default: m.TeamPage })));
 const ProjectBoard = lazy(() => import("../board/ProjectBoard").then((m) => ({ default: m.ProjectBoard })));
+const StaffView = lazy(() => import("../staff/StaffView").then((m) => ({ default: m.StaffView })));
 
 export function ProjectScreen({ projectId, page, inner, toast, wide }: { projectId: string; page: string | null; inner: string | null; toast: (text: string) => void; wide: boolean }) {
   const route = useRoute();
@@ -51,6 +52,9 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
   } else if (view.kind === "session") {
     // A member's conversation is reached from the team on a phone, and goes back there.
     body = <SessionScreen key={view.id} id={view.id} focus={{ projectId, kind: "member" }} onBack={() => (wide ? navigate(home) : goBack(projectPagePath(projectId, "team")))} toast={toast} />;
+  } else if (view.kind === "staff") {
+    // A command-line member, reached from its row: on a phone back leads to the team it came from.
+    body = <StaffView key={view.id} projectId={projectId} staffId={view.id} wide={wide} toast={toast} onBack={() => (wide ? navigate(home) : goBack(projectPagePath(projectId, "team")))} />;
   } else if (!wide && view.page === "team") {
     body = <PhoneTeam projectId={projectId} toast={toast} />;
   } else if (!wide && view.page === "board") {

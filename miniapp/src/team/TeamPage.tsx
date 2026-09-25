@@ -15,6 +15,7 @@ import { HarnessBadge, StaffAvatar } from "./parts";
 import { StaffSheet } from "./StaffSheet";
 import { HARNESS_NAMES, Staff, Team, statusTone } from "./team";
 import { firstWait, waitKey } from "../project/focus";
+import { HealthLine } from "../staff/health";
 
 export function TeamPage({ projectId, toast, back }: { projectId: string; toast: (text: string) => void; back?: string | null }) {
   const [showArchived, setShowArchived] = useState(false);
@@ -135,6 +136,7 @@ function StaffRow({ member, team, spend, onOpen }: { member: Staff; team: Team; 
           <span>{where}</span>
           {spend && <span className="staff-spend">{spend}</span>}
         </div>
+        <HealthLine health={member.health ?? null} compact />
         {/* On a phone the status moves under the name, so a long one never squeezes the name to nothing. */}
         <div className="staff-status-inline">{status}</div>
       </div>

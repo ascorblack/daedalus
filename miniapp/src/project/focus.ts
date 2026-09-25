@@ -10,10 +10,11 @@ export const FOCUS_PAGES = ["team", "board", "journal", "brief", "wakeups", "fol
 export type FocusPage = (typeof FOCUS_PAGES)[number];
 
 /** What the centre of focus mode shows for a route. */
-export type FocusView = { kind: "orchestrator" } | { kind: "session"; id: string } | { kind: "page"; page: FocusPage };
+export type FocusView = { kind: "orchestrator" } | { kind: "session"; id: string } | { kind: "staff"; id: string } | { kind: "page"; page: FocusPage };
 
 export function focusView(page: string | null, inner: string | null): FocusView {
   if (page === "s" && inner) return { kind: "session", id: inner };
+  if (page === "staff" && inner) return { kind: "staff", id: inner };
   if (page && (FOCUS_PAGES as readonly string[]).includes(page)) return { kind: "page", page: page as FocusPage };
   return { kind: "orchestrator" };
 }
@@ -181,7 +182,7 @@ export type PhoneTab = (typeof PHONE_TABS)[number];
  * agents list, and gives the whole height to the conversation.
  */
 export function phoneTab(view: FocusView): { tab: PhoneTab | null; bar: boolean } {
-  if (view.kind === "session") return { tab: null, bar: false };
+  if (view.kind === "session" || view.kind === "staff") return { tab: null, bar: false };
   if (view.kind === "orchestrator") return { tab: "orchestrator", bar: true };
   const page = view.page as string;
   return { tab: (PHONE_TABS as readonly string[]).includes(page) ? (page as PhoneTab) : null, bar: true };

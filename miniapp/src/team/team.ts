@@ -2,6 +2,8 @@
 // makes from them — which executor can be chosen and why not, what a status is called, what branch a
 // worktree will be given. Pure, so each one is tested without a browser.
 
+import type { ChannelHealth } from "../api";
+
 export const HARNESSES = ["daedalus", "claude", "codex", "grok", "opencode", "pi"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
@@ -67,6 +69,8 @@ export type Staff = {
   sessions: number;
   /** What the member waits to start, each with why. */
   queued?: Queued[];
+  /** Whether the host still hears the member's live session; absent without one. */
+  health?: ChannelHealth | null;
 };
 
 export type TeamFolder = { id: string; path: string; label: string; env: Env; is_git: boolean; readonly: boolean };
@@ -102,6 +106,10 @@ export type CatalogEntry = {
   models?: string[];
   error?: string;
   checked_at?: string;
+  /** The installed version against the adapter's tested range: "" inside it, "verified" outside but
+   *  self-checked on this very version, "unverified" outside and not yet self-checked. */
+  version_guard?: "" | "verified" | "unverified";
+  tested_versions?: [string, string];
 };
 export type Catalog = Partial<Record<Harness, CatalogEntry>>;
 

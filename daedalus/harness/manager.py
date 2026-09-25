@@ -279,6 +279,18 @@ class HarnessManager(HarnessCatalog):
             return f"{label} {view['installed_version']} is a major version Daedalus does not support"
         return ""
 
+    async def hire_warning(self, env: str, harness: str) -> str:
+        """What a hire of this CLI in ``env`` should be told without being refused: that its version
+        is outside the tested range and has not passed a self-check yet. Empty otherwise."""
+        view = await self.entry(env, harness)
+        if view["version_guard"] != "unverified":
+            return ""
+        low, high = view["tested_versions"]
+        return (
+            f"{view['label']} {view['installed_version']} in the {env} environment is outside the versions the adapter was tested with "
+            f"({low} to below {high}) and has not passed a self-check on this version yet; run Check on the Harnesses screen before relying on it"
+        )
+
     async def catalog(self, env: str, harness: str, folder_id: str | None = None) -> Catalog:
         """What a CLI offers in ``env``: the user-level lists from the last check, and — for a folder —
         the agents the folder itself defines, read now, because they change with the project."""
@@ -331,6 +343,8 @@ class HarnessManager(HarnessCatalog):
                 "checked_at": entry["checked_at"],
                 "supported": entry["supported"],
                 "tested": entry["tested"],
+                "tested_versions": entry["tested_versions"],
+                "version_guard": entry["version_guard"],
                 "unavailable": entry["unavailable"],
             }
         return out
