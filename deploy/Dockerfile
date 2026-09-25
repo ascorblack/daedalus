@@ -70,9 +70,15 @@ RUN uv venv /srv/venv \
 # the supervisor copies it into a checkout that has none.
 FROM node:22-slim AS miniapp
 
-WORKDIR /build
+WORKDIR /build/miniapp
 COPY miniapp/package.json miniapp/package-lock.json ./
 RUN npm ci --no-audit --no-fund
+# The type check covers the app's tests too, and one of them reads the daemon's own fixtures from
+# beside the app (../ptyd), so the terminal and the daemon are held to the same recorded screens.
+# Without these three files `tsc -b` fails and no bundle is built.
+COPY ptyd/internal/emulator/ghostty/testdata/snapshots.json /build/ptyd/internal/emulator/ghostty/testdata/
+COPY ptyd/internal/emulator/conformance/testdata/cases.json /build/ptyd/internal/emulator/conformance/testdata/
+COPY ptyd/internal/answer/testdata/xterm-replies.json /build/ptyd/internal/answer/testdata/
 COPY miniapp ./
 RUN npm run build
 
@@ -137,7 +143,7 @@ RUN export PKG_CONFIG_PATH="$(cat /opt/libghostty.pkgconfig)" \
 FROM base AS runtime
 
 COPY --from=venv /srv/venv /srv/venv
-COPY --from=miniapp /build/dist /opt/miniapp-dist
+COPY --from=miniapp /build/miniapp/dist /opt/miniapp-dist
 # The terminals service runs this as its entrypoint. The agent's container carries it too, and only
 # asks it its version: that is how the host knows a newer daemon is in the image than the one running.
 COPY --from=ptyd /out/ptyd /usr/local/bin/ptyd
