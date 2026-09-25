@@ -980,3 +980,109 @@ FOCUS_WORDS: dict[str, dict[str, str]] = {
         "wake.name": "Проверить оформление заказа", "wake.note": "После обеда посмотреть оформление заказа у Иры",
     },
 }
+
+
+MAIN_SID = "main0sess001"
+
+# The main chat's invented day. The English texts are what `check_main.py` asserts against; the
+# Russian ones are for the pictures. Postgres and SQLite, project names and dispatch ids stay as
+# they are in both.
+MAIN_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "op.ask": "In Bakery, add a gluten-free section to the menu", "handed": "Handed to Bakery as d7k2m9.",
+        "watering": "Watering plan", "plan.done": "the plan is in the brief", "finished": "Garden finished the watering plan.",
+        "ask.db": "Postgres or SQLite for the orders?", "ask.sunday": "Deliver on Sundays?", "yes": "Yes", "no": "No",
+        "ask.create": "Create the project Shop?\n· make the host folder /home/someone/shop", "create": "Create", "dont": "Don't create",
+        "ask.dawn": "Water at dawn?", "gluten": "Gluten-free menu", "recipes": "Recipes collected", "survey": "Survey the folders and write the brief",
+    },
+    "ru": {
+        "op.ask": "В Bakery добавь в меню раздел без глютена", "handed": "Передал в Bakery как d7k2m9.",
+        "watering": "План полива", "plan.done": "план в брифе", "finished": "Garden закончил план полива.",
+        "ask.db": "Postgres или SQLite для заказов?", "ask.sunday": "Доставлять по воскресеньям?", "yes": "Да", "no": "Нет",
+        "ask.create": "Создать проект Shop?\n· создать на хосте папку /home/someone/shop", "create": "Создать", "dont": "Не создавать",
+        "ask.dawn": "Поливать на рассвете?", "gluten": "Меню без глютена", "recipes": "Рецепты собраны", "survey": "Осмотреть папки и написать бриф",
+    },
+}
+
+
+class MainStub:
+    """The main chat's routes, stateful: answers close cards, a cancel closes a dispatch."""
+
+    def __init__(self, lang: str = "en") -> None:
+        w = self.words = MAIN_WORDS[lang]
+        self.posts: list[tuple[str, dict]] = []
+        project = {"id": "p-main", "name": "Main", "folders": [folder("/srv/workspaces/main")], "created_at": "2026-09-20T00:00:00Z", "settings": {"snapshots": False, "system": "dispatcher"}, "system": "dispatcher"}
+        messages = [
+            {"role": "user", "seq": 1, "origin": "operator", "text": w["op.ask"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-25T09:00:00Z"},
+            {"role": "assistant", "seq": 2, "text": w["handed"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-25T09:00:05Z"},
+            {"role": "user", "seq": 3, "origin": "events", "text": "[reports · 1 since 09:40]\n- 09:40 Garden closed dispatch dg4h1x \"" + w["watering"] + "\" as done: " + w["plan.done"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-25T09:40:00Z"},
+            {"role": "assistant", "seq": 4, "text": w["finished"], "thinking": "", "tool_calls": [], "tool_results": [], "created_at": "2026-09-25T09:40:05Z"},
+        ]
+        self.detail = FocusStub.session_detail(MAIN_SID, "Main", project, messages)
+        self.opened = False
+
+        def a(id_: str, short: str, pid: str | None, name: str, text: str, **over: object) -> dict:
+            row = {"id": id_, "short_id": short, "project_id": pid, "origin": "orchestrator", "kind": "question", "staff_id": None, "task_id": None, "text": text,
+                   "detail": {"options": ["Postgres", "SQLite"]}, "routed_to": "operator", "suggestion": "", "created_at": "2026-09-25T09:10:00Z", "resolved_at": None,
+                   "resolved_by": None, "resolution": {}, "dispatch_id": "d7k2m9", "project_name": name, "asker": "orchestrator", "host": False}
+            row.update(over)
+            return row
+
+        self.asks = [
+            a("ask-db", "q1db00", "p-bakery", "Bakery", w["ask.db"]),
+            a("ask-late", "q2lt00", "p-bakery", "Bakery", w["ask.sunday"], detail={"options": [w["yes"], w["no"]]}, created_at="2026-09-25T09:12:00Z"),
+            a("ask-new", "q3nw00", None, "", w["ask.create"], origin="dispatcher", kind="project",
+              detail={"options": [w["create"], w["dont"]]}, dispatch_id=None, asker="main", host=True, created_at="2026-09-25T09:15:00Z"),
+            a("ask-old", "q4ol00", "p-garden", "Garden", w["ask.dawn"], resolved_at="2026-09-25T09:30:00Z", resolved_by="operator", resolution={"selected": [w["yes"]], "via": "telegram"}),
+        ]
+        self.dispatches = [
+            {"id": "d7k2m9", "project_id": "p-bakery", "project_name": "Bakery", "seq": 3, "kind": "work", "title": w["gluten"], "text": w["op.ask"],
+             "status": "open", "result": "", "created_at": "2026-09-25T09:00:00Z", "updated_at": "2026-09-25T09:20:00Z", "closed_at": None, "stalled_at": None,
+             "last": {"id": 1, "dispatch_id": "d7k2m9", "at": "2026-09-25T09:20:00Z", "author": "orchestrator", "kind": "progress", "text": w["recipes"]}},
+            {"id": "dq8s1p", "project_id": "p-garden", "project_name": "Garden", "seq": 1, "kind": "setup", "title": w["survey"], "text": w["survey"],
+             "status": "open", "result": "", "created_at": "2026-09-25T08:00:00Z", "updated_at": "2026-09-25T08:10:00Z", "closed_at": None, "stalled_at": "2026-09-25T08:40:00Z", "last": None},
+            {"id": "dg4h1x", "project_id": "p-garden", "project_name": "Garden", "seq": 2, "kind": "work", "title": w["watering"], "text": w["watering"],
+             "status": "done", "result": w["plan.done"], "created_at": "2026-09-24T08:00:00Z", "updated_at": "2026-09-25T09:40:00Z", "closed_at": "2026-09-25T09:40:00Z", "stalled_at": None, "last": None},
+        ]
+        self.setup = [{"project_id": "p-garden", "name": "Garden"}]
+
+    def view(self) -> dict:
+        return {"session_id": MAIN_SID if self.opened else "", "dispatches": self.dispatches, "asks": self.asks, "questions": sum(1 for x in self.asks if not x["resolved_at"]), "setup": self.setup}
+
+    def answer(self, method: str, path: str, body: dict | None) -> tuple[int, object] | None:
+        if path == "/api/main" and method == "GET":
+            return 200, self.view()
+        if path == "/api/main" and method == "POST":
+            self.opened = True
+            self.posts.append((path, {}))
+            return 200, {"session_id": MAIN_SID}
+        if path == f"/api/sessions/{MAIN_SID}" and method == "GET":
+            return 200, self.detail
+        if path.startswith("/api/asks/") and path.endswith("/answer") and method == "POST":
+            ref = path.split("/")[3]
+            found = next((x for x in self.asks if x["id"] == ref), None)
+            if found is None:
+                return 404, {"detail": "no such request"}
+            self.posts.append((path, dict(body or {})))
+            if ref == "ask-late" or found["resolved_at"]:
+                # Answered on the phone a moment earlier: the first answer wins.
+                found.update(resolved_at="2026-09-25T09:59:00Z", resolved_by="operator", resolution={"selected": [self.words["yes"]], "via": "telegram"})
+                return 409, {"detail": "request q2lt00 was already answered by the operator"}
+            payload = dict(body or {})
+            found.update(resolved_at="2026-09-25T10:00:00Z", resolved_by="operator", resolution={"selected": payload.get("selected") or [], "text": payload.get("text") or "", "via": payload.get("window") or "app"})
+            return 200, {"state": "answered", "delivered": True, "error": "", "ask": found}
+        if path.startswith("/api/dispatches/") and path.endswith("/cancel") and method == "POST":
+            ref = path.split("/")[3]
+            self.posts.append((path, dict(body or {})))
+            found = next(d for d in self.dispatches if d["id"] == ref)
+            found.update(status="cancelled", closed_at="2026-09-25T10:01:00Z", result="cancelled")
+            return 200, found
+        if path.startswith("/api/dispatches/") and method == "GET":
+            ref = path.split("/")[3]
+            found = next((d for d in self.dispatches if d["id"] == ref), None)
+            return (200, {**found, "messages": [found["last"]] if found and found["last"] else [], "asks": []}) if found else (404, {"detail": "no such dispatch"})
+        if path.endswith("/setup/finish") and method == "POST":
+            self.posts.append((path, {}))
+            self.setup = []
+            return 200, {"finished": True}
+        return None

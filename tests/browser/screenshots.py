@@ -37,6 +37,7 @@ from api_stub import (  # noqa: E402
     FILE_TEXT,
     BoardStub,
     FocusStub,
+    MainStub,
     TeamStub,
     Unhandled,
     expect_app,
@@ -1442,6 +1443,34 @@ def run_focus() -> int:
     return UNHANDLED.report()
 
 
+def run_main() -> int:
+    """The main orchestrator's chat: the projects' questions grouped by project, the work it handed
+    out, and the reports it was woken with (``ONLY=main``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    main = MainStub(LANG)
+
+    def handle(route) -> None:  # type: ignore[no-untyped-def]
+        request = route.request
+        url = urlsplit(request.url)
+        body = request.post_data_json if request.method in ("POST", "PUT", "PATCH") and request.post_data else None
+        answered = main.answer(request.method, url.path[url.path.index("/api/"):], body)
+        if answered is not None:
+            return respond(route, answered[1], status=answered[0])
+        return stub(route)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        # The side panel closed: the picture is of the questions and the dispatches, not the session's details.
+        desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', '0'); } catch (e) {}")
+        page = desk.new_page()
+        page.route("**/api/**", handle)
+        shot(page, "main", "main", wait=".main-board .ask-card", settle=900)
+        desk.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 IRA_SCREEN = (
     f"{ESC}1m⏺{ESC}0m Update(src/lib/cart.ts)\r\n"
     f"  {ESC}2m⎿{ESC}0m  Updated with {ESC}32m6 additions{ESC}0m\r\n\r\n"
@@ -1609,11 +1638,12 @@ def run() -> int:
     # with an orchestrated project; each reports what went unanswered.
     notifications = run_notifications()
     phone = run_phone()
-    return run_focus() or notifications or phone
+    main = run_main()
+    return run_focus() or notifications or phone or main
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
