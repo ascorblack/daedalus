@@ -73,7 +73,9 @@ The daemon runs on Windows as the host environment of a native install (below). 
   file, because the default execution policy refuses every script file; the user's policy is not
   changed. Older console hosts drop OSC sequences they do not know, and then the marks never
   arrive: the shell works, and `terminal.commands` answers 1007.
-- **Signals:** `INT` is a Ctrl+C typed into the console; `TERM`, `HUP`, `QUIT` and `KILL` terminate
+- **Signals:** `INT` is a Ctrl+C typed into the console (the daemon turns the processing of Ctrl+C
+  back on before its first program: the launcher starts it in a process group of its own, which
+  ignores Ctrl+C, and every program would inherit that); `TERM`, `HUP`, `QUIT` and `KILL` terminate
   the job (with `group`) or the program; the rest answer 1007. `terminal.kill` closes the console
   first, which is the hangup (attached programs get `CTRL_CLOSE_EVENT`), and terminates the job
   after the grace. There is no foreground process group, so `busy` comes only from the shell's marks.
@@ -299,9 +301,12 @@ its last 64 KiB.
   program alone.
 - `terminal.kill` sends `SIGHUP` to the program's group and the foreground group, waits up to the
   grace for the program to exit, then sends `SIGKILL` to the group and to every process of the
-  terminal it can find: on Linux, the process tree, the session, and every process whose environment
-  carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called `setsid` after its
-  parent exited. On macOS only the process group is signalled; Windows is described above.
+  terminal it can find: on Linux and macOS, the process tree, the session, and every process whose
+  environment carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called
+  `setsid` after its parent exited. Windows is described above.
+- A program starts with the default action for `SIGHUP` and `SIGINT` even when the daemon was
+  started with them ignored (in the background of a script, under `nohup`): a shell hands an
+  ignored signal on to every command, and Ctrl+C would otherwise interrupt nothing.
 - A program that exits while a background job still holds the PTY open is reported exited after
   half a second of draining; closing the PTY hangs the job up, as closing a terminal window would.
 - Exited terminals are kept, with their screens, for an hour, then forgotten.
@@ -318,7 +323,11 @@ output ring as allocated now. `daemon` is the daemon's own process, whose memory
 terminal's emulator; a load estimate adds it, shared out over the terminals. `machine` is
 `{mem_total_bytes, mem_available_bytes, cgroup_limit_bytes?, cgroup_used_bytes?, cpus, cgroup_cpus?,
 cpu_percent, load1, load5, load15}`, read from `/proc` and, inside a container, from its cgroup's
-memory and CPU limits. Outside Linux `supported` is false and the numbers are zero.
+memory and CPU limits. On macOS the processes come from the kernel's process table (`kern.proc`,
+`proc_info` and `kern.procargs2` for the environment) and the machine from `hw.memsize` and the
+`vm` page counts (free, speculative and file cache as available); the machine's `cpu_percent` is 0
+there, since macOS keeps it only behind an interface a build without cgo cannot reach. On Windows
+`supported` is false and the numbers are zero.
 
 ## Events
 
@@ -636,7 +645,9 @@ The daemon's environment, minus `DAEDALUS_PTYD_*`, `DAEDALUS_TERMINAL_ID`, `DAED
 `KITTY_*`, `ITERM_*`, `WT_SESSION`, `CLAUDE*` and the caller's `strip_env` patterns (a name, or a
 prefix ending in `*`); plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `CLAUDE_CODE_NO_FLICKER=1`,
 `CLAUDE_CODE_SCROLL_SPEED=3`, `DAEDALUS_TERMINAL_ID=<id>`, `DAEDALUS_SI_NONCE=<nonce>` and `HOME`;
-plus the caller's `env` on top.
+plus the caller's `env` on top; and last, outside Windows, `PWD` set to the working directory, so a
+shell shows the path it was asked for rather than what its links resolve to (on macOS `/tmp` is
+`/private/tmp`).
 When the effective character type (the first of `LC_ALL`, `LC_CTYPE`, `LANG` that is set) is not
 UTF-8, the non-UTF-8 overrides are removed and `LANG=C.UTF-8` is set; a user's `ru_RU.UTF-8` is
 kept.

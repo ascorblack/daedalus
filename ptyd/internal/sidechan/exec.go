@@ -122,6 +122,7 @@ func (e *Exec) Run(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	for k, v := range r.Env {
 		extra[k] = v
 	}
+	term.SetPWD(extra, cwd)
 	env := dropVar(term.BuildEnv(e.environ, nil, extra, ""), "DAEDALUS_TERMINAL_ID")
 	path, ok := term.LookPath(r.Argv[0], env, cwd)
 	if !ok {

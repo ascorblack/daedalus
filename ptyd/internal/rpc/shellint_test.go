@@ -3,9 +3,13 @@
 package rpc_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -26,6 +30,9 @@ type shellSession struct {
 	f    *fixture
 	id   string
 	home string
+	// physicalCwd is a shell that does not take PWD from its environment and starts where the
+	// kernel says the process is: on macOS, the temporary directory with its links resolved.
+	physicalCwd bool
 }
 
 // shellHome is a home directory with the given files, and the listing it starts with.
@@ -68,7 +75,9 @@ func startShell(t *testing.T, f *fixture, id, program string, home string, env m
 	if _, err := exec.LookPath(program); err != nil {
 		t.Skipf("%s is not installed here; the gate's image has it", program)
 	}
-	all := map[string]string{"HOME": home}
+	// The shell's configuration is the test home's, also for the shells that look in
+	// XDG_CONFIG_HOME first (pwsh and fish): the runners set it to the runner's own.
+	all := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config")}
 	for k, v := range env {
 		all[k] = v
 	}
@@ -80,12 +89,38 @@ func startShell(t *testing.T, f *fixture, id, program string, home string, env m
 	if created.ShellIntegration != wantKind {
 		t.Fatalf("shell_integration %q, want %q", created.ShellIntegration, wantKind)
 	}
-	// The first prompt, before typing: PSReadLine loses a line typed while it starts.
+	// The first prompt, before typing: PSReadLine loses a line typed while it starts. Quiet output
+	// alone does not say the prompt is there: a PowerShell starting cold on a busy machine prints
+	// nothing for longer than any idle time, and a line typed into that silence reached the terminal
+	// before PSReadLine did, which took its Enter for a line feed and never ran it. So the prompt's
+	// own mark first, then the idle time in which the line editor takes the terminal over.
+	waitForPromptMark(t, f, id)
 	var idle struct {
 		Matched string `json:"matched"`
 	}
 	f.call(t, "terminal.wait_for", map[string]any{"id": id, "idle_ms": 500, "timeout_ms": 15000}, &idle)
 	return &shellSession{t: t, f: f, id: id, home: home}
+}
+
+// waitForPromptMark waits until the terminal's raw output holds the integration's first prompt mark.
+func waitForPromptMark(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var out output
+		f.call(t, "terminal.read_output", map[string]any{"id": id, "since_seq": 0, "max_bytes": 256 << 10}, &out)
+		raw, err := base64.StdEncoding.DecodeString(out.DataB64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte("\x1b]133;A;")) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never printed its first prompt: %q", id, raw)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *shellSession) info() term.Info {
@@ -143,7 +178,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // exercise is the scripted session every shell goes through: plain commands and their status, a
 // directory change, the user's alias, forged marks, a nested shell, a long command and its busy
 // flag, and the nonce kept from the programs the shell starts.
-func (s *shellSession) exercise(nested, innerEcho string) {
+func (s *shellSession) exercise(nested, nestedPrompt, innerEcho string) {
 	t := s.t
 	check := func(r term.CommandRecord, command string, code int) {
 		t.Helper()
@@ -157,7 +192,11 @@ func (s *shellSession) exercise(nested, innerEcho string) {
 	r := s.run("cd /tmp")
 	check(r, "cd /tmp", 0)
 	eventually(t, "the directory reported as /tmp", func() bool { return s.info().Cwd == "/tmp" })
-	if r.Cwd != s.f.dir {
+	started := s.f.dir
+	if s.physicalCwd {
+		started, _ = filepath.EvalSymlinks(started)
+	}
+	if r.Cwd != started {
 		t.Fatalf("a command's directory is the one it started in: %q", r.Cwd)
 	}
 	after := s.run("true")
@@ -186,6 +225,12 @@ func (s *shellSession) exercise(nested, innerEcho string) {
 	s.type_(nested)
 	var w struct {
 		Matched string `json:"matched"`
+	}
+	// The nested shell has no marks to wait for. Quiet output says it is at its prompt, except for a
+	// shell that is quiet for a long time while it starts (pwsh): there its prompt is waited for.
+	if nestedPrompt != "" {
+		s.f.call(t, "terminal.wait_for", map[string]any{"id": s.id, "regex": nestedPrompt, "scope": "output",
+			"since_seq": head, "timeout_ms": 60000}, &w)
 	}
 	s.f.call(t, "terminal.wait_for", map[string]any{"id": s.id, "idle_ms": 500, "timeout_ms": 15000}, &w)
 	s.type_(innerEcho)
@@ -260,7 +305,7 @@ PROMPT_COMMAND=user_prompt
 `})
 	before := listing(t, home)
 	s := startShell(t, f, "bash1", "bash", home, nil, "bash")
-	s.exercise("bash", "echo inner-$((6*7))")
+	s.exercise("bash", "", "echo inner-$((6*7))")
 
 	// The user's prompt command still ran, and saw the status of the command before it.
 	s.run("false")
@@ -289,7 +334,7 @@ alias ll='echo LL-ALIAS'
 trap 'USER_TRAP=$((USER_TRAP+1))' DEBUG
 `})
 	s := startShell(t, f, "bash2", "bash", home, map[string]string{"DAEDALUS_SI_BASH_MODE": "debug"}, "bash")
-	s.exercise("bash", "echo inner-$((6*7))")
+	s.exercise("bash", "", "echo inner-$((6*7))")
 	head := s.info().OutputSeq
 	s.type_(`echo "trap=$USER_TRAP"`)
 	var w struct {
@@ -353,23 +398,30 @@ PS1='%# '
 	})
 	before := listing(t, home)
 	s := startShell(t, f, "zsh1", "zsh", home, nil, "zsh")
-	s.exercise("zsh", "echo inner-$((6*7))")
+	s.exercise("zsh", "", "echo inner-$((6*7))")
 
 	// The user's files ran as their own (a typeset is not a function's local), their precmd hook
 	// still sees the status, and ZDOTDIR is theirs again (here: unset, as it started).
 	s.run("false")
 	head := s.info().OutputSeq
-	s.type_(`echo "env=$FROM_ZSHENV login=$FROM_ZLOGIN map=$USER_MAP[kept] pre=$USER_PRECMD zdotdir=${ZDOTDIR-unset}"`)
+	// A history file a system zshrc named (macOS's names ${ZDOTDIR:-$HOME}/.zsh_history, while
+	// ZDOTDIR is still the integration's) is where it would be without the daemon.
+	s.type_(`echo "env=$FROM_ZSHENV login=$FROM_ZLOGIN map=$USER_MAP[kept] pre=$USER_PRECMD zdotdir=${ZDOTDIR-unset} hist=${HISTFILE-unset}."`)
 	var w struct {
 		Matched string `json:"matched"`
 	}
-	f.call(t, "terminal.wait_for", map[string]any{"id": "zsh1", "regex": `env=1 login=1 map=yes pre=1 zdotdir=unset`,
-		"scope": "output", "since_seq": head, "timeout_ms": 10000}, &w)
+	f.call(t, "terminal.wait_for", map[string]any{"id": "zsh1", "regex": `env=1 login=1 map=yes pre=1 zdotdir=unset hist=(unset|` +
+		regexp.QuoteMeta(filepath.Join(home, ".zsh_history")) + `)\.`, "scope": "output", "since_seq": head, "timeout_ms": 10000}, &w)
 	if w.Matched != "regex" {
 		t.Fatalf("the user's zsh files: %q\n%s", w.Matched, f.waitOutput(t, "zsh1", ""))
 	}
 	s.end()
-	if after := listing(t, home); strings.Join(after, "\n") != strings.Join(before, "\n") {
+	// The history the system zshrc keeps in the home is not the integration's writing: the nested
+	// zsh of the session, a plain one, saves it there as it would anywhere.
+	withoutHistory := func(l []string) string {
+		return strings.Join(slices.DeleteFunc(l, func(p string) bool { return p == ".zsh_history" }), "\n")
+	}
+	if after := listing(t, home); withoutHistory(after) != withoutHistory(before) {
 		t.Fatalf("the home directory changed:\n%v\n%v", before, after)
 	}
 }
@@ -417,7 +469,7 @@ end
 	before := listing(t, home)
 	s := startShell(t, f, "fish1", "fish", home, map[string]string{"XDG_CONFIG_HOME": config,
 		"XDG_DATA_HOME": filepath.Join(xdg, "data"), "XDG_CACHE_HOME": filepath.Join(xdg, "cache")}, "fish")
-	s.exercise("fish", "echo inner-(math 6 x 7)")
+	s.exercise("fish", "", "echo inner-(math 6 x 7)")
 
 	// The user's prompt is kept and still sees the status of the command before it.
 	s.run("false")
@@ -443,7 +495,8 @@ func TestPwshIntegration(t *testing.T) {
 		".config/powershell/Microsoft.PowerShell_profile.ps1": "function ll { 'LL-ALIAS' }\n",
 	})
 	s := startShell(t, f, "pwsh1", "pwsh", home, map[string]string{"POWERSHELL_TELEMETRY_OPTOUT": "1"}, "pwsh")
-	s.exercise("pwsh -NoLogo", "echo inner-$(6*7)")
+	s.physicalCwd = true
+	s.exercise("pwsh -NoLogo", `PS [^\r\n]*> `, "echo inner-$(6*7)")
 	s.end()
 }
 

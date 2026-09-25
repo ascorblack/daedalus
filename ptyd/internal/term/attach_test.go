@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,18 +372,20 @@ func TestAttachGetsASnapshotWhenTheTailCannotBeUsed(t *testing.T) {
 func TestAStalledClientNeverHoldsTheProgram(t *testing.T) {
 	h := newAttachHarness(t, nil, nil)
 	const total = 16 << 20
-	// "y\n" reaches the ring as "y\r\n", after the echo of the Enter that starts it.
-	const final = 2 + total/2*3
-	term, _ := h.start(t, "stall", 1<<20, "sh", "-c", fmt.Sprintf("read x; yes | head -c %d; exec cat", total))
+	// The end of the output is found by a word after it, not by counting bytes: on the macOS runner the
+	// terminal was twice handed more of `yes` than `head -c` passes on (722 and 2505 bytes more, `y`
+	// lines to the end), so a count said the output was over while it was still arriving.
+	term, _ := h.start(t, "stall", 1<<20, "sh", "-c", fmt.Sprintf("read x; yes | head -c %d; printf OUTPUT-END; exec cat", total))
 	stalled, slow := attachClient(t, term, ClientOptions{Label: "stalled"}, wire.Attach{})
 	fastClient, fast := attachClient(t, term, ClientOptions{Label: "fast"}, wire.Attach{})
+	var ended atomic.Bool
 	fastAcks := make(chan struct{})
 	go func() {
 		defer close(fastAcks)
 		// The fast client acknowledges everything it gets, as a browser that keeps up does.
 		for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); {
 			fastClient.Frame(wire.EncodeAck(uint64(fastClient.sent.Load())))
-			if fastClient.sent.Load() >= final {
+			if ended.Load() && fastClient.sent.Load() >= term.OutputHead() {
 				return
 			}
 			time.Sleep(2 * time.Millisecond)
@@ -390,8 +393,19 @@ func TestAStalledClientNeverHoldsTheProgram(t *testing.T) {
 	}()
 	began := time.Now()
 	term.HumanInput([]byte("\r"))
-	waitHead(t, term, final)
-	t.Logf("%d bytes through the PTY in %s with a stalled client attached", final, time.Since(began))
+	for deadline := time.Now().Add(time.Minute); ; {
+		head := term.OutputHead()
+		tail, _, _, _ := term.ReadOutput(max(0, head-64), 64, false)
+		if bytes.HasSuffix(tail, []byte("OUTPUT-END")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the output never ended; head %d", head)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ended.Store(true)
+	t.Logf("%d bytes through the PTY in %s with a stalled client attached", term.OutputHead(), time.Since(began))
 	<-fastAcks
 	if _, data, n := stream(t, fast.all()); n != 1 || int64(len(data)) != term.OutputHead() {
 		t.Fatalf("the client that kept up holds %d of %d bytes after %d snapshots", len(data), term.OutputHead(), n)

@@ -12,3 +12,8 @@
 # A patch keeps the context lines of the file it patches, and a blank context line is a single
 # space: that is the format, not trailing whitespace.
 ptyd/libghostty/patches/*.patch -whitespace
+
+# The daemon's files are used byte for byte: its test data is compared with what its code produces,
+# and its shell scripts are compiled in and written out for the shells to read. A checkout on Windows,
+# where git turns line ends into CRLF by default, would change both, so nothing here is converted.
+ptyd/** -text

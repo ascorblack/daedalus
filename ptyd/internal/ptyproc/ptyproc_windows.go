@@ -137,6 +137,7 @@ func Start(spec Spec) (*Proc, error) {
 		console.Close()
 		return nil, fmt.Errorf("job object: %w", err)
 	}
+	processCtrlC()
 	pi, err := createInConsole(app, line, env, dir, hpc)
 	if err != nil {
 		job.Close()
@@ -189,6 +190,23 @@ func createInConsole(app, line *uint16, env []uint16, dir *uint16, hpc windows.H
 	}
 	return &pi, nil
 }
+
+// processCtrlC turns the processing of Ctrl+C back on in the daemon, once, before its first program
+// is created. Whether a process ignores Ctrl+C is inherited by every process it creates, and a process
+// created in a new process group starts ignoring it: the launcher starts the daemon that way (so that
+// it can be sent CTRL_BREAK_EVENT to stop), and so, without this, every program in every terminal
+// ignored the Ctrl+C typed into its console, and an interrupt reached nothing. The daemon itself then
+// takes a Ctrl+C in a console of its own as the interrupt it already stops on.
+func processCtrlC() {
+	ctrlC.Do(func() {
+		_, _, _ = procSetConsoleCtrlHandler.Call(0, 0)
+	})
+}
+
+var (
+	ctrlC                     sync.Once
+	procSetConsoleCtrlHandler = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCtrlHandler")
+)
 
 func closeHandles(hs ...windows.Handle) {
 	for _, h := range hs {

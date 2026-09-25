@@ -36,7 +36,7 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `cmd/ptyd-replay` | plays a terminal recording through the emulator and writes its snapshots, for the cross-check against xterm.js |
 | `libghostty` | the pinned sources of the screen emulator, the patch carried against them, and the script that builds it |
 | `internal/ptyproc` | PTY start, resize, signals, ending a process tree; on Windows a pseudoconsole (ConPTY) and a job object |
-| `internal/procstat` | the process table and the machine's memory and CPU, from `/proc` |
+| `internal/procstat` | the process table and the machine's memory and CPU, from `/proc` on Linux and the kernel's sysctl tables on macOS; `proctest` stands a `setsid` in for tests on a Mac |
 | `internal/events` | the ordered event log and its per-terminal rate limits |
 | `internal/sidechan` | `exec.run` and its program list, `fs.*` with its roots and deny list, `net.dial` |
 | `internal/hooks` | launches (token, overlay files, dial directory, ports), the loopback hook listener with held replies, `hook-post` and `hook` |

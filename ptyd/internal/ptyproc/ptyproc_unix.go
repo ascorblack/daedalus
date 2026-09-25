@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -39,6 +40,7 @@ func Start(spec Spec) (*Proc, error) {
 	if len(spec.Argv) == 0 {
 		return nil, errors.New("empty argv")
 	}
+	DefaultSignalsForChildren()
 	cmd := &exec.Cmd{Path: spec.Path, Args: spec.Argv, Dir: spec.Dir, Env: spec.Env}
 	size := &pty.Winsize{Cols: uint16(spec.Cols), Rows: uint16(spec.Rows), X: uint16(spec.PxW), Y: uint16(spec.PxH)}
 	master, err := pty.StartWithAttrs(cmd, size, &syscall.SysProcAttr{Setsid: true, Setctty: true})
@@ -54,6 +56,34 @@ func Start(spec Spec) (*Proc, error) {
 	}
 	return p, nil
 }
+
+// DefaultSignalsForChildren makes the programs the daemon starts from now on begin with the default
+// action for the hangup and the interrupt, whatever the daemon itself inherited.
+//
+// A signal ignored when a process starts stays ignored across exec, and a shell does not undo that
+// for its commands: bash leaves a signal that was ignored when it started ignored in everything it
+// runs. A daemon started in the background of a script (which ignores SIGINT in what it runs), under
+// nohup, or by a service manager that ignores SIGHUP would hand that on to every terminal: Ctrl+C
+// would interrupt nothing, and the hangup that ends a terminal would end nothing either. The Go
+// runtime keeps an inherited ignoring of exactly these two signals, and resets a signal it catches
+// to the default in a child; so catching them, and dropping what arrives, leaves the daemon as it
+// was and gives every program the defaults back.
+func DefaultSignalsForChildren() {
+	defaultSignals.Do(func() {
+		for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGINT} {
+			if signal.Ignored(sig) {
+				c := make(chan os.Signal, 1)
+				signal.Notify(c, sig)
+				go func() {
+					for range c {
+					}
+				}()
+			}
+		}
+	})
+}
+
+var defaultSignals sync.Once
 
 // pollable turns the master into a file the runtime's poller manages. The library's ioctls go
 // through Fd(), which switches the file to blocking mode for good; a blocking read cannot be
@@ -154,9 +184,9 @@ func (p *Proc) SignalForeground(sig syscall.Signal) error {
 }
 
 // KillTree ends the program and everything it started: SIGHUP to its group and the foreground
-// group, up to grace for the program to exit, then SIGKILL to the group, the session and (on Linux)
-// every process that descends from it or carries its tag. It returns once the program has been
-// reaped.
+// group, up to grace for the program to exit, then SIGKILL to the group, the session and (where the
+// process table is read: Linux and macOS) every process that descends from it or carries its tag.
+// It returns once the program has been reaped.
 func (p *Proc) KillTree(grace time.Duration) Exit {
 	p.killOnce.Lock()
 	defer p.killOnce.Unlock()

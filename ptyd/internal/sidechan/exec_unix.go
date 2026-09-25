@@ -16,6 +16,8 @@ type procGroup struct{ cmd *exec.Cmd }
 // newGroup starts the program as the leader of a new process group, so the whole group can be
 // ended together, and never with a controlling terminal of the daemon's.
 func newGroup(cmd *exec.Cmd) *procGroup {
+	// The hangup that ends the group on a timeout must not be ignored by the program.
+	ptyproc.DefaultSignalsForChildren()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return &procGroup{cmd: cmd}
 }

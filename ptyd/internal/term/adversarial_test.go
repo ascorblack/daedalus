@@ -12,11 +12,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
+	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
+	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan/scantest"
 )
@@ -81,13 +84,45 @@ func catThrough(t *testing.T, reg *Registry, id, path string, ringBytes int) ([]
 	return data, took, int64(heapInUse()) - int64(before), peakRSS() - baseRSS
 }
 
-func adversarialRegistry(t *testing.T) *Registry {
+// countedEvents is the daemon's own event pipeline, its per-terminal limits and its bounded log,
+// with a count of what was offered to it by kind. What the heap keeps is then what the daemon keeps:
+// a recorder of every event would itself grow with a stream of bells, which is what macOS turns
+// unread queries into (the terminal rings once for every byte its full input queue drops), where
+// Linux holds the writer back instead.
+type countedEvents struct {
+	inner Publisher
+	mu    sync.Mutex
+	n     map[string]int
+}
+
+func (c *countedEvents) Publish(typ, id string, data any) {
+	c.mu.Lock()
+	c.n[typ]++
+	c.mu.Unlock()
+	c.inner.Publish(typ, id, data)
+}
+
+func (c *countedEvents) Flush(id string) { c.inner.Flush(id) }
+
+// take returns the counts since the last call.
+func (c *countedEvents) take() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.n
+	c.n = map[string]int{}
+	return n
+}
+
+func adversarialRegistry(t *testing.T) (*Registry, *countedEvents) {
+	evlog := events.NewLog(config.EventRingSize)
+	evlog.SetMaxBytes(config.EventLogBytes)
+	counted := &countedEvents{inner: events.NewDebouncer(evlog, events.Policies), n: map[string]int{}}
 	reg := NewRegistry(Deps{
-		Emulator: production.Factory, Answer: answer.Reply, Events: &recorder{}, Clock: RealClock{},
+		Emulator: production.Factory, Answer: answer.Reply, Events: counted, Clock: RealClock{},
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), KillGrace: 100 * time.Millisecond,
 	}, 4)
 	t.Cleanup(func() { reg.Shutdown(100 * time.Millisecond) })
-	return reg
+	return reg, counted
 }
 
 // TestHostileOutputIsBounded sends the kinds of output that made emulators allocate without limit
@@ -113,7 +148,7 @@ func TestHostileOutputIsBounded(t *testing.T) {
 			return b.String() + "END"
 		}(),
 	}
-	reg := adversarialRegistry(t)
+	reg, counted := adversarialRegistry(t)
 	names := make([]string, 0, len(inputs))
 	for name := range inputs {
 		names = append(names, name)
@@ -141,8 +176,8 @@ func TestHostileOutputIsBounded(t *testing.T) {
 		if rss > 128<<20 {
 			t.Errorf("%s: resident memory peaked %d MB above the start", name, rss>>20)
 		}
-		t.Logf("%-18s %5d KB in, %6s, heap %+d KB, peak RSS %+d KB", name, len(inputs[name])>>10,
-			took.Round(time.Millisecond), growth>>10, rss>>10)
+		t.Logf("%-18s %5d KB in, %6s, heap %+d KB, peak RSS %+d KB, events %v", name, len(inputs[name])>>10,
+			took.Round(time.Millisecond), growth>>10, rss>>10, counted.take())
 	}
 }
 
@@ -158,7 +193,7 @@ func TestProbeCorpus(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatalf("no probes in %s", dir)
 	}
-	reg := adversarialRegistry(t)
+	reg, _ := adversarialRegistry(t)
 	var peak, peakRSSAbove int64
 	var slowest time.Duration
 	for i, path := range files {

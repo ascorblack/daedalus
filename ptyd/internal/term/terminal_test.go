@@ -18,6 +18,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
+	"github.com/ascorblack/daedalus/ptyd/internal/procstat/proctest"
 )
 
 type recorded struct {
@@ -227,6 +228,7 @@ func readPid(t *testing.T, path string) int {
 }
 
 func TestKillEndsEscapedDescendants(t *testing.T) {
+	proctest.Setsid(t)
 	h := newHarness(t)
 	// Three ways out of the terminal's process group: its own session (setsid), its own group
 	// (setpgid through job control), and its own session with a parent that has already exited, so
@@ -345,14 +347,22 @@ func TestResizeAndForegroundSignal(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := term.Signal(syscall.SIGINT, true); err != nil {
-		t.Fatal(err)
-	}
-	for term.Info().Busy {
+	// The job is in the foreground a moment before it is sleep: the shell hands the terminal to the
+	// new group while its child is still a copy of the shell, which has not yet put the interrupt
+	// back to the default. An interrupt in that moment is lost, as a Ctrl+C typed then would be (the
+	// macOS runner lands in it now and then), so it is sent again until the job ends, as a person
+	// would press it again.
+	var sent time.Time
+	for ; term.Info().Busy; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the interrupt did not end the foreground job")
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Since(sent) > 500*time.Millisecond {
+			if err := term.Signal(syscall.SIGINT, true); err != nil {
+				t.Fatal(err)
+			}
+			sent = time.Now()
+		}
 	}
 	if !term.Running() {
 		t.Fatal("the interrupt ended the shell")

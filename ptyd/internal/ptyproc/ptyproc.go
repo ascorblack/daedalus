@@ -15,7 +15,7 @@ type Spec struct {
 	Rows     int
 	PxW, PxH int
 	// Tag is an environment entry ("NAME=value") that every process of this terminal inherits. On
-	// Linux, KillTree also ends processes that carry it, which catches the ones that left the
+	// Linux and macOS, KillTree also ends processes that carry it, which catches the ones that left the
 	// session and the process tree (a daemonising `setsid` whose parent has already exited).
 	Tag string
 	// Wrapped is a program started inside bubblewrap: the process the PTY runs is bubblewrap, and

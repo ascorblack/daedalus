@@ -186,8 +186,10 @@ __dsi_prompt() {
         PS1="${PS1}\\[${__dsi_b}\\]"
     fi
     # HISTCMD here is the number the next command will get. (\! expanded with @P is not: inside
-    # the prompt commands it lags one behind once the history has entries.)
-    if [[ -n "${HISTCMD:-}" ]]; then
+    # the prompt commands it lags one behind once the history has entries.) Before 4.4 — the bash
+    # 3.2 every Mac still ships — HISTCMD inside the prompt commands is always 1, so every command
+    # after the first was reported without its text; there the number is counted from the history.
+    if [[ -n "${HISTCMD:-}" ]] && ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
         __dsi_next=$HISTCMD
     else
         __dsi_next=$(HISTTIMEFORMAT= builtin history 1)

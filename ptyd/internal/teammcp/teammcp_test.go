@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -73,7 +75,14 @@ type fixture struct {
 func listener(t *testing.T) *fixture {
 	t.Helper()
 	rec := &recorder{wake: make(chan struct{}, 1)}
-	reg, err := hooks.NewRegistry(t.TempDir(), "/opt/ptyd/ptyd", rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// The daemon's path must be a file: on Windows the hook command is a hard link to it, or a copy.
+	// Not the test binary, though: Windows refuses to delete a link to a program that is running,
+	// and the test's directory could not be removed. Nothing here runs the hook command.
+	daemon := filepath.Join(t.TempDir(), "ptyd.exe")
+	if err := os.WriteFile(daemon, []byte("stands in for the daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := hooks.NewRegistry(t.TempDir(), daemon, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

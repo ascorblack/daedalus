@@ -141,6 +141,18 @@ func BuildEnv(inherited []string, strip []string, extra map[string]string, termi
 	return out
 }
 
+// SetPWD makes PWD name dir, the directory a program is started in. Inherited, PWD would be the
+// daemon's own directory, which a program that reads the variable takes for its own. And a shell
+// that finds no PWD naming its directory works one out from the kernel, which gives the physical
+// path: on macOS a terminal opened in /var/folders/... or /tmp then says it is in /private/var/...
+// or /private/tmp. A shell keeps a PWD only after checking it names the directory it is in, so the
+// path asked for is what it shows. Windows has no such variable.
+func SetPWD(extra map[string]string, dir string) {
+	if runtime.GOOS != "windows" {
+		extra["PWD"] = dir
+	}
+}
+
 // LookPath resolves a program name against the PATH of the environment it will run in, not the
 // daemon's own: the two differ as soon as the host passes a PATH for a launch.
 func LookPath(name string, env []string, dir string) (string, bool) {
