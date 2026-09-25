@@ -178,7 +178,7 @@ def desktop(page: Page, lang: str, unhandled: Unhandled) -> None:
 
     # The request is answered where it was asked: the staff member's session, inside the project.
     need.get_by_role("button", name=words["answer"]).click()
-    page.wait_for_url(f"**/app/project/{PID}/s/sess-ira**")
+    page.wait_for_url(f"**/app/orchestration/project/{PID}/s/sess-ira**")
 
 
 def phone(page: Page, lang: str, unhandled: Unhandled) -> None:

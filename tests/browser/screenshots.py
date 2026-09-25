@@ -1451,8 +1451,8 @@ def run_focus() -> int:
 
 
 def run_main() -> int:
-    """The main orchestrator's chat: the projects' questions grouped by project, the work it handed
-    out, and the reports it was woken with (``ONLY=main``)."""
+    """The main orchestrator's chat, orchestration mode's home: the projects' questions grouped by
+    project, the work it handed out, and the reports it was woken with (``ONLY=main``)."""
     OUT.mkdir(parents=True, exist_ok=True)
     main = MainStub(LANG)
 
@@ -1472,8 +1472,14 @@ def run_main() -> int:
         desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', '0'); } catch (e) {}")
         page = desk.new_page()
         page.route("**/api/**", handle)
-        shot(page, "main", "main", wait=".main-board .ask-card", settle=900)
+        shot(page, "main", "orchestration", wait=".main-board .ask-card", settle=900)
         desk.close()
+        # On a phone the main chat keeps the app's tabs under it: they hold the switch between the modes.
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page = phone.new_page()
+        page.route("**/api/**", handle)
+        shot(page, "phone-main", "orchestration", wait=".main-board .ask-card", settle=900)
+        phone.close()
         browser.close()
     return UNHANDLED.report()
 

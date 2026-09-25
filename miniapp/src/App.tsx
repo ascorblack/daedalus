@@ -118,9 +118,9 @@ export function App() {
   const wide = useWide();
   // Which mode the shell is in: the route's, where the route belongs to one, and otherwise the one the
   // operator was last in — Terminals, Settings and the other shared screens keep the column they were
-  // opened from. Remembered per device, so a reload or a bare /app opens the same mode again.
-  // A bare /app is the landing, not a choice of Agents: it is sent on to the remembered mode below,
-  // and must not overwrite that memory on its way through.
+  // opened from. Remembered per device, so a reload or a bare /app opens the same mode again. A bare
+  // /app is the landing, not a choice of Agents: it is sent on to the remembered mode (see
+  // migrateLegacyLocation) and must not overwrite that memory on its way through.
   const landing = /^\/app\/?$/.test(window.location.pathname);
   const routeMode = landing ? null : modeOf(route);
   const [lastMode, setLastMode] = useState<Mode>(storedMode);
