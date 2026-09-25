@@ -183,6 +183,7 @@ class Team:
             capacity=self.capacity,
             stagger=lambda: self.manager.config.staff.launch_stagger_seconds,
             on_failure=self._launch_failed,
+            reuses=self._reuses,
         )
         self._pause_commits: set[asyncio.Task[None]] = set()
         self.review: Any = None
@@ -358,18 +359,94 @@ class Team:
         return None
 
     async def _free(self, entry: Entry) -> str | None:
-        session = await self.manager.staff.live(entry.staff_id)
-        if session is None:
+        """Why the member cannot take the entry now, or ``None``.
+
+        Busy means the member's live session is working a task that is still being worked. It used to
+        mean any live session whose status was one of the active ones, and a command-line session
+        keeps the task it was started for and a status its screen last gave: three members idle at
+        their prompts, their scouting tasks done an hour before, sat as "working on" those tasks
+        while four new tasks waited for them and nothing was delivered.
+        """
+        live = await self._live_member(entry.staff_id)
+        if live is None:
             return None
+        live = await self.settle_stale(live)
+        session = live.session
+        current = await self.task(session.task_id) if session.task_id and session.task_id != entry.task_id else None
         if session.status in ACTIVE_STATUSES:
-            return f"{entry.staff_name} is still working" + (f" on {session.task_id}" if session.task_id else "")
+            # A Daedalus member's active status is a run of this host in progress: real work, with
+            # or without a task, and a start would be refused until it ends.
+            if (current is not None and current.status not in SETTLED_TASK) or session.kind != "cli":
+                return f"{entry.staff_name} is still working" + (f" on {session.task_id}" if session.task_id else "")
+            if not await self._reuses(entry):
+                return f"{entry.staff_name} is finishing a turn; the next task starts when it ends"
         if session.pause_requested:
             return f"{entry.staff_name} is paused; a message or a new assignment resumes it"
-        if session.task_id and session.task_id != entry.task_id:
-            current = await self.task(session.task_id)
-            if current is not None and current.status == "doing":
-                return f"{entry.staff_name}'s task {current.id} is still in doing; it has to be reported done, moved or released first"
+        if current is not None and current.status == "doing":
+            return f"{entry.staff_name}'s task {current.id} is still in doing; it has to be reported done, moved or released first"
+        runtime = self.runtimes.get(live.staff.harness)
+        continuity = getattr(runtime, "continuity", None)
+        if session.kind == "cli" and continuity is not None and continuity(live) == "attaching":
+            # Launching afresh now would end a session the host is about to take up again.
+            return f"{entry.staff_name}'s session is being taken up again after the restart"
         return None
+
+    async def _live_member(self, staff_id: str) -> LiveSession | None:
+        member = await self.manager.staff.get(staff_id)
+        return await self.live_of(member) if member is not None else None
+
+    async def _reuses(self, entry: Entry) -> bool:
+        """Whether the entry would go into its member's live session as the next message."""
+        live = await self._live_member(entry.staff_id)
+        task = await self.task(entry.task_id)
+        if live is None or task is None:
+            return False
+        project = await self.manager.projects.get(live.staff.project_id)
+        if project is None:
+            return False
+        try:
+            folder = self.folder_for(project, live.staff, task)
+        except StaffError:
+            return False
+        return self._continues(live, folder)
+
+    def _continues(self, live: LiveSession, folder: ProjectFolder) -> bool:
+        """Whether a member's live command-line session takes a task in ``folder`` as a message.
+
+        Only a session this host holds, past its start and not failed, and standing where the task
+        is worked: a CLI cannot change the folder it runs in, and a task in a worktree of its own
+        needs a CLI started in that worktree. Anything else is launched afresh, as before.
+        """
+        member, session = live.staff, live.session
+        runtime = self.runtimes.get(member.harness)
+        continuity = getattr(runtime, "continuity", None)
+        if continuity is None or session.kind != "cli" or session.status == "error":
+            return False
+        if session.folder_id != folder.id or session.worktree_path or (member.isolation == "worktree" and folder.is_git):
+            return False
+        return bool(continuity(live) == "live")
+
+    async def settle_stale(self, live: LiveSession, now: datetime | None = None) -> LiveSession:
+        """Settle a command-line session whose row says it works on a task that is over.
+
+        A CLI's status is what its hooks and screen last said, and nothing said anything after an
+        earlier host marked three idle members ``no_signal``: their rows stayed grey, "silent" on
+        the health line, and counted as busy, long after their tasks were done. A row that says
+        ``no_signal`` while its task is handed in or over, or ``working`` so with no signal for the
+        silence time, is idle: whatever the CLI does now is not the task's work. A ``working`` row
+        that still hears from its CLI is left alone: it may be a follow-up on the same task.
+        """
+        session = live.session
+        if session.kind != "cli" or session.status not in ("working", "no_signal"):
+            return live
+        task = await self.task(session.task_id) if session.task_id else None
+        if task is not None and task.status not in SETTLED_TASK:
+            return live
+        if session.status == "working" and _age_seconds(session.last_signal_at, now or datetime.now(UTC)) < self.manager.config.harness.no_signal_after_s:
+            return live
+        why = f"its task {task.id} is {task.status}" if task is not None else "it has no task"
+        await self.ingress.status(live, "idle", detail=f"{why}; nothing is being worked")
+        return (await self.live(live.id)) or live
 
     async def _launch(self, entry: Entry) -> None:
         member = await self.member(entry.staff_id)
@@ -435,10 +512,17 @@ class Team:
         folder = self.folder_for(project, member, task)
         previous = await self.live_of(member)
         if previous is not None:
+            previous = await self.settle_stale(previous)
+            if self._continues(previous, folder):
+                handed = await self._hand_over(previous, task, folder, by=by)
+                if handed is not None:
+                    return handed
+                previous = await self.live_of(member)
+        if previous is not None:
             if previous.session.status in ACTIVE_STATUSES:
                 raise StaffBusy(f"{member.name} is still working")
-            # Sessions are short and identity is long: the next task is a new session, and the idle
-            # one it replaces ends here.
+            # A Daedalus member's next task is a new session, and the idle one it replaces ends
+            # here; so is a command-line member's whose session cannot take it (see _continues).
             await self._end(previous, "next task", stop=True)
         predecessor = next((s for s in await self.manager.staff.sessions(member.id, limit=20) if s.task_id == task.id), None)
         worktree: Worktree | None = None
@@ -503,6 +587,43 @@ class Team:
         if first_id:
             await self.ingress.message_state(first_id, "submitted")
         return LiveSession(member, refreshed or session)
+
+    async def _hand_over(self, live: LiveSession, task: BoardTask, folder: ProjectFolder, *, by: str) -> LiveSession | None:
+        """Give a live command-line session its next task as its next message.
+
+        The member keeps its terminal, its conversation and what it learned of the folder; the brief
+        goes through the delivery pipeline like any message, so it waits for the turn to end, and its
+        receipt is the proof it arrived. The session's row moves to the task and the task to doing
+        before the message is queued, for the same reason as at a start: a quick Report(done) must
+        find them there. ``None`` when the message could not be queued; the session is then ended
+        and the caller launches afresh.
+        """
+        member = live.staff
+        predecessor = next((s for s in await self.manager.staff.sessions(member.id, limit=20) if s.task_id == task.id and s.id != live.id), None)
+        session = await self.manager.staff.retask(live.id, task.id)
+        if session is None:
+            return None
+        if session.pause_requested:
+            await self.manager.staff.request_pause(session.id, False)  # a new assignment resumes a paused member
+        live = LiveSession(member, session)
+        text = prompts.STAFF_NEXT_TASK + self.first_message(member, task, folder, None, predecessor, by)
+        try:
+            message_id = (await self.manager.staff.add_message(member.id, text, origin=by, mode="queue", staff_session_id=session.id)).id
+        except StaffError:
+            message_id = ""  # a brief longer than a message may be; it is still sent, just not receipted
+        await self._move_task(task, "doing", actor=by, assignee=member.id, folder_id=folder.id)
+        origin = "orchestrator" if by == "orchestrator" else "operator"
+        try:
+            receipt = await self.runtime(member).send(live, OutgoingMessage(message_id, text, "queue", origin))  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001 — a session that cannot take a message is replaced, not left holding the task
+            logger.warning("%s's session could not take task %s: %s", member.name, task.id, exc)
+            if message_id:
+                await self.ingress.message_state(message_id, "failed", str(exc)[:500])
+            await self._end(live, f"could not take task {task.id}: {exc}"[:500], stop=True)
+            return None
+        if message_id:
+            await self.ingress.message_state(message_id, receipt.state, receipt.error)
+        return (await self.live(session.id)) or live
 
     def permission_level(self, project: Project) -> str:
         """The permission level a command-line member starts with. ``full`` autonomy starts it exactly
@@ -1036,8 +1157,10 @@ class Team:
                     await self.seen(live)
         elif event.type == "task.moved" and event.payload.get("to") in FINISHED_TASK:
             await self._task_finished(str(event.payload.get("task_id") or ""))
-        elif event.type == "task.moved" and event.payload.get("to") == "todo" and event.project_id:
-            self.queue.pump_soon(event.project_id)  # a dependency finished: a waiting task may go
+        elif event.type == "task.moved" and event.payload.get("to") in ("todo", "review") and event.project_id:
+            # To todo: a dependency finished, and a waiting task may go. To review: the member handed
+            # its task in, and its next one may go now rather than at the next tick.
+            self.queue.pump_soon(event.project_id)
         elif event.type in ("staff.status", "terminal.exited"):
             if event.type == "terminal.exited" or event.payload.get("status") in ("exited", "idle", "turn_done_unseen", "error"):
                 self.queue.pump_soon(event.project_id if event.type == "staff.status" else None)
@@ -1071,6 +1194,7 @@ class Team:
         request the orchestrator has left too long goes to the operator."""
         now = now or datetime.now(UTC)
         config = self.manager.config.staff
+        await self.settle(now)
         for session in await self.manager.staff.all_live():
             if _age_seconds(session.last_signal_at, now) > config.silence_minutes * 60 and await self.silence_watched(session):
                 live = await self.live(session.id)
@@ -1083,6 +1207,28 @@ class Team:
             if ask is not None:
                 await self.escalate(ask, why=f"the orchestrator left it unanswered for {config.ask_escalate_minutes} minutes")
         await self.queue.pump()
+
+    async def settle(self, now: datetime | None = None, *, screens: tuple[str, ...] = ("no_signal",)) -> int:
+        """Settle the live command-line sessions whose rows are stale: by their tasks
+        (``settle_stale``), then by their screens for the rows still in ``screens``. At start the
+        host reads the screens of ``working`` rows too, since the previous host may have gone in the
+        middle of a turn that ended while it was away; the ticker reads only the grey ones, which
+        nothing else would ever look at again. Returns how many rows moved."""
+        moved = 0
+        for session in await self.manager.staff.all_live():
+            if session.kind != "cli" or session.status not in ("working", "no_signal"):
+                continue
+            live = await self.live(session.id)
+            if live is not None and (await self.settle_stale(live, now)).session.status != session.status:
+                moved += 1
+        for runtime in {id(r): r for r in self.runtimes.values()}.values():
+            settle_idle = getattr(runtime, "settle_idle", None)
+            if settle_idle is not None:
+                try:
+                    moved += await settle_idle(screens)
+                except Exception:  # noqa: BLE001 — one runtime's screens must not stop the tick
+                    logger.exception("settling the idle sessions of %s failed", getattr(runtime, "kind", "a runtime"))
+        return moved
 
     async def loop(self) -> None:
         await asyncio.sleep(FIRST_PUMP_SECONDS)

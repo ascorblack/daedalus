@@ -375,6 +375,53 @@ async def test_silence_is_watched_only_while_a_turn_runs_on_a_task_still_being_w
         await manager.close()
 
 
+async def test_a_task_handed_in_or_done_frees_its_member_at_once(settings: Settings, db: Database, tmp_path: Path) -> None:
+    """A command-line member whose session still carries a task that is over, with a status its screen
+    last gave, is not busy: the task that waits for it starts as soon as the old one is done or in
+    review. Three members once sat "busy with another task" for an hour, their tasks done and their
+    CLIs idle, while four new tasks waited for them."""
+    manager, team, _runtime, project = await fake_team(settings, db, tmp_path, capacity=Capacity())
+    try:
+        cli = FakeStaffRuntime(kind="claude")
+        team.runtimes["claude"] = cli
+        cleo = await manager.staff.hire(project.id, name="Cleo", harness="claude", isolation="shared")
+        scouting, next_up, third = [await board_task(manager, project, title) for title in ("Scouting", "Next up", "Third")]
+        assert (await team.assign(cleo, scouting))["state"] == "started"
+        live = await team.live_of(cleo)
+        assert live is not None and live.session.kind == "cli"
+        await team.ingress.status(live, "no_signal", detail="read from the screen")
+        waits = await team.assign(cleo, next_up)
+        assert (waits["state"], waits["reason"]) == ("queued", "busy"), "the scouting task is still being worked"
+
+        task = await team.task(scouting)
+        assert task is not None
+        await team._move_task(task, "done", actor="operator")
+
+        async def started(task_id: str) -> bool:
+            return (await task_row(manager, task_id))["status"] == "doing"
+
+        async with asyncio.timeout(10):
+            while not await started(next_up):
+                await asyncio.sleep(0.02)
+        assert [r.task.id for r in cli.started] == [scouting, next_up]
+        after = await manager.staff.live(cleo.id)
+        assert after is not None and after.task_id == next_up and after.status == "starting"
+        assert team.queue.queue(project.id) == []
+
+        # The same when the member hands its task in for review, from a row still grey.
+        await team.ingress.status((await team.live_of(cleo)) or live, "no_signal")
+        assert (await team.assign(cleo, third))["reason"] == "busy"
+        handed = await team.task(next_up)
+        assert handed is not None
+        await team._move_task(handed, "review", actor="staff")
+        async with asyncio.timeout(10):
+            while not await started(third):
+                await asyncio.sleep(0.02)
+        assert [r.task.id for r in cli.started] == [scouting, next_up, third]
+    finally:
+        await manager.close()
+
+
 async def test_silence_goes_grey_and_a_request_left_too_long_goes_to_the_operator(settings: Settings, db: Database, tmp_path: Path) -> None:
     manager, team, runtime, project = await fake_team(settings, db, tmp_path)
     try:

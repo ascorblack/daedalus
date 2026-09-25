@@ -135,6 +135,17 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
             return
         if count:
             logger.info("%d %s staff session(s) taken up from the previous host", count, runtime.kind)
+        # Once, now that the sessions are held again: rows the previous host left stale (grey over an
+        # idle prompt, or working on a task that is over) are settled before the queue looks at them,
+        # so the members' waiting tasks go to them rather than wait behind a status nobody corrects.
+        try:
+            settled = await team.settle(screens=("working", "no_signal"))
+        except Exception:  # noqa: BLE001 — the ticker settles them later
+            logger.exception("settling the %s sessions taken up failed", runtime.kind)
+            return
+        if settled:
+            logger.info("%d %s staff session(s) settled after the restart", settled, runtime.kind)
+        team.queue.pump_soon()
 
     async def keeper() -> None:
         # Cancelled at shutdown like every background task; the CLIs keep running in their daemons.

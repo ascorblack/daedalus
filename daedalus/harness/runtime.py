@@ -352,6 +352,9 @@ class CliStaffRuntime:
         self._by_terminal: dict[str, CliSession] = {}
         self._unsubscribe = terminals.subscribe(self._on_terminal_event)
         self._background: set[asyncio.Task[Any]] = set()
+        self.taken_up = False
+        """Whether ``reconcile`` has run: until then a live session this runtime does not hold may
+        still be one the previous host left, about to be attached, rather than one that is gone."""
 
     def close(self) -> None:
         """Let go of the sessions without touching them: the CLIs keep running in the daemon for the
@@ -914,16 +917,48 @@ class CliStaffRuntime:
     async def _reconcile_screen(self, session: CliSession) -> None:
         """Two readings ``reconcile_gap_ms`` apart. A turn end is inferred only from two identical
         screens that both show an idle composer: one reading can catch a TUI between two frames."""
+        verdict = await self._screen_verdict(session)
+        await self._apply(session, StaffEvent(EventKind.RECONCILED, _now(), {"screen": verdict.value}, launch_id=session.launch.launch_id))
+
+    async def _screen_verdict(self, session: CliSession) -> ScreenClass:
         gap = self.config().reconcile_gap_ms / 1000
         first = await session.term.screen()
         await asyncio.sleep(gap)
         second = await session.term.screen()
         one, two = self.adapter.classify_screen(first), self.adapter.classify_screen(second)
         if one is ScreenClass.IDLE_COMPOSER:
-            verdict = ScreenClass.IDLE_COMPOSER if two is ScreenClass.IDLE_COMPOSER and first == second else ScreenClass.UNKNOWN
-        else:
-            verdict = one if one == two else ScreenClass.UNKNOWN
-        await self._apply(session, StaffEvent(EventKind.RECONCILED, _now(), {"screen": verdict.value}, launch_id=session.launch.launch_id))
+            return ScreenClass.IDLE_COMPOSER if two is ScreenClass.IDLE_COMPOSER and first == second else ScreenClass.UNKNOWN
+        return one if one == two else ScreenClass.UNKNOWN
+
+    async def settle_idle(self, statuses: tuple[str, ...] = (StaffState.WORKING.value, StaffState.NO_SIGNAL.value)) -> int:
+        """Read the screen of every held session whose row says ``statuses`` and settle the ones
+        whose CLI sits idle at its prompt; returns how many were settled.
+
+        The quiet watch only reads a screen after ``no_signal_after_s`` with no output, and only moves
+        a session when the verdict changes something. A row left ``no_signal`` by an earlier host, or
+        by a check that ran before a fix, therefore stayed grey for hours in front of an idle CLI —
+        three members sat "silent 164 min" with their tasks long done. This is the one-shot that
+        settles such rows, at start and from the team's ticker. Only an idle verdict is acted on: a
+        busy or unreadable screen is left to the quiet watch, which knows how long it has been quiet.
+        """
+        settled = 0
+        for session in list(self.sessions.values()):
+            if session.finished or session.stopping:
+                continue
+            live = await self.lookup(session.staff_session_id)
+            if live is None or live.session.status not in statuses:
+                continue
+            try:
+                verdict = await self._screen_verdict(session)
+            except TerminalError as exc:
+                logger.info("the screen of %s could not be read to settle it: %s", session.staff_session_id, exc.message)
+                continue
+            if verdict is not ScreenClass.IDLE_COMPOSER:
+                continue
+            await self._apply(session, StaffEvent(EventKind.RECONCILED, _now(), {"screen": verdict.value}, launch_id=session.launch.launch_id))
+            after = await self.lookup(session.staff_session_id)
+            settled += after is not None and after.session.status != live.session.status
+        return settled
 
     # -- the team tools --------------------------------------------------------------------------
 
@@ -1018,6 +1053,22 @@ class CliStaffRuntime:
         if session is None or session.finished:
             raise RuntimeError(f"{live.staff.name}'s {self.adapter.capabilities.label} is not running here")
         return session
+
+    def continuity(self, live: LiveSession) -> str:
+        """Whether a live session can take its member's next task as a message: ``live`` when this
+        runtime holds it, ready and running; ``attaching`` while it may yet be taken up (a host that
+        has not finished its reconcile, a CLI still at its readiness gate); ``gone`` otherwise, and
+        the member is then launched afresh."""
+        session = self.sessions.get(live.id)
+        if session is None:
+            return "gone" if self.taken_up else "attaching"
+        if session.finished or session.stopping or session.exited.is_set():
+            return "gone"
+        if live.session.status == StaffState.STARTING.value:
+            # Still at its readiness gate. Not ``ready``: a session taken up after a restart never
+            # sees that event again, and it is as ready as it was when the host went.
+            return "attaching"
+        return "live"
 
     async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt:
         """Queue a message for the session's delivery worker and say so. The worker reports every
@@ -1212,6 +1263,12 @@ class CliStaffRuntime:
         attached: the adapter re-dials what it needs, the daemon replays the hook posts made while the
         host was away, and the machine goes on from the status in the row.
         """
+        try:
+            return await self._reconcile(wait=wait)
+        finally:
+            self.taken_up = True
+
+    async def _reconcile(self, *, wait: float) -> int:
         attached = 0
         for launch in await self.store.open_launches():
             if launch.harness != self.kind or launch.staff_session_id in self.sessions:

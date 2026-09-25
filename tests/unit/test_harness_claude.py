@@ -255,6 +255,13 @@ async def test_a_turn_ending_on_a_question_is_routed_as_needing_input_and_a_repo
         trust(s)
         ada = await started(s, "echo:Should I price it in euros or dollars?")
         await s.status_event(ada, "turn_done_unseen")
+
+        async def reported() -> bool:
+            return bool(await s.events("staff.report", staff_id=ada.id))
+
+        # The turn's status is published before its implicit report, in the same step: under load
+        # the test once read the reports between the two and found none.
+        await eventually(reported, "the implicit report")
         [report] = await s.events("staff.report", staff_id=ada.id)
         assert (report.payload["kind"], report.payload["implicit"]) == ("needs_input", True)
         bo = await started(s, "report:checkpoint:menu drafted;echo:done for now", name="Bo")
@@ -548,6 +555,103 @@ async def test_a_pause_asked_for_during_a_turn_takes_effect_when_it_ends(setting
 
         await eventually(settled, "the pause took effect at the turn's end")
         assert (await s.team.queue._free(SimpleNamespace(staff_id=ada.id, staff_name="Ada", task_id="other"))).endswith("a message or a new assignment resumes it")  # type: ignore[arg-type]
+
+
+async def test_the_next_task_goes_into_the_idle_session_as_its_next_message(settings: Settings, db: Database) -> None:
+    """A member idle at its prompt takes its next task in the session it has: the brief with its four
+    parts is delivered as the next message, with receipts, and the row and the board move to the new
+    task. No second launch, no second terminal, no wait for one."""
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:the scouting is done")
+        await s.status_event(ada, "turn_done_unseen")
+        first = await s.session_row(ada)
+        scouting = await s.team.task(first.task_id)
+        assert scouting is not None
+        await s.team._move_task(scouting, "done", actor="operator")
+
+        next_id = await s.task("Second page;echo:the second page is done;")
+        assert (await s.team.assign(ada, next_id))["state"] == "started"
+        row = await s.session_row(ada)
+        assert (row.id, row.terminal_id, row.task_id) == (first.id, first.terminal_id, next_id)
+        assert (await s.team.task(next_id)).status == "doing"  # type: ignore[union-attr]
+        brief = (await s.manager.staff.messages(ada.id))[0]
+        assert brief.staff_session_id == first.id and f"[task {next_id} · assigned by the operator]" in brief.text
+        assert all(f"{part}:" in brief.text for part in ("Objective", "Deliverable", "Boundaries", "Done when"))
+        await message(s, brief.id, "acknowledged")
+
+        async def second_turn_done() -> bool:
+            return (await s.statuses(ada)).count("turn_done_unseen") == 2
+
+        await eventually(second_turn_done, "the second task's turn ended")
+        submitted = [e["text"] for e in log(s, "submitted")]
+        assert len(submitted) == 2 and submitted[1].startswith("Your previous task is closed.") and f"[task {next_id}" in submitted[1]
+        # One session and one launch all along: nothing was started a second time.
+        assert (await s.statuses(ada)).count("starting") == 1
+        assert [launch.staff_session_id for launch in await HarnessStore(db).open_launches()] == [first.id]
+        assert len([e for e in log(s, "hook") if e["name"] == "SessionStart"]) == 1
+        reports = await s.events("staff.report", staff_id=ada.id)
+        assert reports[-1].payload["task_id"] == next_id and "the second page is done" in reports[-1].payload["text"]
+
+
+async def test_after_a_restart_the_next_task_waits_for_the_session_to_be_taken_up_not_relaunched(settings: Settings, db: Database) -> None:
+    """What a deploy does to members idle at their prompts with tasks waiting: until the new host has
+    taken their sessions up, the tasks wait (a launch now would end the session about to be attached);
+    once it has, the grey rows are settled and each member gets one task, in its own session, the
+    rest waiting in order."""
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:the scouting is done")
+        await s.status_event(ada, "turn_done_unseen")
+        first = await s.session_row(ada)
+        await db.execute("UPDATE board_tasks SET status = 'done' WHERE id = ?", (first.task_id,))
+        await db.execute("UPDATE staff_sessions SET status = 'no_signal' WHERE id = ?", (first.id,))
+        one, two = await s.task("One;echo:one is done;"), await s.task("Two;echo:two is done;")
+        runtime = s.restart_runtime(ClaudeCodeAdapter())
+        waits = await s.team.assign(ada, one)
+        assert (waits["state"], waits["reason"]) == ("queued", "busy") and "taken up again" in waits["detail"]
+        assert (await s.team.assign(ada, two))["state"] == "queued"
+        assert await runtime.reconcile(wait=5) == 1
+        await s.team.settle(screens=("working", "no_signal"))
+        await s.team.queue.pump(s.project.id)
+        row = await s.session_row(ada)
+        assert (row.id, row.task_id) == (first.id, one)
+        assert any((e.payload["previous"], e.payload["status"]) == ("no_signal", "idle") for e in await s.events("staff.status", staff_id=ada.id))
+        [waiting] = s.team.queue.queue(s.project.id)
+        assert (waiting["task_id"], waiting["reason"]) == (two, "busy")
+        brief = (await s.manager.staff.messages(ada.id))[0]
+        await message(s, brief.id, "acknowledged")
+        assert (await s.statuses(ada)).count("starting") == 1
+
+
+async def test_a_session_left_grey_is_settled_by_its_task_or_its_idle_screen(settings: Settings, db: Database) -> None:
+    """Rows an earlier host left ``no_signal`` in front of an idle CLI are settled on the next tick:
+    to idle when the task is over (the member reported long ago; nobody needs waking), to a finished
+    turn when the screen shows the prompt and the task is still being worked. The health line then
+    stops calling the member silent."""
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:the scouting is done")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+        await db.execute("UPDATE staff_sessions SET status = 'no_signal', last_signal_at = '2026-09-25T10:58:21+00:00' WHERE id = ?", (row.id,))
+        assert (await s.team.health(await s.team.live(row.id))).silent is True  # type: ignore[arg-type]
+
+        # The task is still in doing and Claude sits at its prompt: a finished turn, read from the screen.
+        await s.team.tick()
+        assert (await s.session_row(ada)).status == "turn_done_unseen"
+        assert (await s.events("staff.status", staff_id=ada.id))[-1].payload["detail"] == "read from the screen"
+
+        # The task is done: the grey row is idle, whatever the screen, and the health line is quiet.
+        await db.execute("UPDATE staff_sessions SET status = 'no_signal' WHERE id = ?", (row.id,))
+        await db.execute("UPDATE board_tasks SET status = 'done' WHERE id = ?", (row.task_id,))
+        await s.team.tick()
+        settled = await s.session_row(ada)
+        assert settled.status == "idle"
+        last = (await s.events("staff.status", staff_id=ada.id))[-1].payload
+        assert (last["previous"], last["status"]) == ("no_signal", "idle") and f"its task {row.task_id} is done" in last["detail"]
+        health = await s.team.health(await s.team.live(row.id))  # type: ignore[arg-type]
+        assert (health.silent, health.silent_s) == (False, None)
 
 
 async def test_an_answer_leaves_the_session_waiting_on_what_is_still_open(settings: Settings, db: Database) -> None:

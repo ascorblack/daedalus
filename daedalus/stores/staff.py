@@ -846,6 +846,15 @@ class StaffStore:
         )
         return await self.session(staff_session_id)
 
+    async def retask(self, staff_session_id: str, task_id: str) -> StaffSession | None:
+        """Give a live session its next task; ``None`` when the session is no longer live. A
+        command-line member keeps its terminal and its conversation from one task to the next, and
+        everything that reads the session's task — its requests, its reports, the silence watch —
+        follows the row, so the row is what moves."""
+        await self._db.execute("UPDATE staff_sessions SET task_id = ? WHERE id = ? AND ended_at IS NULL", (task_id, staff_session_id))
+        session = await self.session(staff_session_id)
+        return session if session is not None and session.live else None
+
     async def end_session(self, staff_session_id: str, reason: str) -> StaffSession | None:
         """End a live session; ``None`` when it was not live. The row stays, for the chain and the spend."""
         at = _now()

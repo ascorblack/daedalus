@@ -240,6 +240,12 @@ Done when: {done_when}
 Folder: {folder}{branch}{predecessor}"""
 """The first message of a staff member's session: the task's four-part brief and where to work."""
 
+STAFF_NEXT_TASK = (
+    "Your previous task is closed. Here is your next one, in this same session: what you learned "
+    "stays useful, the task is new. Report on it with the team tools as before.\n\n"
+)
+"""Put before the brief when a command-line member takes its next task in the session it already has."""
+
 STAFF_POLICY_HINT = (
     "This request has gone to your orchestrator. Do not retry the call until a message says it was granted; "
     "meanwhile continue with the rest of the task, or end your turn if nothing else can be done without it."

@@ -775,7 +775,11 @@ cannot get ready — signed out, or stuck on a screen it does not recognise with
 shows as an error with that screen, its terminal left open for you. A working CLI that goes quiet has
 its screen read: an idle prompt seen twice ends the turn, anything less shows as silence, never as
 a failure. Its team tools post to the terminal service's hook listener and are answered there. The
-CLIs keep running when the host restarts, and the host takes them up again where they were.
+CLIs keep running when the host restarts, and the host takes them up again where they were. A member
+is busy only while its session works a task that is still being worked: once the task is done, in
+review or dropped, its next task goes into the same session as its next message, when the session
+stands in the task's folder, and starts a new session otherwise. A row left grey over an idle prompt,
+or working on a task that is over, is settled at start and by the team's ticker.
 
 Claude Code is the first CLI that works as staff. Each launch gets its own settings overlay (hooks
 through the terminal service, the team tools allowed), a short statement of how to talk to the team

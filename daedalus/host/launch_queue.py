@@ -151,6 +151,7 @@ class LaunchQueue:
         stagger: Callable[[], float],
         clock: Callable[[], float] = time.monotonic,
         on_failure: Callable[[Entry, BaseException], Awaitable[None]] | None = None,
+        reuses: Callable[[Entry], Awaitable[bool]] | None = None,
     ) -> None:
         self._concurrency = concurrency
         self._active = active
@@ -161,6 +162,11 @@ class LaunchQueue:
         self._stagger = stagger
         self._clock = clock
         self._on_failure = on_failure
+        self._reuses = reuses
+        """Whether an entry goes to its member's live session as a message rather than a launch: it
+        then opens no terminal and starts no process, so neither the machine's cap nor the spacing
+        of launches applies to it. Without this, a member idle at its prompt waited behind other
+        members' launches for a place it would never take."""
         self._entries: dict[str, list[Entry]] = {}
         self._last_launch: dict[str, float] = {}
         self._terminal_launches = 0
@@ -257,19 +263,20 @@ class LaunchQueue:
             if active >= concurrency:
                 self._wait(entry, "project", f"{active} of the project's {concurrency} staff slots are working")
                 continue
-            if entry.terminal:
+            reuse = self._reuses is not None and await self._reuses(entry)
+            if entry.terminal and not reuse:
                 machine = await self._machine(entry.env)
                 if machine is not None:
                     self._wait(entry, *machine)
                     continue
             since = self._clock() - self._last_launch.get(project_id, float("-inf"))
-            if launched_here or since < stagger:
+            if not reuse and (launched_here or since < stagger):
                 delay = stagger if launched_here else stagger - since
                 self._wait(entry, "stagger", f"starts in about {max(1, round(delay))} s; launches of a project are spaced {stagger:g} s apart")
                 self._wake_in(project_id, delay)
                 break
-            await self._start(entry)
-            launched_here = entry.started
+            await self._start(entry, reuse=reuse)
+            launched_here = launched_here or (entry.started and not reuse)
             if entry.started:
                 active += 1
         # Whatever the loop did not reach waits behind the entry that stopped it.
@@ -295,12 +302,14 @@ class LaunchQueue:
     def _wait(self, entry: Entry, reason: WaitReason, detail: str) -> None:
         entry.reason, entry.detail = reason, detail
 
-    async def _start(self, entry: Entry) -> None:
+    async def _start(self, entry: Entry, *, reuse: bool = False) -> None:
         items = self._entries.get(entry.project_id, [])
         if entry in items:
             items.remove(entry)
-        self._last_launch[entry.project_id] = self._clock()
-        if entry.terminal:
+        launches = entry.terminal and not reuse
+        if not reuse:
+            self._last_launch[entry.project_id] = self._clock()
+        if launches:
             self._terminal_launches += 1
         try:
             await self._launch(entry)
@@ -315,7 +324,7 @@ class LaunchQueue:
                 except Exception:  # noqa: BLE001
                     logger.exception("reporting a failed launch failed")
         finally:
-            if entry.terminal:
+            if launches:
                 self._terminal_launches -= 1
 
     def _wake_in(self, project_id: str, delay: float) -> None:
