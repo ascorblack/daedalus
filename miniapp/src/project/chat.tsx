@@ -1,12 +1,13 @@
 // The orchestrator's chat, where it differs from any other: the project's events it was woken with are
-// cards, not a system note to unfold; what it did to the project is a line per step, in the open,
-// because that is what the operator reads the chat for; and a question it put to the operator is a
-// card answered right there — one of its options, or words of the operator's own.
+// cards, not a system note to unfold; what it did to the project is named in the project's words
+// ("Task created · Photos"), inside the turn's worked group like any other agent's steps; and a
+// question it put to the operator is a card answered right there, outside that group — one of its
+// options, or words of the operator's own.
 
 import { createContext, useContext, useState } from "react";
 import { api, ApiError, type Ask } from "../api";
 import { plural, t } from "../i18n";
-import { Icon } from "../icons";
+import { Icon, type IconName } from "../icons";
 import { invalidate } from "../store";
 import type { ToolItem } from "../turns";
 import { parseEvents } from "../turns";
@@ -46,27 +47,39 @@ export function EventCard({ text }: { text: string }) {
   );
 }
 
-/** The orchestrator's steps in a turn, one line each, with a card under each question it asked. */
-export function StepLines({ items }: { items: ToolItem[] }) {
+const STEP_ICONS: Record<string, IconName> = {
+  Folders: "folder", Tasks: "board", Journal: "journal", Brief: "pen", Team: "bots", Hire: "bots", StaffEdit: "bots", Dismiss: "bots",
+  Assign: "forward", Tell: "forward", ReadStaff: "file", Answer: "check", Interrupt: "stop", Pause: "stop", Release: "stop",
+  Peek: "eye", WakeMe: "clock", Watch: "eye", Unwatch: "eye", AskOperator: "question", ProjectReport: "journal",
+};
+
+/**
+ * How one of the orchestrator's own tool calls reads in its turn's worked group: the step in the
+ * project's words and what it acted on. It replaces the tool's name and arguments there rather than
+ * adding a second line elsewhere: the steps were once drawn both inside the group (as raw calls) and
+ * again under it (as these lines), and the operator read every action twice.
+ */
+export function stepDescription(item: ToolItem): { verb: string; detail: string; icon: IconName } | null {
+  if (!isOrchestratorStep(item.name)) return null;
+  return { verb: t(`focus.step.${stepKey(item.name, item.args)}`), detail: stepDetail(item.name, item.args), icon: STEP_ICONS[item.name] ?? "conductor" };
+}
+
+/** The questions the orchestrator put to the operator in a turn, each a card to answer. They stay
+ *  outside the folded worked group: a question behind a fold is a question nobody answers. */
+export function AskCards({ items }: { items: ToolItem[] }) {
   const focus = useFocusChat();
-  const steps = items.filter((item) => isOrchestratorStep(item.name));
-  if (!focus || steps.length === 0) return null;
+  if (!focus) return null;
+  const asks = items
+    .filter((item) => item.name === "AskOperator")
+    .map((item) => {
+      const short = askIdOf(item.result);
+      return short ? focus.asks.get(short) : undefined;
+    })
+    .filter((ask): ask is Ask => !!ask && ask.origin === "orchestrator");
+  if (asks.length === 0) return null;
   return (
-    <div className="step-lines">
-      {steps.map((item) => {
-        const short = askIdOf(item.result);
-        const ask = short ? focus.asks.get(short) : undefined;
-        return (
-          <div key={item.id} className="step-wrap">
-            <div className={`step-line ${item.error ? "failed" : ""} ${item.running ? "running" : ""}`}>
-              <span className="step-verb">{t(`focus.step.${stepKey(item.name, item.args)}`)}</span>
-              {stepDetail(item.name, item.args) && <span className="step-detail mono truncate">{stepDetail(item.name, item.args)}</span>}
-              {item.error && !item.running && <span className="step-failed">{t("focus.step.failed")}</span>}
-            </div>
-            {ask && ask.origin === "orchestrator" && <AskCard ask={ask} />}
-          </div>
-        );
-      })}
+    <div className="step-asks">
+      {asks.map((ask) => <AskCard key={ask.id} ask={ask} />)}
     </div>
   );
 }

@@ -5,8 +5,8 @@ What is checked is what the operator relies on. In orchestration mode's column a
 is one entry that says what goes on inside and how many requests wait, and it opens focus mode; the
 column then holds only the project — the way back, the orchestrator, the team with each member's state and,
 for a launch that waits, why; the one-off helpers, the terminals and the project's pages. The
-orchestrator's chat shows the events it was woken with as a card, its steps as lines, and its question
-as a card answered right there, with one of its options or words of the operator's own. The panel
+orchestrator's chat shows the events it was woken with as a card, each of its steps once in its turn's
+worked group, and its question as a card answered right there, with one of its options or words of the operator's own. The panel
 beside it has the project's tabs; beside a staff member's session it has the session's tabs too, and a
 header with the member's controls and the messages sent to it. The journal pages back, and takes a
 note. A project without an orchestrator offers to switch one on, and says what it costs. "All
@@ -124,7 +124,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     # One wake-up and one watch switched on; the watch that switched itself off is not counted.
     expect(side.locator(".focus-row", has_text=words["wakeups"]).locator(".focus-row-meta")).to_have_text("2")
 
-    # The orchestrator's chat: the events as a card, the steps as lines, the question as a card.
+    # The orchestrator's chat: the events as a card, the steps in its turns, the question as a card.
     chat = page.locator(".chat.in-project.orchestrator")
     expect(chat).to_be_visible()
     card = chat.locator(".event-card")
@@ -134,11 +134,25 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(card.locator(".event-line.ok")).to_contain_text("finished a turn")
     expect(card.locator(".event-line.warn").first).to_contain_text("needs permission")
     assert "ReadStaff" not in card.inner_text()
-    steps = chat.locator(".step-line")
+    # Each of its tool calls is shown once: a step in the project's words inside the turn's worked
+    # group, and nowhere else. The folded line names the steps the same way, not by the tool's name.
+    calls = sum(len(m["tool_calls"]) for m in focus.details["orch-bakery"]["messages"])
+    heads = chat.locator(".thinking-head")
+    expect(heads).to_have_count(2)
+    expect(heads.first.locator(".families")).to_contain_text(words["created"])
+    assert "Tasks" not in heads.first.inner_text(), heads.first.inner_text()
+    expect(chat.locator(".act")).to_have_count(0)
+    for head in heads.all():
+        head.click()
+    steps = chat.locator(".activity .act.step")
+    expect(steps).to_have_count(calls)
+    expect(chat.locator(".act")).to_have_count(calls)
     expect(steps.filter(has_text=words["folder"])).to_contain_text("/home/operator/work/bakery-bot")
     expect(steps.filter(has_text=words["created"])).to_have_count(2)
     expect(steps.filter(has_text=words["assigned"])).to_contain_text("Max")
     expect(steps.filter(has_text=words["watch"])).to_have_count(1)
+    expect(steps.filter(has_text=words["asked"])).to_have_count(1)
+    assert chat.get_by_text(words["created"], exact=True).count() == 2, "a step is drawn once, inside its group"
     expect(chat.locator("textarea")).to_have_attribute("placeholder", words["placeholder"])
     ask = chat.locator(".ask-card[data-ask='q4r8tz']")
     expect(ask).to_be_visible()

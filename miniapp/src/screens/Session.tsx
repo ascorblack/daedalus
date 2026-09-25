@@ -31,7 +31,7 @@ import { endsTerminals, TerminalButton, TerminalDock, TerminalFull, TerminalShee
 import { insideTerminal } from "../terminal/keys";
 import { tabsFor } from "../panel";
 import { useAsks } from "../project/data";
-import { EventCard, FocusChat, FocusChatContext, StepLines, useFocusChat } from "../project/chat";
+import { AskCards, EventCard, FocusChat, FocusChatContext, stepDescription, useFocusChat } from "../project/chat";
 import { StaffHeader, StaffMessages, useMember } from "../project/staff";
 import { BriefPage, FoldersPage, WakeupsPage } from "../project/pages";
 import { ProjectBoard } from "../board/ProjectBoard";
@@ -1358,6 +1358,15 @@ function FallbackChip({ fallback }: { fallback: ModelFallback }) {
   );
 }
 
+/** The orchestrator's folded line: its steps in the project's words, each named once ("Task created,
+ *  Assigned, Asked you"), then whatever else it called in the ordinary words. */
+function stepLine(items: Activity[]): string {
+  const tools = items.filter((a): a is ToolItem => a.kind === "tool");
+  const verbs = [...new Set(tools.map((item) => stepDescription(item)?.verb).filter((v): v is string => !!v))];
+  const rest = familyLine(tools.filter((item) => !stepDescription(item)));
+  return [verbs.join(", "), rest.charAt(0).toLowerCase() + rest.slice(1)].filter(Boolean).join(", ");
+}
+
 /** The folded line's summary of the work: "read 2 files, ran 3 commands and 4 more". */
 function familyLine(items: Activity[]): string {
   const { named, more } = familyCounts(items);
@@ -1428,7 +1437,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   const settled = !!seq && !!onTurnAction && !live;
   const inbound = turn.user?.origin?.startsWith("inbound:") ? turn.user.origin.slice(8) : "";
   const artifacts = live ? [] : producedFiles(turn.activity);
-  const families = open ? "" : familyLine(turn.activity);
+  const families = open ? "" : focusChat?.orchestrator ? stepLine(turn.activity) : familyLine(turn.activity);
   const copyLink = async () => {
     const url = `${window.location.origin}${pathFor("agents", sessionId)}#m${seq}`;
     toast((await copyText(url)) ? t("turn.link.copied") : url);
@@ -1479,7 +1488,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
-      {focusChat?.orchestrator && <StepLines items={turn.activity.filter((a): a is ToolItem => a.kind === "tool")} />}
+      {focusChat?.orchestrator && <AskCards items={turn.activity.filter((a): a is ToolItem => a.kind === "tool")} />}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && (turn.media?.length ? (
         <div className={`answer answer-with-media ${live ? "streaming" : ""}`}>
@@ -1759,6 +1768,7 @@ function describe(item: ToolItem, workspace?: string): { verb: string; family: s
 }
 
 function ActivityList({ items, compact, onRetry }: { items: Activity[]; compact: boolean; onRetry?: (seq: number) => void }) {
+  const steps = !!useFocusChat()?.orchestrator;
   const out: ReactElement[] = [];
   let i = 0;
   while (i < items.length) {
@@ -1785,6 +1795,13 @@ function ActivityList({ items, compact, onRetry }: { items: Activity[]; compact:
       if (group.length > 1) out.push(<SummaryGroup key={i} group={group} />);
       else out.push(<SummaryRow key={i} text={it.text} reason={it.reason} />);
       i = j;
+      continue;
+    }
+    // The orchestrator's own steps are one row each, named in the project's words: "Task created ·
+    // Photos" twice says more than "Called Tasks 2 times".
+    if (steps && stepDescription(it)) {
+      out.push(<ToolRow key={it.id} item={it} />);
+      i++;
       continue;
     }
     // Group consecutive tools of one family (Read/Read/Read → "Read 3 files").
@@ -1877,7 +1894,8 @@ const FILE_TOOLS = ["Read", "Write", "Edit", "ImageView", "SendFile"];
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
   const { id: sessionId, workspace, preview, openJobs } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:tool:${item.id}`, false);
-  const d = describe(item, workspace);
+  const step = useFocusChat()?.orchestrator ? stepDescription(item) : null;
+  const d = step ?? describe(item, workspace);
   const expanded = open || (item.running && item.name === "Exec");
   // The file a step names is the evidence: it opens where the answer's citations open.
   const path = FILE_TOOLS.includes(item.name) && typeof item.args.path === "string" ? workspaceRelative(item.args.path, workspace) : null;
@@ -1888,7 +1906,7 @@ function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
   };
   return (
     <div className={`act-wrap ${nested ? "nested" : ""}`}>
-      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)} role="button" aria-expanded={expanded} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}>
+      <div className={`act ${step ? "step" : ""} ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)} role="button" aria-expanded={expanded} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}>
         <Icon name={d.icon} size={16} />
         <span className="verb">{d.verb}</span>
         {d.detail && (path ? (
