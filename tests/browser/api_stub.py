@@ -277,7 +277,7 @@ def expect_app(base: str) -> None:
 
 
 
-__all__ = ["CAPABILITIES", "CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
+__all__ = ["CAPABILITIES", "CATALOG", "HarnessesStub", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -1075,6 +1075,104 @@ CAPABILITIES: dict[str, dict] = {
     "pi": _caps("pi", "pi", "extension", "bridge extension", "native", "none", "extension", ("0.84.2", "0.88.0"), 0),
     "grok": _caps("grok", "Grok Build", "files", "session files", "cancel_and_send", "keys", "none", ("1.0.40", "1.1.0"), 1),
 }
+
+
+class HarnessesStub:
+    """The harness manager's routes (``api_harnesses.py``) over the five CLIs of M7, kept between
+    requests: a check moves ``checked_at``, an update or install leaves the row busy with its
+    operation, an update of a CLI staff work on is refused with 409 and who they are, as the host does.
+
+    The container has Claude Code current and signed in with its agents, Codex, Grok Build and OpenCode
+    each one version behind, and pi not installed (npm is there: Node is); Grok's last self-check
+    failed at ``ready``. The host environment has Claude Code only. ``unverified(harness)`` moves a CLI
+    past its tested range without a self-check on the new version, for the version guard.
+    """
+
+    def __init__(self, *, working: dict[str, list[dict]] | None = None, host: bool = True) -> None:
+        now = datetime.now(UTC)
+        self.checked = (now - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.working = working if working is not None else {"codex": [{"harness": "codex", "staff_id": "st-max", "name": "Max", "project": "Bakery 2.0", "project_id": "b4k3ry20f0c5", "env": "container", "staff_session_id": "ss-max", "status": "turn_done_unseen"}]}
+        self.host = host
+        self.posted: list[tuple[str, dict]] = []
+        passed = {"ok": True, "version": "", "duration_ms": 8200, "at": self.checked, "steps": [{"name": n, "ok": True, "skipped": False, "detail": d, "duration_ms": 900} for n, d in (("version", ""), ("supported", "within the tested versions"), ("signin", "signed in"), ("launch", ""), ("ready", "SessionStart"), ("team", "team tools said hello"), ("deliver", "one line acknowledged"), ("reply", "Report came through the team channel"), ("exit", "exit code 0"))]}
+        failed = {"ok": False, "version": "1.0.40", "duration_ms": 30100, "at": self.checked, "steps": [{"name": "version", "ok": True, "skipped": False, "detail": "1.0.40", "duration_ms": 300}, {"name": "launch", "ok": True, "skipped": False, "detail": "", "duration_ms": 600}, {"name": "ready", "ok": False, "skipped": False, "detail": "no SessionStart within 30 s", "duration_ms": 30000}]}
+
+        def entry(harness: str, version: str, latest: str, login: str, detail: str, agents: list[dict], models: list[str], check: dict | None = None, **over: object) -> dict:
+            caps = CAPABILITIES[harness]
+            installed = bool(version)
+            row = {
+                "env": "container", "harness": harness, "label": caps["label"], "installed": installed, "installed_version": version, "latest_version": latest, "install_method": "npm" if harness in ("codex", "opencode", "pi") else "native",
+                "binary_path": "", "logged_in": login, "login_detail": detail, "agents": agents, "models": models, "modes": [], "efforts": [], "profiles": [],
+                "self_check": ({**check, "version": check.get("version") or version} if check else {}), "checked_at": self.checked, "latest_checked_at": self.checked, "error": "",
+                "status_channel": caps["status_channel"], "status_channel_label": caps["status_channel_label"], "steer": caps["steer"], "tested_versions": caps["tested_versions"],
+                "tested": installed, "supported": installed, "adapter": True, "version_guard": "", "update_available": installed and latest != version, "self_check_ok": check["ok"] if check else None,
+                "operation": None, "installable": not installed, "install_problem": "", "can_sign_in": True, "unavailable": "" if installed else f"{caps['label']} is not installed in the container environment",
+            }
+            row.update(over)
+            return row
+
+        claude_agents = [{"name": "default", "source": "builtin"}, {"name": "frontend-developer", "source": "user"}, {"name": "code-reviewer", "source": "project"}, {"name": "copywriter", "source": "project"}]
+        self.rows: dict[str, list[dict]] = {
+            "container": [
+                entry("claude", "2.1.281", "2.1.281", "yes", "subscription · max", claude_agents, ["opus", "sonnet", "haiku", "fable"], passed),
+                entry("codex", "0.155.1", "0.156.1", "yes", "ChatGPT", [{"name": "reviewer", "source": "user"}, {"name": "api", "source": "project"}, {"name": "tester", "source": "project"}], ["gpt-5.2-codex", "gpt-5.2-codex-mini", "o5"], passed),
+                entry("opencode", "1.18.23", "1.18.32", "yes", "keys: 2", [{"name": n, "source": "builtin"} for n in ("build", "plan", "general", "review", "docs")], [f"provider/model-{i}" for i in range(42)], passed),
+                entry("pi", "", "0.87.1", "unknown", "", [], [], None),
+                entry("grok", "1.0.40", "1.0.41", "yes", "signed in", [{"name": "coder", "source": "user"}, {"name": "writer", "source": "user"}], ["grok-4-fast", "grok-4"], failed, unavailable="Grok Build's last self-check failed at ready: no SessionStart within 30 s"),
+            ],
+            "host": [
+                {**entry("claude", "2.1.270", "2.1.281", "yes", "subscription · max", claude_agents[:2], ["opus", "sonnet", "haiku"], passed), "env": "host"},
+                *[{**entry(h, "", "", "unknown", "", [], [], None), "env": "host", "unavailable": ""} for h in ("codex", "opencode", "pi", "grok")],
+            ],
+        }
+        self.node = {"container": {"installed": True, "version": "24.21.0", "path": "/root/.local/bin/node", "pinned": "24.21.0", "current": True, "checked_at": self.checked}, "host": {"installed": True, "version": "22.20.0", "path": "/usr/bin/node", "pinned": "24.21.0", "current": False, "checked_at": self.checked}}
+
+    def unverified(self, harness: str, version: str) -> None:
+        row = next(r for r in self.rows["container"] if r["harness"] == harness)
+        row.update(installed_version=version, latest_version=version, tested=False, version_guard="unverified", update_available=False)
+
+    def screen(self, env: str) -> dict:
+        rows = self.rows[env]
+        return {"env": env, "environments": ["container", "host"] if self.host else ["container"], "rows": rows, "node": self.node[env], "checked_at": self.checked, "updates": sum(1 for r in rows if r["update_available"])}
+
+    def answer(self, method: str, path: str, query: str, body: dict | None) -> tuple[int, object] | None:
+        if not path.startswith("/api/harnesses") or path == "/api/harnesses/catalog" or path.endswith("/catalog"):
+            return None
+        params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+        env = (body or {}).get("env") or params.get("env") or "container"
+        if env not in self.rows:
+            return 422, {"detail": "env is container or host"}
+        if method == "GET" and path == "/api/harnesses":
+            return 200, self.screen(env)
+        if method != "POST":
+            return None
+        self.posted.append((path, dict(body or {})))
+        if path == "/api/harnesses/check":
+            self.checked = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for row in self.rows[env]:
+                row["checked_at"] = self.checked
+            return 200, {"env": env, "rows": self.rows[env], "node": self.node[env]}
+        if path == "/api/harnesses/update-all":
+            return 202, {"state": "started"}
+        if path == "/api/harnesses/node/install":
+            return (400, {"detail": "Node is installed only in the container"}) if env == "host" else (202, {"state": "started"})
+        parts = path.split("/")
+        row = next((r for r in self.rows[env] if len(parts) == 5 and r["harness"] == parts[3]), None)
+        if row is None:
+            return 404, {"detail": "no such harness"}
+        if parts[4] == "update":
+            working = [s for s in self.working.get(row["harness"], []) if s["env"] == env]
+            if working:
+                names = ", ".join(f"{s['name']} ({s['project']})" for s in working)
+                return 409, {"detail": f"{row['label']} is running staff in the {env} environment: {names}. Release them or wait for them to finish, then update.", "staff": working}
+            row["operation"] = {"kind": "update", "started_at": self.checked, "terminal_id": None, "target": row["latest_version"]}
+            return 202, {"state": "started", "operation": row["operation"]}
+        if parts[4] == "install":
+            row["operation"] = {"kind": "install", "started_at": self.checked, "terminal_id": f"inst-{row['harness']}"[:12], "target": row["latest_version"]}
+            return 202, {"state": "started", "operation": row["operation"]}
+        if parts[4] == "login-terminal":
+            return 200, {"terminal_id": f"login-{row['harness']}"[:12], "argv": [row["harness"], "login"]}
+        return None
 
 
 FOCUS_WORDS: dict[str, dict[str, str]] = {

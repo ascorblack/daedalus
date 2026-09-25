@@ -33,6 +33,9 @@ const SAME_IN_BOTH = [
   "comp.name.node",
   "comp.name.ripgrep",
   "fmt.cron.utc",
+  // A CLI's own words for the account it is signed in with, and a dash where it is not installed.
+  "harness.signin.absent",
+  "harness.signin.as",
   "lang.name.en",
   "lang.name.ru",
   "login.title",
@@ -235,6 +238,10 @@ describe("the keys the code asks for", () => {
       ["staff.mode.", ["feed", "terminal"]],
       ["perm.by.", ["operator", "orchestrator", "terminal"]],
       ["harness.channel.", ["hooks", "app_server", "sse", "extension", "files"]],
+      // The Harnesses screen names a row's button, its version marker and an operation by code.
+      ["harness.state.", ["current", "needsnode", "absent", "install", "signin", "update"]],
+      ["harness.mark.", ["unsupported", "unverified", "verified"]],
+      ["harness.op.", ["check", "update", "install", "signin"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

@@ -37,6 +37,7 @@ from api_stub import (  # noqa: E402
     FILE_TEXT,
     BoardStub,
     FocusStub,
+    HarnessesStub,
     TeamStub,
     Unhandled,
     expect_app,
@@ -643,6 +644,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
         return respond(route, SILENCE, content_type="audio/wav")
+    if rel.startswith("/api/harnesses"):
+        posted = json.loads(request.post_data or "{}") if request.method == "POST" and request.post_data else None
+        harnesses = HARNESSES.answer(request.method, rel, urlsplit(url).query, posted)
+        if harnesses is not None:
+            return respond(route, harnesses[1], status=harnesses[0])
     team = TEAM.answer(request.method, rel, urlsplit(url).query, None) or TEAM_BOARD.answer(request.method, rel, urlsplit(url).query, None)
     if team is not None:
         return respond(route, team[1], status=team[0])
@@ -864,6 +870,7 @@ STT = {
 
 
 UNHANDLED = Unhandled()
+HARNESSES = HarnessesStub()
 
 # ---- the shots ----------------------------------------------------------------------------
 
@@ -1537,6 +1544,31 @@ def staff_stand(context):  # type: ignore[no-untyped-def]
     return page, pid
 
 
+def open_harness_rows(page: Page) -> None:
+    """Claude Code's row unfolded to its agents, as M7 draws it."""
+    page.locator(".harness-row[data-harness='claude'] .harness-name").click()
+    page.wait_for_selector(".harness-row-details .harness-agent", timeout=5000)
+
+
+def run_harnesses() -> int:
+    """The Harnesses screen (M7) on a desktop and on a phone (``ONLY=harnesses``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = desk.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "harnesses", "harnesses", wait=".harness-table .harness-row", before=open_harness_rows, settle=500)
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page = phone.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "phone-harnesses", "harnesses", wait=".harness-cards .harness-card", settle=500)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run_staff() -> int:
     """A command-line member's own view (M5): the terminal with the column beside it on a desktop,
     the Feed on a desktop, and the Feed with the request above the composer on a phone (``ONLY=staff``)."""
@@ -1650,11 +1682,12 @@ def run() -> int:
     notifications = run_notifications()
     phone = run_phone()
     staff = run_staff()
-    return run_focus() or notifications or phone or staff
+    harnesses = run_harnesses()
+    return run_focus() or notifications or phone or staff or harnesses
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
