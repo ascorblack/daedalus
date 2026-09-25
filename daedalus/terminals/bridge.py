@@ -10,16 +10,25 @@ environment and none of it is needed.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
-from daedalus.terminals.model import EnvUnavailable, ExecResult, Forbidden, InvalidRequest, NotFound, TerminalError
+from daedalus.terminals.model import (
+    EnvUnavailable,
+    ExecResult,
+    FileChunk,
+    Forbidden,
+    InvalidRequest,
+    NotFound,
+    TerminalError,
+)
 
 if TYPE_CHECKING:
     from daedalus.terminals.service import Terminals
 
 HOST = "host"
+_T = TypeVar("_T")
 GIT_CHECK_TIMEOUT = 20.0
 
 
@@ -71,6 +80,32 @@ class HostBridge:
             return await self._service().exec_run(env, argv, cwd=cwd, env_vars=env_vars, timeout=timeout, stdin=stdin)
         except EnvUnavailable as exc:
             raise ConnectionError(f"the host terminal bridge is not available: {exc.message}") from None
+        except TerminalError as exc:
+            raise OSError(exc.message) from None
+
+    async def stat(self, path: str) -> dict[str, Any]:
+        """``{exists, type, size, …}`` of a path under the host's roots (the host project folders)."""
+        return await self._side(lambda service: service.fs_stat(HOST, path))
+
+    async def list_dir(self, path: str, *, limit: int) -> dict[str, Any]:
+        """``{entries: [{name, type, size, mtime}], truncated}`` of a directory under the host's roots;
+        what is on the daemon's deny list is left out."""
+        return await self._side(lambda service: service.fs_list(HOST, path, limit=limit))
+
+    async def read(self, path: str, *, offset: int, max_bytes: int) -> FileChunk:
+        """Up to ``max_bytes`` of a file under the host's roots, from ``offset``."""
+        return await self._side(lambda service: service.fs_read(HOST, path, offset=offset, max_bytes=max_bytes))
+
+    async def _side(self, call: Callable[[Terminals], Awaitable[_T]]) -> _T:
+        """A file read on the host, with the errors the readers tell apart: the bridge being down is a
+        ``ConnectionError``, a path that is not there a ``FileNotFoundError``, and any other refusal
+        (outside the roots, on the deny list) an ``OSError`` with the daemon's words."""
+        try:
+            return await call(self._service())
+        except EnvUnavailable as exc:
+            raise ConnectionError(f"the host terminal bridge is not available: {exc.message}") from None
+        except NotFound as exc:
+            raise FileNotFoundError(exc.message) from None
         except TerminalError as exc:
             raise OSError(exc.message) from None
 

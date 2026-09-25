@@ -49,7 +49,16 @@ from daedalus.staff_runtime import (
     UsageSnapshot,
 )
 from daedalus.stores.projects import Project, ProjectFolder
-from daedalus.stores.staff import ACTIVE_STATUSES, HARNESS_NAMES, Ask, Staff, StaffBusy, StaffError, StaffSession
+from daedalus.stores.staff import (
+    ACTIVE_STATUSES,
+    HARNESS_NAMES,
+    Ask,
+    Staff,
+    StaffBusy,
+    StaffError,
+    StaffSession,
+    daedalus_cannot_reach,
+)
 from daedalus.terminals.bridge import HostBridge
 
 if TYPE_CHECKING:
@@ -387,6 +396,10 @@ class Team:
         project = await self.project(member.project_id)
         folder = self.folder_for(project, member, task)
         terminal = member.harness != "daedalus"
+        if not terminal and not folder.local(self.manager.projects.local_env):
+            # Said before anything is queued: a Daedalus member given a host task from the container
+            # would otherwise wait in the queue for a start that can never happen.
+            raise StaffError(f"{member.name} cannot work on task {task.id}: {daedalus_cannot_reach(folder.path, folder.env, self.manager.projects.local_env)}")
         if not (terminal and self.capacity() is None):
             # Without the terminals service a command-line member waits in the queue with that reason
             # rather than being refused: the service may be starting.

@@ -114,6 +114,17 @@ def _json(text: str | None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def daedalus_cannot_reach(path: Any, env: str, local_env: str) -> str:
+    """Why a Daedalus staff member cannot work in a folder of the other environment, and who can."""
+    where = "on the host" if env == "host" else "in the container"
+    runs = "inside the agent's container" if local_env == "container" else "on this machine, outside the container"
+    terminal = "a host terminal" if env == "host" else "a container terminal"
+    return (
+        f"{path} is {where}, and a Daedalus staff member runs {runs}, where that folder cannot be reached; "
+        f"hire a command-line member ({', '.join(n for k, n in HARNESS_NAMES.items() if k != 'daedalus')}) instead, which works in {terminal}"
+    )
+
+
 def cap_notes(text: str, limit: int) -> str:
     """Notes within ``limit`` characters, dropping the oldest lines first.
 
@@ -592,6 +603,12 @@ class StaffStore:
         folder = folders[folder_id] if folder_id is not None else next(iter(folders.values()), None)
         if folder is not None:
             where = "on the host" if folder["env"] == "host" else "in the container"
+            if folder["env"] != env and harness == "daedalus":
+                # A Daedalus member is a session of this process and cannot be given a working
+                # directory it cannot reach: its first turn would be refused, and a workspace of its
+                # own would hold none of the project's files. The member who can work there is a
+                # command-line one in a terminal of that environment.
+                raise StaffError(daedalus_cannot_reach(folder["path"], folder["env"], self.local_env))
             if folder["env"] != env:
                 raise StaffError(f"{folder['path']} is {where}, and this staff member would run {'on the host' if env == 'host' else 'in the container'}")
             if out["isolation"] == "worktree" and folder["readonly"]:
@@ -1121,5 +1138,6 @@ __all__ = [
     "StaffStore",
     "cap_notes",
     "colour_for",
+    "daedalus_cannot_reach",
     "normalise_short_id",
 ]

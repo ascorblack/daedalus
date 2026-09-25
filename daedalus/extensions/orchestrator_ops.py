@@ -327,7 +327,9 @@ async def peek(orch: Orchestrators, project: Project, session_id: str, *, op: st
             return await access.find(pattern, path)
         if op == "search":
             return await access.search(pattern, path)
-        if not target.is_git:
+        if not target.is_git and target.local(orch.manager.projects.local_env):
+            # A folder of the other environment is recorded as no repository because this process
+            # could not look; git on that side says whether it is one.
             raise Refused(f"{target.path} is not a git repository")
         if op == "git_log":
             return await access.git_log(ref, path, limit=limit if limit != 200 else 20)

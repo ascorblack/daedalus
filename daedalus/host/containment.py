@@ -83,6 +83,7 @@ def walls_for(
     local_env: str,
     isolation: str = "shared",
     worktree: Path | None = None,
+    own_home: Path | None = None,
 ) -> Walls:
     """The walls of a session that works in ``folder_id`` (the primary when empty) of ``project``.
 
@@ -99,6 +100,11 @@ def walls_for(
       folder the worktree was made from (nothing of it when that folder is read-only); every other
       writable folder stays writable.
     - ``isolation="readonly"`` writes nothing.
+    - A session with a home of its own (``own_home``, a directory under the workspaces root for a
+      session whose folders this process cannot reach) reads and writes that home, and the project's
+      local folders like an ordinary session. It has no folder of its own to keep in its walls, so a
+      folder it cannot reach is left out like any other: a host path seen from the container names
+      nothing the tools should touch.
 
     Every writable folder is also readable. The function reads the filesystem only to ask whether a
     folder is there and where a worktree keeps its git metadata; it changes nothing but the
@@ -106,6 +112,12 @@ def walls_for(
     """
     if isolation not in ISOLATIONS:
         raise ValueError(f"unknown isolation {isolation!r}; one of {', '.join(ISOLATIONS)}")
+    if own_home is not None:
+        reachable = [f for f in project.folders if f.local(local_env) and f.reachable]
+        readable_paths = (own_home, *(f.path for f in reachable))
+        if isolation == "readonly":
+            return Walls(readable=readable_paths, writable=(own_home,))
+        return Walls(readable=readable_paths, writable=(own_home, *(f.path for f in reachable if not f.readonly)))
     home = project.folder(folder_id) if folder_id else project.primary
     if home is None:
         raise ValueError(f"{folder_id} is not a folder of {project.name}")

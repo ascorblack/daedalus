@@ -59,7 +59,7 @@ class DaedalusStaffRuntime:
 
     async def available(self, env: str) -> Availability:
         if env != self.manager.projects.local_env:
-            return Availability(False, f"a Daedalus staff member works where Daedalus runs ({self.manager.projects.local_env})")
+            return Availability(False, f"a Daedalus staff member works where Daedalus runs ({self.manager.projects.local_env}) and cannot reach a {env} folder; give this to a command-line member, which works in a {env} terminal")
         if not self.manager.config.has_model:
             return Availability(False, "no model is configured")
         return Availability(True)
