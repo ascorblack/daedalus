@@ -3,7 +3,7 @@
 // and the desktop's second one. It asks again from its last turn, because that turn is the one still
 // being written, and merges what comes back by turn.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { StaffTurn } from "../api";
 import { useEvent } from "../events";
 import { clock, tokens, usd } from "../format";
@@ -105,15 +105,19 @@ function FeedTurn({ turn, name }: { turn: StaffTurn; name: string }) {
   );
 }
 
-/** The member's turns, newest at the bottom, kept in view as they arrive unless the reader scrolled up. */
-export function FeedView({ name, live, feed }: { name: string; live: boolean; feed: { turns: StaffTurn[]; loaded: boolean; error: string } }) {
+/**
+ * The member's turns, newest at the bottom, kept in view as they arrive unless the reader scrolled up.
+ * `tail` goes after the last turn (the messages still on their way); `tailKey` changes with it, so a
+ * receipt that moves keeps the bottom in view as a new turn does.
+ */
+export function FeedView({ name, live, feed, tail, tailKey = "" }: { name: string; live: boolean; feed: { turns: StaffTurn[]; loaded: boolean; error: string }; tail?: ReactNode; tailKey?: string }) {
   const { turns, loaded, error } = feed;
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   useEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [turns]);
+  }, [turns, tailKey]);
   return (
     <div
       className="chat-scroll feed"
@@ -127,6 +131,7 @@ export function FeedView({ name, live, feed }: { name: string; live: boolean; fe
         {!live && <div className="empty calm">{t("staff.feed.nolive")}</div>}
         {live && loaded && turns.length === 0 && <div className="empty calm">{error || t("staff.feed.empty")}</div>}
         {turns.map((turn) => <FeedTurn key={turn.index} turn={turn} name={name} />)}
+        {tail}
       </div>
     </div>
   );

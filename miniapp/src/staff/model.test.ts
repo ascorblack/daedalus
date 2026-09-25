@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChannelHealth, StaffMessage, StaffTurn } from "../api";
 import { setLang } from "../i18n";
-import { answeredBy, applyMessageEvent, canAlways, channelWords, defaultMode, healthParts, keyboardBlocks, mergeTurns, nextSince, nowChoice, openRequests, stripRows, turnFacts } from "./model";
+import { answeredBy, applyMessageEvent, attention, canAlways, channelWords, defaultMode, healthParts, keyboardBlocks, listRows, mergeTurns, nextSince, nowChoice, openRequests, outboxRows, stripRows, turnFacts } from "./model";
 
 const msg = (id: string, state: StaffMessage["state"], created_at: string, origin: StaffMessage["origin"] = "orchestrator"): StaffMessage => ({
   id, staff_id: "st-ira", origin, text: id, mode: "queue", state, attempts: 1, created_at, updated_at: created_at, error: "",
@@ -36,6 +36,32 @@ describe("a receipt", () => {
   it("is shown newest last, three at most", () => {
     const many = [msg("a", "acknowledged", "2026-09-25T10:00:00Z"), msg("d", "queued", "2026-09-25T10:03:00Z"), msg("b", "failed", "2026-09-25T10:01:00Z"), msg("c", "submitted", "2026-09-25T10:02:00Z")];
     expect(stripRows(many).map((m) => m.id)).toEqual(["b", "c", "d"]);
+  });
+});
+
+describe("the messages beside the terminal", () => {
+  const at = (minute: number) => `2026-09-25T10:${String(minute).padStart(2, "0")}:00Z`;
+
+  it("are listed newest first", () => {
+    const rows = [msg("a", "acknowledged", at(0)), msg("c", "queued", at(2)), msg("b", "failed", at(1))];
+    expect(listRows(rows).map((m) => m.id)).toEqual(["c", "b", "a"]);
+  });
+
+  it("ask for attention while one is on its way or failed with nothing accepted since", () => {
+    const quiet = [msg("a", "acknowledged", at(0)), msg("b", "acknowledged", at(1))];
+    expect(attention(quiet)).toEqual({ failed: [], pending: [] });
+    const failedLast = [msg("a", "acknowledged", at(0)), msg("b", "failed", at(1), "operator")];
+    expect(attention(failedLast).failed.map((m) => m.id)).toEqual(["b"]);
+    // A failure an accepted message came after is history: the marker is not lit for it.
+    const failedBefore = [msg("a", "failed", at(0)), msg("b", "acknowledged", at(1))];
+    expect(attention(failedBefore).failed).toEqual([]);
+    const moving = [msg("a", "acknowledged", at(0)), msg("b", "written", at(1)), msg("c", "queued", at(2)), msg("d", "submitted", at(3))];
+    expect(attention(moving).pending.map((m) => m.id)).toEqual(["d", "c", "b"]);
+  });
+
+  it("follow the Feed's last turn, oldest first, only while the transcript cannot have them", () => {
+    const rows = [msg("a", "acknowledged", at(0)), msg("c", "queued", at(2)), msg("b", "failed", at(1), "operator"), msg("z", "failed", at(0))];
+    expect(outboxRows(rows).map((m) => m.id)).toEqual(["b", "c"]);
   });
 });
 

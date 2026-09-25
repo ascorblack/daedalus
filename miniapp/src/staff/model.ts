@@ -36,6 +36,36 @@ export function stripRows(rows: StaffMessage[], n = 3): StaffMessage[] {
   return [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, n).reverse();
 }
 
+const PENDING: ReadonlySet<MessageState> = new Set(["queued", "written", "submitted"]);
+
+/** The messages the Session tab lists: newest first, the one that needs a look on top. */
+export function listRows(rows: StaffMessage[]): StaffMessage[] {
+  return [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+/**
+ * What of the messages needs the operator: those still on their way, and those that failed with
+ * nothing accepted since. A failure older than an accepted message is history, not a task; counting
+ * it would keep the header's marker lit for ever after one bad afternoon.
+ */
+export function attention(rows: StaffMessage[]): { failed: StaffMessage[]; pending: StaffMessage[] } {
+  const newest = listRows(rows);
+  const accepted = newest.find((m) => m.state === "acknowledged");
+  const failed = newest.filter((m) => m.state === "failed" && (!accepted || m.created_at > accepted.created_at));
+  const pending = newest.filter((m) => PENDING.has(m.state));
+  return { failed, pending };
+}
+
+/**
+ * The messages the Feed shows after its last turn: the ones the transcript cannot have yet (on their
+ * way) or never will (failed, unanswered by an accepted one), oldest first, the way the Feed reads.
+ * An accepted message is already in the transcript as a turn of its own.
+ */
+export function outboxRows(rows: StaffMessage[]): StaffMessage[] {
+  const { failed, pending } = attention(rows);
+  return [...failed, ...pending].sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
 /**
  * A page of the transcript merged into what the Feed holds. The Feed asks again from its last turn
  * (`since`), because that turn is the one still being written: the fresh copy of a turn replaces the

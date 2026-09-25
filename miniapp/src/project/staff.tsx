@@ -1,7 +1,8 @@
 // A staff member's session seen from inside the project: a header that says who this is, what runs
-// it, where it works and on what, with the three controls the team runtime offers; and, above the
-// composer, the messages sent to it with how far each one got. The command-line staff view reuses
-// both, so neither assumes a Daedalus session underneath.
+// it, where it works and on what, with the three controls the team runtime offers; and the messages
+// sent to it with how far each one got. A Daedalus member's session shows the last of them above its
+// composer; the command-line staff view lists them in its Session tab instead, beside the terminal
+// rather than under it, and reuses the header and the rows.
 
 import type { ReactNode } from "react";
 import { api, type StaffMessage } from "../api";
@@ -87,13 +88,12 @@ export function StaffHeader({ projectId, staffId, toast, facts, details, childre
 }
 
 /**
- * The last messages sent to the member, newest last, each with its delivery receipt. A receipt moves
- * the moment its `staff.message` event arrives (the list is read again after, for anything the event
- * does not carry); a message that failed can be sent again from here, as a new message.
+ * The messages sent to a member, as the list route gives them (newest first), kept current: a receipt
+ * moves the moment its `staff.message` event arrives, and the list is read again after, for anything
+ * the event does not carry.
  */
-export function StaffMessages({ staffId, n = 2, toast }: { staffId: string; n?: number; toast?: (text: string) => void }) {
-  const { data: member } = useMember(staffId);
-  const key = messagesKey(staffId, Math.max(3, n));
+export function useStaffMessages(staffId: string, n: number): StaffMessage[] {
+  const key = messagesKey(staffId, n);
   const { data } = useQuery<StaffMessage[]>(key, { pollMs: 15000, staleMs: 3000 });
   useEvent(["staff.message"], (event) => {
     if (event.staff_id !== staffId) return;
@@ -101,26 +101,43 @@ export function StaffMessages({ staffId, n = 2, toast }: { staffId: string; n?: 
     if (Array.isArray(held)) prime(key, applyMessageEvent(held, event.payload ?? {}));
     invalidate(`/api/staff/${encodeURIComponent(staffId)}/messages`);
   }, [staffId, key]);
-  const rows = stripRows(Array.isArray(data) ? data : [], n);
-  if (!member || rows.length === 0) return null;
-  async function retry(m: StaffMessage) {
-    try {
-      await api.post(`/api/staff/${encodeURIComponent(staffId)}/messages`, { text: m.text, mode: m.mode === "steer" || m.mode === "interrupt" ? m.mode : "queue" });
-      invalidate(`/api/staff/${encodeURIComponent(staffId)}/messages`);
-    } catch (e) {
-      toast?.(errorText(e));
-    }
+  return Array.isArray(data) ? data : [];
+}
+
+/** A failed message sent again, as a new message: the failed one keeps its receipt. */
+async function retry(staffId: string, m: StaffMessage, toast?: (text: string) => void) {
+  try {
+    await api.post(`/api/staff/${encodeURIComponent(staffId)}/messages`, { text: m.text, mode: m.mode === "steer" || m.mode === "interrupt" ? m.mode : "queue" });
+    invalidate(`/api/staff/${encodeURIComponent(staffId)}/messages`);
+  } catch (e) {
+    toast?.(errorText(e));
   }
+}
+
+/**
+ * One message with its receipt. Retry is the operator's own failed message only: a failed message of
+ * the orchestrator's already wakes the orchestrator, and a second copy from here would reach the
+ * member twice.
+ */
+export function MessageRow({ staffId, name, message: m, toast }: { staffId: string; name: string; message: StaffMessage; toast?: (text: string) => void }) {
+  return (
+    <div className="staff-message" data-message={m.id} data-state={m.state}>
+      <span className="staff-message-from">{t(`focus.msg.from.${m.origin}`, { name })} · {clock(m.created_at)}</span>
+      <span className={`pill msg-state ${m.state}`} title={m.error || undefined}>{t(`focus.msg.state.${m.state}`)}</span>
+      <span className="staff-message-text truncate">{t("focus.msg.quote", { text: m.text })}</span>
+      {m.state === "failed" && m.origin === "operator" && <button className="btn small ghost staff-message-retry" onClick={() => void retry(staffId, m, toast)}>{t("delivery.retry")}</button>}
+    </div>
+  );
+}
+
+/** The last messages sent to a Daedalus member, above its session's composer, newest last. */
+export function StaffMessages({ staffId, n = 2, toast }: { staffId: string; n?: number; toast?: (text: string) => void }) {
+  const { data: member } = useMember(staffId);
+  const rows = stripRows(useStaffMessages(staffId, Math.max(3, n)), n);
+  if (!member || rows.length === 0) return null;
   return (
     <div className="staff-messages" aria-label={t("focus.staff.messages", { name: member.name })}>
-      {rows.map((m) => (
-        <div key={m.id} className="staff-message" data-message={m.id} data-state={m.state}>
-          <span className="staff-message-from">{t(`focus.msg.from.${m.origin}`, { name: member.name })} · {clock(m.created_at)}</span>
-          <span className={`pill msg-state ${m.state}`} title={m.error || undefined}>{t(`focus.msg.state.${m.state}`)}</span>
-          <span className="staff-message-text truncate">{t("focus.msg.quote", { text: m.text })}</span>
-          {m.state === "failed" && m.origin === "operator" && <button className="btn small ghost staff-message-retry" onClick={() => void retry(m)}>{t("delivery.retry")}</button>}
-        </div>
-      ))}
+      {rows.map((m) => <MessageRow key={m.id} staffId={staffId} name={member.name} message={m} toast={toast} />)}
     </div>
   );
 }

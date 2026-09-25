@@ -2,8 +2,12 @@
 
 On a desktop at 1440 px: the header says who, what runs them (CLI and version, model, mode), the
 worktree, the task, the status with the turn and its minutes, and whether the host still hears them;
-the terminal is the default view and the Feed is a toggle away, with the tool uses folded; the strip
-above the composer shows three messages in three states and moves one on its `staff.message` event;
+the terminal is the default view and the Feed is a toggle away, with the tool uses folded and the
+messages still on their way after its last turn; nothing about the messages sits between the terminal
+and the composer, and the terminal is as tall with messages as without; the header's marker counts the
+messages on their way, turns to "not delivered" on a failure, and opens the Session tab's Messages
+(newest first, each with its receipt, Retry on the operator's failed one), which moves a receipt on
+its `staff.message` event;
 the keyboard banner appears while a person holds the terminal's keyboard and an orchestrator's
 message waits, and Release gives the keyboard back; the permission waiting on the operator is answered
 "Always" with the exact body, and an answer someone else gave first is named; the composer sends "now"
@@ -11,7 +15,8 @@ as a steer; a CLI that cannot take a message into a running turn (OpenCode) offe
 says why; the column beside it has the session's events, the changes and the notes; the sidebar and a
 Terminals-screen card lead here.
 
-On a phone at 390 px: the Feed is the default, the request's buttons are at least 44 px and above the
+On a phone at 390 px: the Feed is the default, no message sits above the composer, the header's marker
+opens the member sheet at its Messages, the request's buttons are at least 44 px and above the
 composer, nothing scrolls sideways, and "Terminal" opens the phone's terminal with the request (and
 "Always") above its keys. The Russian page is checked on the same points with its own words.
 
@@ -133,16 +138,58 @@ def desktop(browser, lang: str, check: Check) -> None:  # type: ignore[no-untype
     page.locator(".feed-turn[data-turn='1'] .feed-tools-head").click()
     check.that(page.locator(".feed-turn[data-turn='1'] .feed-tool").count() == 3, f"{lang}: the first reply's three tool uses do not unfold")
     check.that(invented["ira.accepted"] in page.locator(".feed-turn[data-turn='2']").inner_text(), f"{lang}: the orchestrator's message is not in the Feed")
+    # After the last turn, the messages the transcript cannot have yet, oldest first.
+    outbox = page.eval_on_selector_all(".feed-turns > .feed-outbox .staff-message", "els => els.map(e => e.dataset.message)")
+    check.that(outbox == ["mi2", "mi3"], f"{lang}: the Feed's messages on their way are {outbox}")
     page.locator(".staff-mode button[data-mode='terminal']").click()
     page.wait_for_selector(".staff-term .term-view[data-terminal-view='tm-ira']", timeout=5000)
 
-    # The strip: three messages in three states, newest last; one moves on its event.
-    states = page.eval_on_selector_all(".staff-foot .staff-message", "els => els.map(e => e.dataset.state)")
-    check.that(states == ["acknowledged", "submitted", "queued"], f"{lang}: the strip's receipts are {states}")
+    # Nothing about the messages between the terminal and the composer: the terminal keeps its height.
+    check.that(page.locator(".chat-main .staff-message").count() == 0, f"{lang}: {page.locator('.chat-main .staff-message').count()} messages are drawn beside the terminal's column")
+    tall = page.locator(".staff-term").bounding_box()
+    # The header's marker: two on their way; the Session tab lists all three, newest first.
+    marker = page.locator(".staff-cli .chat-head .staff-attention")
+    expect(marker).to_have_attribute("data-attention", "pending", timeout=5000)
+    check.that(marker.inner_text().strip() == "2", f"{lang}: the marker says {marker.inner_text()!r}, not the two on their way")
+    listed = page.locator(".staff-aside .staff-messages-section .staff-message")
+    expect(listed).to_have_count(3, timeout=5000)
+    states = page.eval_on_selector_all(".staff-aside .staff-messages-section .staff-message", "els => els.map(e => e.dataset.state)")
+    check.that(states == ["queued", "submitted", "acknowledged"], f"{lang}: the Session tab's receipts are {states}")
     check.that(feed.connected() >= 1, f"{lang}: the app did not open the event stream")
     next(m for m in focus.messages["st-ira"] if m["id"] == "mi2")["state"] = "acknowledged"
     feed.send("staff.message", {"message_id": "mi2", "state": "acknowledged"}, project=pid, staff="st-ira")
-    expect(page.locator(".staff-foot .staff-message[data-message='mi2']")).to_have_attribute("data-state", "acknowledged", timeout=4000)
+    expect(page.locator(".staff-aside .staff-message[data-message='mi2']")).to_have_attribute("data-state", "acknowledged", timeout=4000)
+    expect(marker).to_have_text("1", timeout=4000)
+    # A message of the operator's fails: the marker says so, and with the column closed it opens it at the Messages.
+    failed = {**focus.messages["st-ira"][0], "id": "mi4", "origin": "operator", "text": "use the owner's sheet", "mode": "queue", "state": "failed", "error": "the command-line agent did not take the message"}
+    failed["created_at"] = failed["updated_at"] = page.evaluate("new Date().toISOString()")
+    focus.messages["st-ira"].insert(0, failed)
+    feed.send("staff.message", {"message_id": "mi4", "state": "failed"}, project=pid, staff="st-ira")
+    expect(marker).to_have_attribute("data-attention", "failed", timeout=4000)
+    page.locator(".staff-cli .chat-head .head-actions .iconbtn").click()
+    expect(page.locator(".staff-aside")).to_have_count(0, timeout=3000)
+    marker.click()
+    expect(page.locator(".staff-aside .panel-tab[data-tab='session']")).to_have_attribute("aria-selected", "true", timeout=3000)
+    section = page.locator(".staff-aside .staff-messages-section")
+    expect(section).to_be_in_viewport(timeout=3000)
+    top = page.eval_on_selector_all(".staff-aside .staff-messages-section .staff-message", "els => els.map(e => e.dataset.message)")
+    check.that(top[:1] == ["mi4"], f"{lang}: the failed message is not on top of the list: {top}")
+    section.locator(".staff-message[data-message='mi4'] .staff-message-retry").click()
+    page.wait_for_timeout(400)
+    check.that(focus.sent == [("st-ira", {"text": "use the owner's sheet", "mode": "queue"})], f"{lang}: Retry sent {focus.sent}")
+    focus.sent.clear()
+    # The terminal is exactly as tall now, with four messages and a failure, as with none shown under it.
+    after = page.locator(".staff-term").bounding_box()
+    check.that(bool(tall and after and abs(after["height"] - tall["height"]) < 0.5), f"{lang}: the terminal went from {tall and tall['height']} to {after and after['height']} px with the messages")
+    saved = focus.messages["st-ira"]
+    focus.messages["st-ira"] = []
+    feed.send("staff.message", {"message_id": "mi4", "state": "failed"}, project=pid, staff="st-ira")
+    expect(marker).to_have_count(0, timeout=4000)
+    bare = page.locator(".staff-term").bounding_box()
+    check.that(bool(tall and bare and abs(bare["height"] - tall["height"]) < 0.5), f"{lang}: the terminal is {bare and bare['height']} px with no messages and {tall and tall['height']} px with them")
+    focus.messages["st-ira"] = saved
+    feed.send("staff.message", {"message_id": "mi4", "state": "failed"}, project=pid, staff="st-ira")
+    expect(marker).to_have_count(1, timeout=4000)
 
     # A person holds the keyboard while the orchestrator's message waits: the banner, and Release.
     check.that(page.locator(".staff-keyboard").count() == 0, f"{lang}: the keyboard banner shows before anyone typed")
@@ -224,6 +271,14 @@ def phone(browser, lang: str, check: Check) -> None:  # type: ignore[no-untyped-
     page.wait_for_selector(".staff-cli .feed-turn", timeout=15000)
     check.that(page.locator(".staff-cli").get_attribute("data-mode") == "feed", f"{lang} phone: opened on {page.locator('.staff-cli').get_attribute('data-mode')}, not the Feed")
     check.that(page.locator(".staff-term").count() == 0, f"{lang} phone: a terminal is drawn under the Feed")
+    check.that(page.locator(".staff-foot .staff-message").count() == 0, f"{lang} phone: messages sit above the composer")
+    # The marker opens the member sheet at its Messages.
+    page.locator(".staff-cli .chat-head .staff-attention").tap()
+    expect(page.locator(".sheet .staff-messages-section")).to_be_in_viewport(timeout=5000)
+    check.that(page.locator(".sheet .staff-messages-section .staff-message").count() == 3, f"{lang} phone: the sheet lists {page.locator('.sheet .staff-messages-section .staff-message').count()} messages")
+    check.that(sideways(page) <= 0, f"{lang} phone: the sheet scrolls sideways by {sideways(page)} px")
+    page.keyboard.press("Escape")
+    expect(page.locator(".sheet .staff-panel")).to_have_count(0, timeout=3000)
     buttons = page.locator(".staff-request .ask-answers-row .btn")
     expect(buttons).to_have_count(4, timeout=5000)
     heights = [b["height"] for b in (buttons.nth(i).bounding_box() for i in range(buttons.count())) if b]
