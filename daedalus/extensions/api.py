@@ -73,6 +73,7 @@ from daedalus.host.policy import sealed_root
 from daedalus.host.presence import MAX_ID_LENGTH, MAX_PROJECTS, MAX_SESSIONS, MAX_TERMINALS, PresenceReport
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
+from daedalus.host.services import SCRATCH_DIR_NAME
 from daedalus.host.session_runner import TENANT, Attachment, clip_title
 from daedalus.host.transcript_view import message_view
 from daedalus.providers.llamacpp import discover_llamacpp
@@ -4169,7 +4170,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         target = (root / rel).resolve()
         if root.resolve() not in target.parents and target != root.resolve():
             raise HTTPException(400, "path escapes the workspace")
-        if sealed_root(str(target), [str(p) for p in manager.protected_paths()]) is not None:
+        # A session's log scratch sits in the sealed state directory on purpose, and the pane is rooted
+        # at it only by ``_pane_target`` for that session's own logs; the containment above keeps the
+        # answer inside that one directory, so the rest of the state volume stays sealed.
+        own_logs = (manager.settings.state_dir / SCRATCH_DIR_NAME).resolve() in root.resolve().parents
+        if not own_logs and sealed_root(str(target), [str(p) for p in manager.protected_paths()]) is not None:
             # The containment above is what normally keeps this pane inside the operator's own work.
             # This is the same answer the tools get, asked again here: a root that ever comes to sit
             # over part of the installation must not open it through a browser either.
@@ -4504,6 +4509,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(403, f"{root} is read-only for this session")
         return root
 
+    def _pane_target(session_id: str, folder_id: str, root: Path, path: str) -> tuple[Path, str]:
+        """The root and path the pane reads ``path`` from: the session's log scratch for its own logs.
+
+        The app names a job's log ``.jobs/<id>.log`` under the session's folder, as it always was;
+        when the folder is read-only the host kept that log in the state volume instead, and this is
+        the one place the pane learns so. Every other path, and every path of a writable folder, is
+        read where it was asked for.
+        """
+        services = manager.locator_services(session_id)
+        if folder_id or services is None or services.log_file(path) is None or services.log_root is None:
+            return root, path
+        return services.log_root, path
+
     # Every route of the pane answers under two addresses: the session's own folder, and
     # ``/folders/{folder_id}`` for another folder of its project. The folder is part of the path rather
     # than a query parameter because the app builds each file's address as ``{base}/download?path=…``
@@ -4522,7 +4540,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/sessions/{session_id}/files")
     @api.get("/api/sessions/{session_id}/folders/{folder_id}/files")
     async def list_files(session_id: str, folder_id: str = "", path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        return _read_path(await _files_root(session_id, folder_id), path)
+        return _read_path(*_pane_target(session_id, folder_id, await _files_root(session_id, folder_id), path))
 
     @api.get("/api/sessions/{session_id}/files/search")
     @api.get("/api/sessions/{session_id}/folders/{folder_id}/files/search")
@@ -4564,7 +4582,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/sessions/{session_id}/download")
     @api.get("/api/sessions/{session_id}/folders/{folder_id}/download")
     async def download(session_id: str, path: str, folder_id: str = "", _: dict[str, Any] = Depends(auth)) -> FileResponse:
-        return _file_response(await _files_root(session_id, folder_id), path)
+        return _file_response(*_pane_target(session_id, folder_id, await _files_root(session_id, folder_id), path))
 
     # -- the steer queue: what was sent to a working agent and has not reached it yet -------
 

@@ -9,6 +9,7 @@ bundle in the process-wide :class:`ServiceLocator`, and a tool resolves it from 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,26 @@ SendFileFn = Callable[[Path, str | None], Awaitable[str]]
 AttachMediaFn = Callable[[list[dict[str, str]], str], Awaitable[dict[str, Any]]]
 ScheduleFn = Callable[..., Awaitable[Any]]
 SelfDevFn = Callable[..., Awaitable[str]]
+
+
+LOG_DIRS = (".exec", ".jobs", ".services")
+"""The directories the host writes a session's command logs into: spilled ``Exec`` output, background
+jobs and services. Paths the app and the agent name relative to the session, as ``.jobs/<id>.log``."""
+
+SCRATCH_DIR_NAME = "session-scratch"
+
+
+def session_scratch_dir(state_dir: Path, session_id: str) -> Path:
+    """The directory in the state volume that holds a session's command logs when its folder is read-only.
+
+    The logs are the host's, not the command's: the sandbox binds a read-only folder read-only, but
+    the host process writes the log files itself and nothing stopped it, so a folder the operator
+    closed still grew ``.exec/``, ``.jobs/`` and ``.services/``. Read-only has to mean the folder
+    stays byte for byte as the operator left it, so the logs go here instead, one directory per
+    session, in the same layout. The state volume rather than a temporary directory because a job's
+    and a service's log outlive a restart of the bot, and the ones in a writable folder always have.
+    """
+    return state_dir / SCRATCH_DIR_NAME / re.sub(r"[^A-Za-z0-9_-]", "_", session_id)
 
 
 class PathOutsideProject(PermissionError):
@@ -57,7 +78,34 @@ class SessionServices:
     ``None`` is a session with no project walls — a session driving another machine, whose tools
     work somewhere this process's folders mean nothing — which resolves paths anywhere, as every
     session did before projects existed."""
+    log_root: Path | None = None
+    """Where the host writes this session's command logs when that is not its workspace: the
+    :func:`session_scratch_dir` of a session whose folder is read-only, readable through ``walls`` and
+    exempt from the seal on the state directory, never writable by the agent. ``None`` is the workspace."""
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def logs_dir(self, kind: str) -> Path:
+        """The directory the host writes one kind of log into (one of :data:`LOG_DIRS`).
+
+        Every writer and every reader of those logs asks here rather than joining ``.exec`` onto the
+        workspace itself, because the answer is the workspace only while the session may write it;
+        a read-only folder moves them to :attr:`log_root`, and a reader that still looked in the
+        folder would find nothing.
+        """
+        return (self.log_root or self.workspace_dir) / kind
+
+    def log_file(self, path: str | None) -> Path | None:
+        """Where a relative path under one of :data:`LOG_DIRS` really is, when the logs are not in the workspace.
+
+        ``None`` for every other path, and for every path while the logs live in the workspace, so a
+        writable folder resolves exactly as it always did.
+        """
+        if self.log_root is None or not path:
+            return None
+        relative = Path(path)
+        if relative.is_absolute() or not relative.parts or relative.parts[0] not in LOG_DIRS:
+            return None
+        return self.log_root / relative
 
     @property
     def fs(self) -> LocalFS | ShellFS:
@@ -84,7 +132,9 @@ class SessionServices:
         else:
             candidate = Path(path).expanduser()
             if not candidate.is_absolute():
-                candidate = self.workspace_dir / candidate
+                # A read of ``.jobs/<id>.log`` means the log wherever the host put it. A write keeps
+                # the workspace path, which a read-only folder refuses: the scratch is the host's.
+                candidate = (None if write else self.log_file(path)) or self.workspace_dir / candidate
         if self.walls is None:
             return candidate
         if not self.contains(candidate, write=write):
@@ -132,7 +182,17 @@ class SessionServices:
         not one a file tool opens: it resolves the symlinks and the ``..`` first, and it resolves a
         relative path against this session's workspace, which is where the tools resolve theirs.
         """
+        if self.in_log_root(path):
+            return False
         return sealed_root(str(path), [str(p) for p in self.protected_paths], base=str(self.workspace_dir)) is not None
+
+    def in_log_root(self, path: Path) -> bool:
+        """Whether ``path`` is inside this session's own log scratch, which the seal on the state directory lets it read."""
+        if self.log_root is None:
+            return False
+        real = Path(os.path.realpath(path if path.is_absolute() else self.workspace_dir / path))
+        base = Path(os.path.realpath(self.log_root))
+        return real == base or base in real.parents
 
 
 class ServiceLocator:
@@ -155,4 +215,4 @@ class ServiceLocator:
 
 locator = ServiceLocator()
 
-__all__ = ["PathOutsideProject", "ServiceLocator", "SessionServices", "Walls", "locator"]
+__all__ = ["LOG_DIRS", "SCRATCH_DIR_NAME", "PathOutsideProject", "ServiceLocator", "SessionServices", "Walls", "locator", "session_scratch_dir"]

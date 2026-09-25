@@ -403,7 +403,7 @@ def _prune_spills(directory: Path) -> None:
 
 def _spill_path(services: Any, context: ToolContext) -> Path:
     call = re.sub(r"[^A-Za-z0-9_-]", "", str(context.metadata.get("tool_call_id") or "")) or f"{int(time.time())}"
-    return services.workspace_dir / ".exec" / f"{call}.log"
+    return services.logs_dir(".exec") / f"{call}.log"
 
 
 @dataclass(slots=True)
@@ -428,7 +428,7 @@ def _jobs(services: Any) -> dict[str, Job]:
 async def _start_job(context: ToolContext, services: Any, command: str, workdir: Path, env: dict[str, str] | None) -> ToolResult:
     jobs = _jobs(services)
     job_id = f"job-{len(jobs) + 1}-{int(time.time() * 1000) % 1000000}"
-    log = services.workspace_dir / ".jobs" / f"{job_id}.log"
+    log = services.logs_dir(".jobs") / f"{job_id}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     _prune_spills(log.parent)  # the same bound as the spill directory: the newest logs stay
     try:

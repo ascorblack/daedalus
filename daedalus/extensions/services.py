@@ -236,7 +236,7 @@ class Services:
         if not workdir.is_dir():
             raise ValueError(f"working directory does not exist: {workdir}")
         chosen = await self.allocate_port(port)
-        log_dir = state.workspace / LOG_DIR
+        log_dir = session_services.logs_dir(LOG_DIR) if session_services is not None else state.workspace / LOG_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{name}.log"
         env = shell_environment(session_id, {"PORT": str(chosen)} if chosen else None)

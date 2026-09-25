@@ -70,7 +70,7 @@ from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
 from daedalus.host.presence import Presence
 from daedalus.host.request_manifests import RequestManifestStore
-from daedalus.host.services import SessionServices, locator
+from daedalus.host.services import SessionServices, locator, session_scratch_dir
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
 from daedalus.host.worktrees import append_exclude, exclude_lines
@@ -1312,6 +1312,9 @@ class SessionManager:
                     (project.id,),
                 )
         await self.projects.list()
+        # The logs a read-only folder's session kept in the state volume are the session's alone.
+        # Removed whether or not the folder is read-only today: it may have been when they were written.
+        shutil.rmtree(session_scratch_dir(self.settings.state_dir, session_id), ignore_errors=True)
         # A private child belongs to this session. A project folder never goes with a session.
         if (
             delete_workspace
@@ -2146,6 +2149,12 @@ class SessionManager:
             walls=self.walls_of(state),
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
+        if services.walls is not None and not services.workspace_writable:
+            # The host writes a read-only folder's command logs to the state volume instead, and the
+            # session reads them there: a readable wall, never a writable one, so the agent sees
+            # its jobs' output without being able to write into the installation.
+            services.log_root = session_scratch_dir(self.settings.state_dir, state.session.id)
+            services.walls = Walls(readable=(*services.walls.readable, services.log_root), writable=services.walls.writable)
         state.services = services
         locator.register(services)
 
