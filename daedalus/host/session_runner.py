@@ -334,6 +334,29 @@ SUMMARY_CHARS = 200
 """How much of the answer a finished-run event carries: enough for a notification's line, not the answer."""
 
 
+HOME_KEY = "home"
+"""Session metadata naming a directory of its own under the workspaces root, which it runs in
+instead of a project folder: a project orchestrator whose folders all lie where this process cannot
+reach (a host folder, seen from the agent's container). It reads those folders through the host
+bridge; its working directory has to be somewhere a run can start."""
+_HOME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def home_of(metadata: dict[str, Any]) -> str:
+    """The session's own directory name under the workspaces root, or ``""`` when it works in a folder."""
+    value = str(metadata.get(HOME_KEY) or "").strip()
+    return value if _HOME_RE.fullmatch(value) and value not in (".", "..") else ""
+
+
+class WorkspaceUnreachable(RuntimeError):
+    """The session's working directory is not there (or not writable) and nothing here can make it.
+
+    A run refused for this will be refused the same way until someone mounts, restores or opens the
+    folder, so a caller that retries on its own (a wake-up queue) must say so and slow down rather
+    than try again every few seconds. A ``RuntimeError``, so every caller that already turns "this run
+    cannot start" into a message needs nothing new."""
+
+
 def _ensure_inbox(workspace: Path, folder: ProjectFolder | None) -> None:
     """Make the session's inbox — but never make a project folder that is not there.
 
@@ -937,7 +960,11 @@ class SessionManager:
         return folder
 
     def workspace_of(self, session_id: str, metadata: dict[str, Any], project: Project | None) -> Path:
-        """Return the session's project folder or its private directory inside that folder."""
+        """Return the session's project folder, its private directory inside that folder, or its own
+        directory under the workspaces root (``home``) when its folders are out of this process's reach."""
+        home = home_of(metadata)
+        if home:
+            return self.settings.workspaces_dir / home
         base = self.folder_of(session_id, metadata, project).path
         worktree = str(metadata.get("worktree_cwd") or "").strip()
         if worktree:
@@ -957,6 +984,11 @@ class SessionManager:
         if base != target and base not in target.parents:
             raise RuntimeError(f"session {session_id} has a directory outside its project")
         return target
+
+    def inbox_folder(self, session_id: str, metadata: dict[str, Any], project: Project | None) -> ProjectFolder | None:
+        """The project folder whose rules decide whether the session's inbox may be made: none for a
+        session with a home of its own, which is ours to create."""
+        return None if home_of(metadata) else self.folder_of(session_id, metadata, project)
 
     def locator_services(self, session_id: str) -> SessionServices | None:
         state = self._states.get(session_id)
@@ -1001,7 +1033,7 @@ class SessionManager:
         else:
             meta.pop("directory", None)
         workspace = self.workspace_of(sid, meta, project)
-        _ensure_inbox(workspace, self.folder_of(sid, meta, project))
+        _ensure_inbox(workspace, self.inbox_folder(sid, meta, project))
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(meta))
         await self.sessions.create(session, project_id=project.id)
         state = SessionState(session=session, workspace=workspace, metadata=dict(meta), project=project)
@@ -1037,7 +1069,7 @@ class SessionManager:
         project = await self.projects.for_session(session_id)
         try:
             workspace = self.workspace_of(session_id, dict(session.metadata), project)
-            _ensure_inbox(workspace, self.folder_of(session_id, dict(session.metadata), project))
+            _ensure_inbox(workspace, self.inbox_folder(session_id, dict(session.metadata), project))
         except (RuntimeError, OSError) as exc:
             # The session's stored directory no longer resolves inside the project that holds it, or
             # the folder cannot be made. Loading a session happens on every path into this process —
@@ -1987,11 +2019,15 @@ class SessionManager:
         known_paths: set[Path] = set()
         for r in rows:
             try:
-                ws = json.loads(r["metadata"] or "{}").get("workspace")
+                metadata = json.loads(r["metadata"] or "{}")
             except (TypeError, ValueError):
-                ws = None
+                metadata = {}
+            ws = metadata.get("workspace") if isinstance(metadata, dict) else None
             if ws:
                 known_paths.add(Path(ws).resolve())
+            home = home_of(metadata) if isinstance(metadata, dict) else ""
+            if home:
+                known_paths.add((self.settings.workspaces_dir / home).resolve())
         sched = await self.db.fetchall("SELECT workspace FROM schedules")
         known_paths.update(Path(r["workspace"]).resolve() for r in sched)
         known_paths.add((self.settings.workspaces_dir / "heartbeat").resolve())
@@ -2026,8 +2062,30 @@ class SessionManager:
             state.project = project
             state.workspace = self.workspace_of(state.session.id, dict(state.session.metadata), project)
             with suppress(OSError):
-                _ensure_inbox(state.workspace, self.folder_of(state.session.id, dict(state.session.metadata), project))
+                _ensure_inbox(state.workspace, self.inbox_folder(state.session.id, dict(state.session.metadata), project))
             self.register_services(state)
+
+    async def set_home(self, session_id: str, home: str) -> None:
+        """Run a session in its own directory under the workspaces root (``home``) from now on.
+
+        For a session stored with a working directory this process cannot reach; its project and its
+        folders are unchanged. A loaded session is moved at once, its walls with it."""
+        if not _HOME_RE.fullmatch(home) or home in (".", ".."):
+            raise ValueError(f"{home!r} is not a directory name under the workspaces root")
+        session = await self.sessions.get(session_id, TENANT)
+        metadata = {**dict(session.metadata), HOME_KEY: home}
+        await self.sessions.update_metadata(session_id, metadata)
+        self.unloadable_sessions.pop(session_id, None)
+        state = self._states.get(session_id)
+        if state is None:
+            return
+        state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
+        state.session.metadata.update(metadata)
+        state.metadata[HOME_KEY] = home
+        state.workspace = self.workspace_of(session_id, metadata, state.project)
+        with suppress(OSError):
+            _ensure_inbox(state.workspace, None)
+        self.register_services(state)
 
     async def attach_project(self, session_id: str, project: Project, *, own_directory: bool = False) -> SessionState:
         """Move a session to a project root or to its private child in that project."""
@@ -2041,6 +2099,7 @@ class SessionManager:
             metadata.pop("directory", None)
         # The folder it worked in belongs to the project it leaves; in the new one it starts in the primary.
         metadata.pop("folder_id", None)
+        metadata.pop(HOME_KEY, None)
         await self.sessions.update_metadata(session_id, metadata)
         await self.projects.attach(session_id, project.id)
         state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
@@ -2049,7 +2108,7 @@ class SessionManager:
         state.project = project
         state.workspace = self.workspace_of(session_id, metadata, project)
         with suppress(OSError):
-            _ensure_inbox(state.workspace, self.folder_of(session_id, metadata, project))
+            _ensure_inbox(state.workspace, self.inbox_folder(session_id, metadata, project))
         self.register_services(state)
         return state
 
@@ -2170,6 +2229,7 @@ class SessionManager:
         # writes) instead of the checkout it was made from, or nothing writable at all.
         isolation = str(metadata.get("staff_isolation") or "shared")
         worktree = str(metadata.get("worktree") or "").strip()
+        home = home_of(metadata)
         return walls_for(
             state.project,
             folder_id=str(metadata.get("folder_id") or "") or None,
@@ -2177,6 +2237,7 @@ class SessionManager:
             local_env=self.projects.local_env,
             isolation=isolation,
             worktree=Path(worktree) if isolation == "worktree" else None,
+            own_home=state.workspace if home else None,
         )
 
     async def open_writable(self, session_id: str, path: Path) -> None:
@@ -2308,19 +2369,22 @@ class SessionManager:
                 # to create, and a run refused because our own bookkeeping lost a directory is an
                 # outage with nothing for the operator to do about it. A folder they pointed at is
                 # theirs, so that one still refuses, with the path in the message.
-                if state.project is not None:
+                if home_of(state.metadata):
+                    with suppress(OSError):
+                        _ensure_inbox(state.workspace, None)
+                elif state.project is not None:
                     folder = self.folder_of(state.session.id, state.metadata, state.project)
                     await self.projects.ensure_reachable(folder)
                     _ensure_inbox(state.workspace, folder)
             if not state.workspace.is_dir():
                 name = state.project.name if state.project is not None else state.session.title
-                raise RuntimeError(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
+                raise WorkspaceUnreachable(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
             # A session in a folder its walls make read-only reads and runs there without writing, so
             # only a folder it may write has to be writable on disk; attachments, which land in the
             # folder's inbox, have nowhere to go in one it may not.
             writes = state.services is None or state.services.workspace_writable
             if writes and not os.access(state.workspace, os.W_OK):
-                raise RuntimeError(f"the working directory for {state.session.title} is not writable")
+                raise WorkspaceUnreachable(f"the working directory for {state.session.title} is not writable")
             if attachments and not writes:
                 raise RuntimeError(f"{state.workspace} is read-only for {state.session.title}, so attachments have nowhere to go; send them in a session that works in a writable folder")
             attachment_receipts: list[dict[str, str]] = []
@@ -4647,4 +4711,4 @@ def _bind(fn: Callable[..., Awaitable[Any]] | None, session_id: str) -> Callable
     return bound
 
 
-__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState", "annotate_summary", "transcript_for_summary", "validate_summary_sections", "verbatim_tail"]
+__all__ = ["HOME_KEY", "Attachment", "PendingQuestion", "SessionManager", "SessionState", "WorkspaceUnreachable", "annotate_summary", "home_of", "transcript_for_summary", "validate_summary_sections", "verbatim_tail"]

@@ -39,6 +39,11 @@ announces it) to join the same batch, and for the request row it names to be wri
 be noticed."""
 BACKOFF_FIRST_SECONDS = 5.0
 BACKOFF_MAX_SECONDS = 300.0
+STUCK_BACKOFF_FIRST_SECONDS = 60.0
+STUCK_BACKOFF_MAX_SECONDS = 1800.0
+"""A refusal that will not go away by itself (a folder that is not mounted, no model configured) is
+tried again rarely: someone has to act first, and every try is a line in the log. The owner pokes the
+queue when something it can see changes."""
 HOUR = 3600.0
 
 
@@ -97,6 +102,9 @@ class WakeQueue:
         batch_seconds: Callable[[], float],
         max_wakes_per_hour: Callable[[], int],
         on_capped: Callable[[float], Awaitable[None]] | None = None,
+        lasting: Callable[[BaseException], bool] | None = None,
+        on_stuck: Callable[[str], Awaitable[None]] | None = None,
+        on_unstuck: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         urgent_delay: float = URGENT_DELAY_SECONDS,
     ) -> None:
@@ -112,6 +120,13 @@ class WakeQueue:
         self._batch_seconds = batch_seconds
         self._max_wakes = max_wakes_per_hour
         self._on_capped = on_capped
+        self._lasting = lasting
+        self._on_stuck = on_stuck
+        self._on_unstuck = on_unstuck
+        self.stuck = ""
+        """Why deliveries are refused for a reason that will not fix itself; empty while they are not.
+        The owner hears of every such refusal (``on_stuck``) and decides what is news; it hears once
+        more when a delivery goes through again (``on_unstuck``)."""
         self.clock = clock
         self.urgent_delay = urgent_delay
         self.items: dict[str, Pending] = {}
@@ -286,11 +301,22 @@ class WakeQueue:
             await self._deliver(text, steer)
         except Exception as exc:  # noqa: BLE001 — the events stay and are tried again later
             self.stats.failures += 1
+            if self._lasting is not None and self._lasting(exc):
+                await self._got_stuck(str(exc) or type(exc).__name__, len(items))
+                return False
             logger.warning("wake queue %s could not deliver %d events: %s", self.name, len(items), exc)
             self._back_off()
             return False
         self._backoff = 0.0
         self._backoff_until = 0.0
+        if self.stuck:
+            self.stuck = ""
+            logger.info("wake queue %s delivers again", self.name)
+            if self._on_unstuck is not None:
+                try:
+                    await self._on_unstuck()
+                except Exception:  # noqa: BLE001 — the delivery stands; the all-clear is a courtesy
+                    logger.warning("wake queue %s could not say it delivers again", self.name, exc_info=True)
         for pending in items:
             if self.items.get(pending.wake.key) is pending:
                 del self.items[pending.wake.key]
@@ -313,9 +339,29 @@ class WakeQueue:
             self.cursor = cursor
             await self._save_cursor(cursor)
 
-    def _back_off(self) -> None:
-        self._backoff = BACKOFF_FIRST_SECONDS if not self._backoff else min(BACKOFF_MAX_SECONDS, self._backoff * 2)
+    def _back_off(self, *, first: float = BACKOFF_FIRST_SECONDS, most: float = BACKOFF_MAX_SECONDS) -> None:
+        self._backoff = first if not self._backoff else min(most, max(first, self._backoff * 2))
         self._backoff_until = self.clock() + self._backoff
+
+    async def _got_stuck(self, reason: str, count: int) -> None:
+        """A refusal that will not fix itself: logged once per reason, handed to the owner, tried again rarely.
+
+        Repeating it every few seconds told nobody anything — the operator saw an empty chat and a
+        dispatch "in progress" while the log filled with the same line. The owner is handed every
+        such refusal, not only the first, because what it has to act on can be new (work that arrived
+        while the agent was stuck); saying the same thing twice is its to avoid."""
+        self._back_off(first=STUCK_BACKOFF_FIRST_SECONDS, most=STUCK_BACKOFF_MAX_SECONDS)
+        if reason == self.stuck:
+            logger.debug("wake queue %s still cannot deliver: %s", self.name, reason)
+        else:
+            self.stuck = reason
+            logger.warning("wake queue %s cannot deliver %d events until this changes: %s", self.name, count, reason)
+        if self._on_stuck is None:
+            return
+        try:
+            await self._on_stuck(reason)
+        except Exception:  # noqa: BLE001 — the events stay either way
+            logger.warning("wake queue %s could not say why it is stuck", self.name, exc_info=True)
 
     async def _tell_capped(self, until: float) -> None:
         now = self.clock()

@@ -163,6 +163,36 @@ class Dispatches:
         assert current is not None
         return current
 
+    async def block_open(self, project: Project, reason: str) -> list[Dispatch]:
+        """Mark every open dispatch of the project blocked for a reason of the host's own — its
+        orchestrator cannot run — so the main orchestrator is woken and its card stops saying "in
+        progress" for work nobody is doing. The dispatches this blocked, oldest first."""
+        blocked: list[Dispatch] = []
+        for dispatch in await self.store.open_for(project.id):
+            await self.store.add_message(dispatch.id, author="system", kind="blocked", text=reason)
+            if not await self.store.close(dispatch.id, "blocked", reason):
+                continue  # closed by a report or a cancel in the meantime; that one stands
+            await self._closed(dispatch, "blocked", reason, by="system")
+            blocked.append(dispatch)
+        return blocked
+
+    async def unblock(self, project: Project) -> list[Dispatch]:
+        """Open again the dispatches :meth:`block_open` blocked and nobody has touched since: the last
+        word on each is still the host's. One the main orchestrator followed up or cancelled is its."""
+        reopened: list[Dispatch] = []
+        candidates = [d for d in await self.store.recent(project_id=project.id, limit=40) if d.status == "blocked"]
+        last = await self.store.last_messages([d.id for d in candidates])
+        for dispatch in sorted(candidates, key=lambda d: d.seq):
+            said = last.get(dispatch.id)
+            if said is None or (said.author, said.kind) != ("system", "blocked"):
+                continue
+            if not await self.store.reopen(dispatch.id):
+                continue
+            await self.store.add_message(dispatch.id, author="system", kind="reopened", text="The orchestrator can run again; the dispatch is open again.")
+            await self._publish("dispatch.updated", {"dispatch_id": dispatch.id, "status": "open", "change": "reopened", "actor": "system"}, project.id)
+            reopened.append(dispatch)
+        return reopened
+
     async def _closed(self, dispatch: Dispatch, status: str, result: str, *, by: str) -> None:
         await self._publish("dispatch.closed", {"dispatch_id": dispatch.id, "status": status, "result": result[:4000], "by": by, "title": dispatch.title, "seq": dispatch.seq, "kind": dispatch.kind, "actor": by}, dispatch.project_id)
         await self._publish("dispatch.updated", {"dispatch_id": dispatch.id, "status": status, "change": "closed", "actor": by}, dispatch.project_id)

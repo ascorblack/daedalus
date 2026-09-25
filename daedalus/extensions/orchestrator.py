@@ -19,6 +19,7 @@ return at once; the answer arrives as an ``ask.answered`` event in a later wake-
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, tzinfo
@@ -26,12 +27,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from protocore.contracts.types import Message, MessageRole, TextBlock
+
+from daedalus.config import NoModelConfigured
 from daedalus.extensions import orchestrator_ops, orchestrator_team, wakeups
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
 from daedalus.extensions.project_usage import ProjectUsage
 from daedalus.extensions.watches import describe as describe_watch
 from daedalus.host.events import AppEvent, EventFilter
-from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
+from daedalus.host.peek import BridgedFolderAccess, FolderAccess, LocalFolderAccess, UnreachableFolder
+from daedalus.host.session_runner import HOME_KEY, WorkspaceUnreachable, home_of
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
 from daedalus.staff_runtime import ReadRequest
 from daedalus.stores.projects import BRIEF_SECTIONS, OrchestratorSettings, Project, ProjectError, ProjectFolder
@@ -45,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 CURSOR_KEY = "orchestrator_cursor:{project_id}"
 """The kv key of a project's wake-up cursor: the last event its orchestrator was given."""
+STUCK_KEY = "orchestrator_stuck:{project_id}"
+"""The kv key of why a project's orchestrator cannot be woken, once the operator has been told: kept
+across a restart, so the same reason is not announced again by every start."""
+HOME_NAME = "project-{project_id}"
+"""The directory under the workspaces root an orchestrator runs in when its project's primary folder
+is out of this process's reach."""
 
 WAKE_TYPES = (
     "staff.status",
@@ -397,8 +408,18 @@ class Orchestrators:
         if model and model not in self.manager.config.presets:
             raise ProjectError(f"no model preset {model!r}; the presets are in Settings → Models")
 
+    def needs_home(self, project: Project) -> bool:
+        """Whether the project's orchestrator must run in a directory of its own rather than in the
+        project's primary folder: that folder lies where this process cannot go (a host folder, seen
+        from the agent's container), so a run started there is refused before it begins. The
+        orchestrator never writes files; it reads the folders through Peek, which goes through the
+        host bridge, and the folders stay the project's for every other tool."""
+        return not project.folders or not project.primary.local(self.manager.projects.local_env)
+
     async def _new_session(self, project: Project, *, predecessor: str, reason: str) -> str:
         metadata: dict[str, Any] = {"orchestrator_of": project.id, "telegram_detached": True}
+        if self.needs_home(project):
+            metadata[HOME_KEY] = HOME_NAME.format(project_id=project.id)
         if predecessor:
             metadata["predecessor"] = predecessor
             metadata["predecessor_reason"] = reason
@@ -671,6 +692,12 @@ class Orchestrators:
         async def capped(wait_seconds: float) -> None:
             await self._capped(project_id, wait_seconds)
 
+        async def stuck(reason: str) -> None:
+            await self.stuck(project_id, reason)
+
+        async def unstuck() -> None:
+            await self.unstuck(project_id)
+
         extra: dict[str, Any] = {"clock": self.clock} if self.clock is not None else {}
         queue = WakeQueue(
             name=project_id,
@@ -685,8 +712,15 @@ class Orchestrators:
             batch_seconds=lambda: float(self.manager.config.orchestrator.batch_seconds),
             max_wakes_per_hour=lambda: self.manager.config.orchestrator.max_wakes_per_hour,
             on_capped=capped,
+            lasting=lasting,
+            on_stuck=stuck,
+            on_unstuck=unstuck,
             **extra,
         )
+        # A queue that was stuck before a restart still owes the all-clear: without this, the first
+        # delivery after the restart would leave the dispatches it blocked blocked for good.
+        told = await self.manager.db.kv_get(STUCK_KEY.format(project_id=project_id))
+        queue.stuck = told if isinstance(told, str) else ""
         self.queues[project_id] = queue
         await queue.start()
         return queue
@@ -980,6 +1014,84 @@ class Orchestrators:
             source="orchestrator",
         ))
 
+    async def stuck(self, project_id: str, reason: str) -> None:
+        """The orchestrator cannot be woken, and waiting will not change that: say so once, where it shows.
+
+        The operator gets a notification and a line in the orchestrator's chat (an empty chat said
+        nothing), and every open dispatch of the project is marked blocked with the reason, which
+        wakes the main orchestrator and turns its card from "in progress" to "blocked". The reason is
+        kept, so a restart that meets the same refusal does not announce it a second time; a dispatch
+        handed over while it stays stuck is still blocked, with a line of its own in the chat.
+        """
+        key = STUCK_KEY.format(project_id=project_id)
+        told = await self.manager.db.kv_get(key) == reason
+        project = await self.manager.projects.get(project_id)
+        if project is None:
+            return
+        if not told:
+            await self.manager.db.kv_set(key, reason)
+        session_id = self.session_of(project)
+        why = f"the orchestrator of {project.name} cannot run: {reason}"
+        blocked: list[Any] = []
+        dispatches: Any = self.app.extensions.get("dispatches")
+        if dispatches is not None:
+            try:
+                blocked = await dispatches.block_open(project, why)
+            except Exception:  # noqa: BLE001 — the operator is still told below
+                logger.warning("could not mark the dispatches of %s blocked", project_id, exc_info=True)
+        if told and not blocked:
+            return
+        clock = self._clock(_now())
+        lines = [] if told else [f"- {clock} the orchestrator could not be woken; its turn stopped with an error before it began: {reason}"]
+        lines += [f"- {clock} dispatch {d.id} (#{d.seq}) is marked as blocked: the orchestrator cannot run until this is fixed" for d in blocked]
+        await self._note(session_id, f"[events · {project.name} · {len(lines)} since {clock}]\n" + "\n".join(lines))
+        if told:
+            return
+        await self.manager.projects.record(project_id, "system", "orchestrator", f"The orchestrator cannot be woken: {reason}", {"session_id": session_id})
+        notifications = self.app.notifications
+        if notifications is not None:
+            held = f" Dispatch {', '.join(d.id for d in blocked)} is marked blocked until then." if blocked else ""
+            await notifications.post(Draft(
+                "orchestrator_report",
+                f"{project.name}: the orchestrator cannot run",
+                f"{reason}.{held} It tries again by itself every so often, and at once when it is replaced.",
+                kind="orchestrator_stuck",
+                tone="error",
+                project_id=project_id,
+                session_id=session_id or None,
+                dedupe_key=f"orchestrator-stuck:{project_id}",
+                source="orchestrator",
+            ))
+
+    async def unstuck(self, project_id: str) -> None:
+        """A wake-up went through again: the dispatches this blocked go back to open, and the chat says so."""
+        key = STUCK_KEY.format(project_id=project_id)
+        if await self.manager.db.kv_get(key) is None:
+            return
+        await self.manager.db.kv_set(key, None)
+        project = await self.manager.projects.get(project_id)
+        if project is None:
+            return
+        dispatches: Any = self.app.extensions.get("dispatches")
+        reopened = await dispatches.unblock(project) if dispatches is not None else []
+        await self.manager.projects.record(project_id, "system", "orchestrator", "The orchestrator can be woken again.", {})
+        clock = self._clock(_now())
+        lines = [f"- {clock} the orchestrator runs again"]
+        lines += [f"- {clock} dispatch {d.id} (#{d.seq}) is open again" for d in reopened]
+        await self._note(self.session_of(project), f"[events · {project.name} · {len(lines)} since {clock}]\n" + "\n".join(lines))
+
+    async def _note(self, session_id: str, text: str) -> None:
+        """A line in the orchestrator's chat that the model never reads: written to the transcript the
+        app shows, not to the history its turns are built from. It reads like a batch of events, so the
+        app draws it as one."""
+        if not session_id:
+            return
+        note = Message(role=MessageRole.user, content_blocks=[TextBlock(text=text)], metadata={"daedalus.origin": "events", "daedalus.notice": True})
+        try:
+            await self.manager.sessions.append_transcript(session_id, [note])
+        except Exception:  # noqa: BLE001 — the notification still says it
+            logger.warning("could not write a note into the chat of %s", session_id, exc_info=True)
+
     # -- following the sessions ----------------------------------------------------------------------
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
@@ -1073,12 +1185,21 @@ class Orchestrators:
         return await orchestrator_ops.dispatch(self, operation, OPERATIONS, **kwargs)
 
     def folder_access(self, project: Project, folder: ProjectFolder, session_id: str) -> FolderAccess:
-        """How ``Peek`` reads a folder: directly when it is this process's, otherwise with the reason it cannot."""
+        """How ``Peek`` reads a folder: directly when it is this process's, through the host bridge when
+        it is a host folder seen from the container, otherwise with the reason it cannot."""
         if not folder.local(self.manager.projects.local_env):
-            return UnreachableFolder(
-                f"{folder.path} is a {folder.env} folder, which this process cannot read; staff that run in a host terminal can, "
-                "so ask one to look, or ask the operator"
-            )
+            if folder.env != "host":
+                return UnreachableFolder(
+                    f"{folder.path} is a {folder.env} folder, which this process cannot read; staff that run there can, "
+                    "so ask one to look, or ask the operator"
+                )
+            bridge: Any = self.app.extensions.get("host_bridge")
+            if bridge is None:
+                return UnreachableFolder(f"{folder.path} is on the host, and this installation has no host terminal bridge to read it through (bash deploy/setup.sh offers to install it)")
+            if not bridge.available():
+                return UnreachableFolder(f"{folder.path} is on the host, and the host terminal bridge is not answering now; ask the operator to check the host terminal (systemctl --user status daedalus-ptyd)")
+            roots = [str(f.path) for f in project.folders if f.env == folder.env]
+            return BridgedFolderAccess(str(folder.path), roots=roots, bridge=bridge, env=folder.env)
         services = self.manager.locator_services(session_id)
         if services is None:
             return UnreachableFolder("this session's services are not loaded; try again in its next turn")
@@ -1108,10 +1229,48 @@ class Orchestrators:
             if orchestrator.enabled and orchestrator.session_id:
                 self._models[project.id] = orchestrator.model
                 try:
+                    await self.give_home(project)
+                except Exception:  # noqa: BLE001 — its queue still starts, and says why it cannot deliver
+                    logger.exception("could not move the orchestrator of project %s into a directory of its own", project.id)
+                try:
                     await self.start_queue(project.id)
                 except Exception:  # noqa: BLE001 — one project's queue must not keep the others from starting
                     logger.exception("could not start the wake-ups of project %s", project.id)
 
+
+
+    async def give_home(self, project: Project) -> bool:
+        """Move a current orchestrator made before :meth:`needs_home` existed out of a folder it cannot
+        run in. Whether it was moved.
+
+        Such a session was created with the project's host folder as its working directory, and in
+        the container every wake-up was refused ("the working directory … is not reachable") while
+        the events waited. Once it has a home the waiting events are delivered by its queue as usual.
+        This runs at every start and does nothing for a session that is already right, so it is the
+        one-shot repair for the sessions stored before the fix and a no-op ever after.
+        """
+        session_id = project.settings.orchestrator.session_id
+        if not session_id or not self.needs_home(project):
+            return False
+        row = await self.manager.db.fetchone("SELECT metadata FROM sessions WHERE id = ?", (session_id,))
+        if row is None:
+            return False
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if home_of(metadata):
+            return False
+        await self.manager.set_home(session_id, HOME_NAME.format(project_id=project.id))
+        logger.info("the orchestrator %s of %s runs in a directory of its own from now on", session_id, project.name)
+        return True
+
+
+def lasting(exc: BaseException) -> bool:
+    """Whether a refused wake-up will be refused the same way until somebody acts: a working directory
+    that is not there or not writable, no model configured. The host restarting, a budget, a
+    maintenance window pass by themselves and are only retried."""
+    return isinstance(exc, (WorkspaceUnreachable, NoModelConfigured))
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
