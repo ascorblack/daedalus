@@ -149,24 +149,35 @@ async def test_cancel_tells_the_project_and_closes_the_dispatch(settings: Settin
 # -- the questions under a dispatch ------------------------------------------------------------------------
 
 
-async def test_a_linked_question_is_withdrawn_when_its_dispatch_closes_and_wakes_nobody(settings: Settings, db: Database, tmp_path: Path) -> None:
+async def test_a_linked_question_outlives_a_done_dispatch_and_is_withdrawn_with_a_cancelled_one(settings: Settings, db: Database, tmp_path: Path) -> None:
+    # An orchestrator that finished a survey and asked what only the operator knows is still waiting on
+    # that answer. Closing the dispatch as done once withdrew such a question before the operator saw it.
     r = await rig(settings, db, tmp_path)
     try:
         dispatches = install(r)
         sid = await office(r)
-        dispatch = await dispatches.create(await r.refreshed(), text="Choose a database")
-        said = await r.call(sid, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=dispatch.id)
+        dispatch = await dispatches.create(await r.refreshed(), text="Survey the folders")
+        said = await r.call(sid, "ask_operator", question="What matters most now?", dispatch_id=dispatch.id)
         assert "shown in the main orchestrator's chat too" in said
         [ask] = await r.manager.asks.open_for(r.project.id)
         assert ask.dispatch_id == dispatch.id
         [pending] = await events(r.manager, "ask.pending")
         assert pending.payload["dispatch_id"] == dispatch.id, "the link is in the row before anyone announces it"
-        await r.call(sid, "project_report", text="Settled on SQLite myself", kind="done", dispatch_id=dispatch.id)
-        withdrawn = await r.manager.asks.get(ask.id)
-        assert withdrawn is not None and not withdrawn.open and withdrawn.resolved_by == "system" and "closed as done" in withdrawn.resolution["closed"]
+        await r.call(sid, "project_report", text="Brief written; the priorities are asked", kind="done", dispatch_id=dispatch.id)
+        kept = await r.manager.asks.get(ask.id)
+        assert kept is not None and kept.open, "a done dispatch leaves its question for the operator"
+        assert await events(r.manager, "ask.answered") == []
+
+        second = await dispatches.create(await r.refreshed(), text="Choose a database")
+        await r.call(sid, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=second.id)
+        [asked] = [a for a in await r.manager.asks.open_for(r.project.id) if a.dispatch_id == second.id]
+        await dispatches.cancel(second, reason="not needed any more")
+        withdrawn = await r.manager.asks.get(asked.id)
+        assert withdrawn is not None and not withdrawn.open and withdrawn.resolved_by == "system" and "cancelled" in withdrawn.resolution["closed"]
         [answered] = await events(r.manager, "ask.answered")
         assert answered.payload["via"] == "withdrawn"
         assert await r.orch.classify(r.project.id, answered) is None, "a withdrawn question brings the orchestrator no answer"
+        assert (await r.manager.asks.get(ask.id)).open, "cancelling one dispatch leaves another's question alone"
     finally:
         await r.manager.close()
 

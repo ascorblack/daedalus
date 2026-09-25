@@ -14,7 +14,9 @@ said on it, while nobody in its project works and its orchestrator is not mid-tu
 Questions travel with a dispatch without being copied. A request row names the dispatch it belongs to
 (``asks.dispatch_id``), and every window shows that same row. While a project is being set up by the
 main orchestrator, every request of the project is linked to its first dispatch. A request of the
-orchestrator's own is withdrawn when its dispatch closes, since nobody is waiting on its answer.
+orchestrator's own is withdrawn when its dispatch is cancelled, since nobody is waiting on its answer.
+A dispatch closed as done or blocked leaves its questions open: an orchestrator that finished the
+survey and still asked what only the operator knows is waiting on that answer.
 """
 
 from __future__ import annotations
@@ -197,7 +199,10 @@ class Dispatches:
         await self._publish("dispatch.closed", {"dispatch_id": dispatch.id, "status": status, "result": result[:4000], "by": by, "title": dispatch.title, "seq": dispatch.seq, "kind": dispatch.kind, "actor": by}, dispatch.project_id)
         await self._publish("dispatch.updated", {"dispatch_id": dispatch.id, "status": status, "change": "closed", "actor": by}, dispatch.project_id)
         await self.manager.projects.record(dispatch.project_id, "system", "dispatch", f"Dispatch {dispatch.id} (#{dispatch.seq}) closed as {status} by the {by}.", {"dispatch_id": dispatch.id})
-        await self.withdraw_for(dispatch, why=f"dispatch {dispatch.id} was closed as {status}")
+        # Only a cancelled dispatch takes its orchestrator's questions with it. Withdrawing them on "done"
+        # once closed the question a finished survey had just asked, before the operator saw it.
+        if status == "cancelled":
+            await self.withdraw_for(dispatch, why=f"dispatch {dispatch.id} was cancelled")
         if dispatch.kind == "setup" and status == "done":
             await self.finish_setup(dispatch.project_id, by="orchestrator")
 
