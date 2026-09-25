@@ -41,7 +41,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -463,10 +463,12 @@ class ClaudeCodeAdapter:
             allowed = answer.choice.startswith("allow")
             decision: dict[str, Any] = {"behavior": "allow"} if allowed else {"behavior": "deny", "message": answer.note or "The operator declined this."}
             body: Any = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+            # The held hook carries a plain allow even for "always": its ``updatedPermissions`` form is
+            # not verified against the real CLI, and an allow that asks again later is the safe side.
             if request.reply_id and await term.reply(request.reply_id, body):
                 request.settled = True
                 return True
-            return await self._keys_for_permission(term, request, allowed)
+            return await self._keys_for_permission(term, request, allowed, always=answer.choice == "allow_always")
         labels = [str(o.get("label") or "") for q in request.questions[:1] for o in q.get("options") or [] if isinstance(o, dict)]
         chosen = answer.note if answer.choice == "text" else answer.choice
         answers = {str(q.get("question") or ""): chosen for q in request.questions}
@@ -478,17 +480,26 @@ class ClaudeCodeAdapter:
             return False  # free text goes only through the hook; the dialog's own text box is the operator's
         return await self._keys_for_dialog(term, re.escape(str(request.questions[0].get("question") or "")[:40]), str(labels.index(chosen) + 1), request)
 
-    async def _keys_for_permission(self, term: TerminalPort, request: _Request, allowed: bool) -> bool:
-        return await self._keys_for_dialog(term, r"Do you want to proceed\?", "1" if allowed else "3", request, must_show=request.summary[:40])
+    async def _keys_for_permission(self, term: TerminalPort, request: _Request, allowed: bool, *, always: bool = False) -> bool:
+        # The dialog's second row is its "and don't ask again" (the recorded dialog: 1. Yes, 2. Yes, and
+        # always allow …, 3. No). Not every dialog has that row, and in a two-row one "2" is No, so
+        # "always" presses 2 only when the screen shows it as a Yes.
+        def key(screen: str) -> str:
+            if not allowed:
+                return "3" if re.search(r"3\.\s*No", screen) else "2" if re.search(r"2\.\s*No", screen) else "3"
+            return "2" if always and re.search(r"2\.\s*Yes", screen) else "1"
 
-    async def _keys_for_dialog(self, term: TerminalPort, regex: str, key: str, request: _Request, *, must_show: str = "") -> bool:
-        """Type a dialog's digit — once the dialog is on screen and is the one asked about."""
+        return await self._keys_for_dialog(term, r"Do you want to proceed\?", key, request, must_show=request.summary[:40])
+
+    async def _keys_for_dialog(self, term: TerminalPort, regex: str, key: str | Callable[[str], str], request: _Request, *, must_show: str = "") -> bool:
+        """Type a dialog's digit — once the dialog is on screen and is the one asked about. ``key`` may
+        be chosen from the screen, for a dialog whose rows differ from one request to another."""
         if not await term.wait_for(regex=regex, timeout=DIALOG_WAIT_S):
             return False
         screen = await term.screen()
         if must_show and _squeezed(must_show) not in _squeezed(screen):
             return False
-        await term.write(text=key)
+        await term.write(text=key(screen) if callable(key) else key)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + DIALOG_CONFIRM_S
         while loop.time() < deadline:

@@ -50,6 +50,9 @@ const SAME_IN_BOTH = [
   "settings.search.title",
   "settings.vision.title",
   "settings.web.title",
+  // Lines changed and the files they are in, and git's own word for the checkout a member works in.
+  "staff.changes.summary",
+  "staff.worktree",
   // A tool named by its own id and a count: the id is the same in both languages.
   "turn.family.other",
   "usage.col.usd",
@@ -225,6 +228,13 @@ describe("the keys the code asks for", () => {
       ["term.phone.key.", [...SOURCES["./terminal/phonekeys.ts"].matchAll(/\{ id: "([^"]+)", cap:/g)].map((m) => m[1])],
       ["phone.tab.", listed("./project/focus.ts", "PHONE_TABS")],
       ["term.env.short.", ["container", "host"]],
+      // A command-line member's view names the state of its team tools, its column's tabs, who
+      // answered a request first and its two views from lists the host and the model share.
+      ["staff.health.tools.", ["connected", "missing", "waiting", "builtin", "none"]],
+      ["staff.tab.", ["session", "changes", "notes"]],
+      ["staff.mode.", ["feed", "terminal"]],
+      ["perm.by.", ["operator", "orchestrator", "terminal"]],
+      ["harness.channel.", ["hooks", "app_server", "sse", "extension", "files"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

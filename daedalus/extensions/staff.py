@@ -30,6 +30,8 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.extensions.notifications import ActionConflict, ActionOutcome, ActionRefused, Draft
+from daedalus.harness.capabilities import CAPABILITIES
+from daedalus.harness.health import ChannelHealth, channel_health
 from daedalus.host import prompts
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.launch_queue import Admission, Entry, LaunchQueue, MachineCapacity, TerminalsCapacity
@@ -224,6 +226,29 @@ class Team:
         if runtime is None:
             raise StaffError(f"{HARNESS_NAMES.get(member.harness, member.harness)} staff cannot be started here yet: its runtime is not installed")
         return runtime
+
+    async def health(self, live: LiveSession, now: datetime | None = None) -> ChannelHealth:
+        """Whether the host still hears the member: the card, the staff view and ``Team(staff)`` all
+        read this, so none of them can call a member reachable that another calls silent."""
+        member = live.staff
+        runtime = self.runtimes.get(member.harness)
+        channel_of = getattr(runtime, "channel", None)
+        channel = channel_of(live) if channel_of is not None else {}
+        caps = CAPABILITIES.get(member.harness)
+        config = self.manager.config
+        # A command-line member is looked at by the screen reconcile after this long; a Daedalus
+        # member is marked silent by the tick after its own, longer, time.
+        silence = config.harness.no_signal_after_s if caps is not None else config.staff.silence_minutes * 60
+        messages = [m for m in await self.manager.staff.messages(member.id, limit=10) if m.staff_session_id == live.id]
+        return channel_health(
+            status=live.session.status,
+            team_tools=caps.team_tools if caps is not None else "builtin",
+            channel=channel,
+            last_signal_at=live.session.last_signal_at,
+            messages=messages,
+            now=now or datetime.now(UTC),
+            silence_after_s=silence,
+        )
 
     async def task(self, task_id: str) -> BoardTask | None:
         row = await self.manager.db.fetchone("SELECT * FROM board_tasks WHERE id = ?", (task_id,))
@@ -628,7 +653,7 @@ class Team:
             return "operator"
         return "orchestrator"
 
-    async def answer(self, ref: str, *, allow: bool | None = None, text: str | None = None, selected: list[str] | None = None, by: str = "operator", basis: str = "", via: str | None = None) -> dict[str, Any]:
+    async def answer(self, ref: str, *, allow: bool | None = None, always: bool = False, text: str | None = None, selected: list[str] | None = None, by: str = "operator", basis: str = "", via: str | None = None) -> dict[str, Any]:
         """Answer a request, once. The first answer to update the row delivers; a later one is refused.
 
         The orchestrator answers within the project's autonomy. At ``ask`` its answer to a question
@@ -650,10 +675,15 @@ class Team:
         resolution: dict[str, Any] = {"allow": allow, "text": text or "", "selected": list(selected or []), "via": via or ("orchestrator" if by == "orchestrator" else "app")}
         if basis:
             resolution["basis"] = basis
+        # "Always" is the operator's alone: a standing grant is a change to what the member may do,
+        # which the brief's allowances give the orchestrator no say over.
+        always = bool(always and allow and ask.kind == "permission" and by == "operator")
+        if always:
+            resolution["always"] = True
         if not await self.manager.asks.resolve(ask.id, by, resolution):
             current = await self.manager.asks.get(ask.id)
             raise AlreadyAnswered(f"request {ask.short_id} was already answered by the {current.resolved_by if current else 'someone else'}")
-        delivered, error = await self._deliver(ask, allow=allow, text=text, selected=selected, by=by)
+        delivered, error = await self._deliver(ask, allow=allow, always=always, text=text, selected=selected, by=by)
         if ask.kind == "permission" and allow:
             who = "The orchestrator" if by == "orchestrator" else "The operator"
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
@@ -695,7 +725,7 @@ class Team:
                 raise StaffError("a grant states its reason")
         return None
 
-    async def _deliver(self, ask: Ask, *, allow: bool | None, text: str | None, selected: list[str] | None, by: str) -> tuple[bool, str]:
+    async def _deliver(self, ask: Ask, *, allow: bool | None, text: str | None, selected: list[str] | None, by: str, always: bool = False) -> tuple[bool, str]:
         if ask.origin == "orchestrator":
             if self.own_requests is None:
                 return False, "no orchestrator is installed to take the answer"
@@ -704,7 +734,7 @@ class Team:
         live = await self.live(ask.staff_session_id) if ask.staff_session_id else None
         if live is None:
             return False, "the session that asked has ended"
-        decision = Decision(allow=allow, text=text, selected=list(selected or []), by="orchestrator" if by == "orchestrator" else "operator")
+        decision = Decision(allow=allow, text=text, selected=list(selected or []), by="orchestrator" if by == "orchestrator" else "operator", always=always)
         try:
             await self.runtime(live.staff).answer(live, AskRef(ask.id, ask.kind, ask.request_ref), decision)  # type: ignore[arg-type]
         except Exception as exc:  # noqa: BLE001 — the answer is recorded; the failure to deliver it is reported beside it

@@ -23,6 +23,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime, timedelta
 
 # Outside services_port_range (8100-8119), the range this product hands to an agent's own preview
 # servers: a harness that serves its build into that range competes with the installation running
@@ -276,7 +277,7 @@ def expect_app(base: str) -> None:
 
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
+__all__ = ["CAPABILITIES", "CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -623,6 +624,11 @@ class FocusStub:
         self.briefed: list[dict] = []
         self.controls: list[tuple[str, str]] = []
         self.told: list[tuple[str, dict]] = []
+        self.staff_views: dict[str, dict] = {}
+        """What the staff view reads of a command-line member: ``session``, ``turns``, ``events``, ``changes``."""
+        self.sent: list[tuple[str, dict]] = []
+        """What the staff view's composer posted, per member."""
+        self.seen: list[str] = []
 
     def project(self, pid: str) -> dict | None:
         return next((p for p in self.projects if p["id"] == pid), None)
@@ -738,6 +744,9 @@ class FocusStub:
             return 200, {**GATES["/api/terminals"], "terminals": rows}  # type: ignore[dict-item]
         if path.startswith("/api/staff/"):
             parts = path.split("/")
+            staff_view = self.staff_view_answer(method, parts, params, body)
+            if staff_view is not None:
+                return staff_view
             if len(parts) == 5 and parts[4] == "messages" and method == "GET":
                 return 200, self.messages.get(parts[3], [])
             if len(parts) == 5 and parts[4] == "tell" and method == "POST":
@@ -754,6 +763,110 @@ class FocusStub:
             if answered is not None:
                 return answered
         return None
+
+    def staff_view_answer(self, method: str, parts: list[str], params: dict[str, str], body: dict | None) -> tuple[int, object] | None:
+        """The staff view's own routes (``api_staff.py``): the session with its capabilities and health,
+        the transcript from a turn on, the events, the changes, the operator's message and "seen"."""
+        if len(parts) != 5:
+            return None
+        sid, what = parts[3], parts[4]
+        member = next((m for m in self.team.staff if m["id"] == sid), None)
+        if member is None:
+            return None
+        view = self.staff_views.get(sid)
+        if what == "session" and method == "GET":
+            if view is None:
+                return 200, {"staff": {k: member[k] for k in ("id", "name", "harness", "project_id")}, "session": None}
+            return 200, view["session"]
+        if view is None:
+            return None
+        if what == "transcript" and method == "GET":
+            since = int(params.get("since", "0") or 0)
+            return 200, {"turns": [turn for turn in view["turns"] if turn["index"] >= since], "more": False}
+        if what == "events" and method == "GET":
+            return 200, {"events": view["events"]}
+        if what == "changes" and method == "GET":
+            return 200, view["changes"]
+        if what == "seen" and method == "POST":
+            self.seen.append(sid)
+            return 200, {"ok": True}
+        if what == "messages" and method == "POST":
+            payload = dict(body or {})
+            self.sent.append((sid, payload))
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            row = {"id": f"m{sid}-{len(self.sent)}", "staff_id": sid, "staff_session_id": view["session"]["session"]["id"], "origin": "operator", "text": payload.get("text", ""), "mode": payload.get("mode", "queue"),
+                   "state": "queued", "attempts": 0, "created_at": now, "updated_at": now, "error": ""}
+            self.messages.setdefault(sid, []).insert(0, row)
+            return 200, {"state": "queued", "message_id": row["id"], "mode": row["mode"], "degraded_to": ""}
+        return None
+
+    def staff_view_of_ira(self, lang: str = "en") -> dict:
+        """Ira as the staff view shows a command-line member (M5): Claude Code in her own worktree at
+        its fourth turn, three messages in three states, a permission waiting on the operator, a Feed,
+        events and changes. Naya (OpenCode, whose CLI cannot take a message into a running turn) gets
+        a session too, so the composer's "now" can be checked against a second capability row."""
+        words = FOCUS_WORDS[lang]
+        pid = self.projects[0]["id"]
+        now = datetime.now(UTC)
+
+        def at(**back: float) -> str:
+            return (now - timedelta(**back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        ira = next(m for m in self.team.staff if m["id"] == "st-ira")
+        ira["live"].update(terminal_id="tm-ira", status_at=at(minutes=18), worktree_path="/home/operator/work/bakery-site/.agents/worktrees/ira")
+        ira["health"] = health(at, tools="connected")
+        naya = next(m for m in self.team.staff if m["id"] == "st-naya")
+        naya["live"].update(terminal_id="tm-naya", status_at=at(minutes=2))
+        naya["health"] = health(at, tools="missing", silent=True)
+        self.messages["st-ira"] = [
+            {"id": "mi3", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.queued"], "mode": "queue", "state": "queued", "attempts": 0, "created_at": at(minutes=1), "updated_at": at(minutes=1), "error": ""},
+            {"id": "mi2", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "operator", "text": words["ira.sent"], "mode": "steer", "state": "submitted", "attempts": 1, "created_at": at(minutes=4), "updated_at": at(minutes=4), "error": ""},
+            {"id": "mi1", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.accepted"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": at(minutes=25), "updated_at": at(minutes=25), "error": "",
+             "delivery": {"via": "paste", "degraded_to": "", "enters": 1, "written_at": at(minutes=25), "submitted_at": at(minutes=25), "acknowledged_at": at(minutes=25)}},
+        ]
+        permission = {
+            "id": "ask-stripe", "short_id": "k7m2qd", "project_id": pid, "origin": "staff", "kind": "permission", "staff_id": "st-ira", "staff_session_id": "ss-ira", "task_id": "t-checkout",
+            "request_ref": "toolu_1", "text": "Bash: npm install @stripe/stripe-js", "detail": {"tool": "Bash"}, "routed_to": "operator", "suggestion": "",
+            "created_at": at(minutes=2), "routed_at": at(minutes=2), "resolved_at": None, "resolved_by": None, "resolution": {},
+        }
+        self.asks.insert(0, permission)
+
+        def tool(name: str, summary: str, ok: bool | None = True) -> dict:
+            return {"name": name, "summary": summary, "ok": ok}
+
+        turns = [
+            {"index": 0, "role": "orchestrator", "text": words["ira.task"], "tools": [], "started_at": at(minutes=58), "ended_at": at(minutes=58), "usage": None},
+            {"index": 1, "role": "assistant", "text": words["ira.reply1"], "tools": [tool("Read", "src/lib/cart.ts"), tool("Update", "src/lib/cart.ts: +3 −1"), tool("Bash", "npm test -- checkout")], "started_at": at(minutes=57), "ended_at": at(minutes=40), "usage": {"input_tokens": 180000, "output_tokens": 12000, "cache_read_tokens": 90000, "cost_usd": None}},
+            {"index": 2, "role": "orchestrator", "text": words["ira.accepted"], "tools": [], "started_at": at(minutes=25), "ended_at": at(minutes=25), "usage": None},
+            {"index": 3, "role": "assistant", "text": words["ira.reply2"], "tools": [tool("Update", "src/lib/cart.ts: +2 −2")], "started_at": at(minutes=25), "ended_at": at(minutes=20), "usage": None},
+            {"index": 4, "role": "user", "text": words["ira.sent"], "tools": [], "started_at": at(minutes=19), "ended_at": at(minutes=19), "usage": None},
+            {"index": 5, "role": "assistant", "text": words["ira.reply3"], "tools": [tool("Bash", "npm install @stripe/stripe-js", None)], "started_at": at(minutes=18), "ended_at": "", "usage": None},
+        ]
+        events = [
+            {"seq": 60, "at": at(minutes=2), "type": "permission.pending", "payload": {"summary": "Bash: npm install @stripe/stripe-js"}},
+            {"seq": 59, "at": at(minutes=4), "type": "staff.message", "payload": {"message_id": "mi2", "state": "submitted"}},
+            {"seq": 58, "at": at(minutes=20), "type": "staff.status", "payload": {"status": "turn_done_unseen", "waiting_for": ""}},
+            {"seq": 57, "at": at(minutes=25), "type": "staff.message", "payload": {"message_id": "mi1", "state": "acknowledged"}},
+            {"seq": 56, "at": at(minutes=40), "type": "staff.report", "payload": {"kind": "checkpoint", "text": "cart discount fixed, tests green"}},
+            {"seq": 55, "at": at(minutes=58), "type": "staff.channel", "payload": {"team_tools": "connected"}},
+            {"seq": 54, "at": at(minutes=58), "type": "staff.status", "payload": {"status": "working", "waiting_for": ""}},
+        ]
+        changes = {"files": [{"path": "src/lib/cart.ts", "added": 120, "removed": 18}, {"path": "src/pages/checkout.tsx", "added": 60, "removed": 9}, {"path": "src/pages/checkout.test.tsx", "added": 32, "removed": 4}], "added": 212, "removed": 31, "untracked": ["src/lib/promo.ts"], "base": "main"}
+        launch = {"harness": "claude", "model": "opus", "effort": "", "agent": "", "permission_mode": "acceptEdits", "env": "container", "version": "2.1.281", "launch_id": "l-ira", "companion_terminal_id": None,
+                  "worktree": ira["live"]["worktree_path"], "branch": "agent/ira/checkout", "task_id": "t-checkout"}
+        self.staff_views["st-ira"] = {
+            "session": {"staff": {"id": "st-ira", "name": "Ira", "harness": "claude", "project_id": pid}, "session": {**ira["live"], "cli_session_id": "7c1e2f4a-claude-session"},
+                        "capabilities": CAPABILITIES["claude"], "launch": launch, "channel": {"team_tools": "connected"}, "health": ira["health"], "requests": [permission],
+                        "usage": {"input_tokens": 412000, "output_tokens": 31000, "cost_usd": None, "window_used_pct": 23, "source": "subscription"}},
+            "turns": turns, "events": events, "changes": changes,
+        }
+        naya_launch = {**launch, "harness": "opencode", "model": "", "permission_mode": "", "version": "1.18.23", "launch_id": "l-naya", "worktree": None, "branch": None, "task_id": "t-bot"}
+        self.staff_views["st-naya"] = {
+            "session": {"staff": {"id": "st-naya", "name": "Naya", "harness": "opencode", "project_id": pid}, "session": {**naya["live"], "cli_session_id": "ses_naya"},
+                        "capabilities": CAPABILITIES["opencode"], "launch": naya_launch, "channel": {"team_tools": "missing"}, "health": naya["health"], "requests": [], "usage": None},
+            "turns": turns[:2], "events": [], "changes": {"files": [], "added": 0, "removed": 0, "untracked": [], "detail": "no worktree of its own"},
+        }
+        return permission
 
     def ask_from_ira(self, lang: str = "en") -> dict:
         """Ira's own question, escalated to the operator and older than the orchestrator's: the one a
@@ -939,6 +1052,31 @@ class FocusStub:
         return cls(projects=projects, listing=listing, details=details, team=team, board=board, others=others, asks=asks, brief=brief, journal=journal, schedules=schedules, wakeups=wakeups, watches=watches, terminals=terminals, messages=messages)
 
 
+def health(at, *, tools: str, silent: bool = False) -> dict:  # type: ignore[no-untyped-def]
+    """``daedalus/harness/health.py``'s verdict for an invented member."""
+    problems = (["team_tools_missing"] if tools == "missing" else []) + (["silent"] if silent else [])
+    return {
+        "team_tools": tools, "last_hook_at": at(seconds=40), "last_team_call_at": at(minutes=3) if tools == "connected" else None, "last_signal_at": at(minutes=9 if silent else 0, seconds=40),
+        "silent_s": 540 if silent else 40, "silence_after_s": 300, "silent": silent, "last_message": {"id": "mi2", "state": "submitted"}, "last_acknowledged_at": at(minutes=25),
+        "problems": problems, "level": "warn" if problems else "ok",
+    }
+
+
+def _caps(harness: str, label: str, channel: str, channel_label: str, steer: str, permissions: str, team_tools: str, tested: tuple[str, str], major: int) -> dict:
+    return {"harness": harness, "label": label, "status_channel": channel, "status_channel_label": channel_label, "steer": steer, "permissions": permissions, "questions": "structured",
+            "team_tools": team_tools, "first_prompt": "argv", "interrupt": "keys", "companion": harness == "codex", "tested_versions": list(tested), "supported_major": major}
+
+
+# The capability table as ``daedalus/harness/capabilities.py`` has it, in the fields the app reads.
+CAPABILITIES: dict[str, dict] = {
+    "claude": _caps("claude", "Claude Code", "hooks", "hooks per launch", "tui_queue", "hook_then_keys", "mcp", ("2.1.281", "2.2.0"), 2),
+    "codex": _caps("codex", "Codex", "app_server", "app-server notifications", "native", "structured", "mcp", ("0.155.1", "0.157.0"), 0),
+    "opencode": _caps("opencode", "OpenCode", "sse", "server events", "degrade_to_queue", "structured", "mcp", ("1.18.23", "1.19.0"), 1),
+    "pi": _caps("pi", "pi", "extension", "bridge extension", "native", "none", "extension", ("0.84.2", "0.88.0"), 0),
+    "grok": _caps("grok", "Grok Build", "files", "session files", "cancel_and_send", "keys", "none", ("1.0.40", "1.1.0"), 1),
+}
+
+
 FOCUS_WORDS: dict[str, dict[str, str]] = {
     "en": {
         "op.ask": "Add the folder ~/work/bakery-bot. The baker should get a Telegram message for every new order: the endpoint is Max's, the bot is Naya's.",
@@ -957,6 +1095,11 @@ FOCUS_WORDS: dict[str, dict[str, str]] = {
         "brief.notes": "Max's endpoint is merged before Naya starts.",
         "journal.decision": "The bot waits for the endpoint: one contract, not two.", "journal.note": "Remember the Friday price change.",
         "wake.name": "Check the checkout", "wake.note": "Look at Ira's checkout after lunch",
+        "ira.task": "Task: the checkout page. Cart → promo code → payment. Done when checkout.test.tsx is green. Do not touch api/.",
+        "ira.reply1": "The discount was taken from the total with delivery. Fixed in `cart.ts`; the checkout tests pass.",
+        "ira.accepted": "SPRING10 comes off the sum without delivery, as the brief says.", "ira.reply2": "Done: the discount now leaves delivery out.",
+        "ira.sent": "Add Stripe for the payment step", "ira.reply3": "Installing Stripe's browser library for the payment step.",
+        "ira.queued": "After Stripe, check the page on a phone",
     },
     "ru": {
         "op.ask": "Добавь в проект папку ~/work/bakery-bot. Нужно, чтобы пекарь получал в Telegram сообщение о каждом новом заказе: эндпоинт — Максу, бота — Нае.",
@@ -975,5 +1118,10 @@ FOCUS_WORDS: dict[str, dict[str, str]] = {
         "brief.notes": "Эндпоинт Макса сливается до того, как начнёт Ная.",
         "journal.decision": "Бот ждёт эндпоинт: один контракт, а не два.", "journal.note": "Не забыть про смену цен в пятницу.",
         "wake.name": "Проверить оформление заказа", "wake.note": "После обеда посмотреть оформление заказа у Иры",
+        "ira.task": "Задача: страница оформления заказа. Корзина → промокод → оплата. Готово, когда checkout.test.tsx зелёный. Не трогать api/.",
+        "ira.reply1": "Скидка считалась от суммы с доставкой. Исправлено в `cart.ts`; тесты оформления проходят.",
+        "ira.accepted": "Скидка SPRING10 — от суммы без доставки, так в брифе.", "ira.reply2": "Готово: скидка теперь без доставки.",
+        "ira.sent": "Подключи Stripe для шага оплаты", "ira.reply3": "Ставлю браузерную библиотеку Stripe для шага оплаты.",
+        "ira.queued": "После Stripe проверь страницу на телефоне",
     },
 }

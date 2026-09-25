@@ -24,7 +24,8 @@ export type Route = {
   project: string | null;
   /** Which of the project's pages: team, board, journal… Null is the project's home, its orchestrator. */
   page: string | null;
-  /** A session of the project shown inside its focus mode: /app/project/<id>/s/<session>. */
+  /** What a project page is about: the session of /app/project/<id>/s/<session>, or the staff
+   *  member of /app/project/<id>/staff/<member>. */
   inner: string | null;
   query: URLSearchParams;
 };
@@ -40,7 +41,7 @@ export function parse(pathname = window.location.pathname, search = window.locat
   const detail = rest[0] || null;
   if (screen === "project") {
     const page = rest[1] || null;
-    return { screen, session: null, with: null, detail: null, project: detail, page, inner: page === "s" ? rest[2] || null : null, query };
+    return { screen, session: null, with: null, detail: null, project: detail, page, inner: page === "s" || page === "staff" ? rest[2] || null : null, query };
   }
   return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, project: null, page: null, inner: null, query };
 }
@@ -64,6 +65,11 @@ export function projectHome(projectId: string, query?: Record<string, string | n
 /** A session of a project, opened without leaving the project's focus mode. */
 export function projectSessionPath(projectId: string, sessionId: string, query?: Record<string, string | null | undefined>): string {
   return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/s/${encodeURIComponent(sessionId)}`, query);
+}
+
+/** A command-line staff member's view inside the project: its terminal or its Feed, its messages, its requests. */
+export function projectStaffPath(projectId: string, staffId: string, query?: Record<string, string | null | undefined>): string {
+  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/staff/${encodeURIComponent(staffId)}`, query);
 }
 
 function withQuery(path: string, query?: Record<string, string | null | undefined>): string {

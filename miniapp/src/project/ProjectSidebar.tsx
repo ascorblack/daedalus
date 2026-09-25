@@ -11,7 +11,7 @@ import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { PaneHandle } from "../layout";
 import { relTime } from "../format";
-import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath } from "../router";
+import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
 import { go } from "../shell";
 import { HarnessBadge, StaffAvatar } from "../team/parts";
 import { StaffSheet } from "../team/StaffSheet";
@@ -129,12 +129,12 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
           {team && <button className="iconbtn small quiet" onClick={() => setHiring(true)} title={t("team.hire")} aria-label={t("team.hire")}><Icon name="plus" size={16} /></button>}
         </div>
         {team && members.length === 0 && <div className="focus-none">{t("focus.nobody")}</div>}
-        {members.map((m) => <StaffRow key={m.id} projectId={p.projectId} member={m} taskTitle={m.live?.task_id ? tasks.get(m.live.task_id)?.title : undefined} current={p.view.kind === "session" && !!m.live?.session_id && m.live.session_id === p.view.id} />)}
+        {members.map((m) => <StaffRow key={m.id} projectId={p.projectId} member={m} taskTitle={m.live?.task_id ? tasks.get(m.live.task_id)?.title : undefined} current={isCurrent(p.view, m)} />)}
 
         {oneOff.length > 0 && (
           <>
             <div className="focus-sec"><span>{t("focus.oneoff")} <span className="n">{oneOff.length}</span></span></div>
-            {oneOff.map((m) => <StaffRow key={m.id} projectId={p.projectId} member={m} taskTitle={m.live?.task_id ? tasks.get(m.live.task_id)?.title : undefined} current={p.view.kind === "session" && !!m.live?.session_id && m.live.session_id === p.view.id} compact />)}
+            {oneOff.map((m) => <StaffRow key={m.id} projectId={p.projectId} member={m} taskTitle={m.live?.task_id ? tasks.get(m.live.task_id)?.title : undefined} current={isCurrent(p.view, m)} compact />)}
           </>
         )}
 
@@ -183,10 +183,19 @@ function FocusRow({ icon, label, href, current, meta, className = "" }: { icon: 
   );
 }
 
-/** Where a member's row leads: into the session it works in, or to the team page when it has none. */
+/** Where a member's row leads: into the session it works in, a command-line member's own view, or
+ *  the team page for a Daedalus member with no session. */
 function openMember(projectId: string, member: Staff): void {
   const session = member.live?.session_id;
-  navigate(session ? projectSessionPath(projectId, session) : projectPagePath(projectId, "team"));
+  if (session) navigate(projectSessionPath(projectId, session));
+  else if (member.harness !== "daedalus") navigate(projectStaffPath(projectId, member.id));
+  else navigate(projectPagePath(projectId, "team"));
+}
+
+/** Whether the centre shows this member: its conversation, or its command-line view. */
+function isCurrent(view: FocusView, member: Staff): boolean {
+  if (view.kind === "staff") return view.id === member.id;
+  return view.kind === "session" && !!member.live?.session_id && member.live.session_id === view.id;
 }
 
 /** A member of the team: who, what they are on, what runs them, and a dot for how it goes. A launch

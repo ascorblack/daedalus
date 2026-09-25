@@ -300,7 +300,7 @@ export function App() {
   // and puts the project in the centre. The decision is made here and nowhere else, so every other
   // screen keeps the shell it always had.
   const focusProject = route.screen === "project" ? route.project : null;
-  const focusChat = !!focusProject && (route.page === null || route.page === "s");
+  const focusChat = !!focusProject && (route.page === null || route.page === "s" || route.page === "staff");
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
   const inDetail = !!route.session || !!route.detail || !!focusProject;
   useEffect(() => {

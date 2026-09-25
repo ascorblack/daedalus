@@ -16,6 +16,7 @@ from daedalus.extensions import wakeups
 from daedalus.extensions.notifications import Draft
 from daedalus.extensions.watches import WatchRefused
 from daedalus.host.peek import PeekRefused
+from daedalus.staff_runtime import LiveSession
 from daedalus.stores.projects import BRIEF_SECTIONS, OPERATOR_ONLY_SECTIONS, Project, ProjectError, ProjectFolder
 from daedalus.stores.staff import HARNESS_NAMES, StaffError
 
@@ -213,6 +214,10 @@ async def team(orch: Orchestrators, project: Project, session_id: str, *, staff:
     for s in sessions:
         state = "live" if s.live else f"ended ({s.end_reason or s.status})"
         lines.append(f"session {s.id}: {state}, {s.status}" + (f", task {s.task_id}" if s.task_id else "") + (f", branch {s.branch}" if s.branch else "") + (f", waiting for {s.waiting_for}" if s.waiting_for else ""))
+        if s.live and hasattr(orch.team, "health"):
+            # The same verdict the operator sees on the member's card, so the two never disagree
+            # about whether the member can hear them.
+            lines.append((await orch.team.health(LiveSession(member, s))).line(datetime.now(UTC)))
     if orch.team is not None:
         for entry in orch.team.queue.waiting_for(member.id):
             lines.append(f"queued: task {entry['task_id']} at {entry['position']} ({entry['reason']}: {entry['detail']})")

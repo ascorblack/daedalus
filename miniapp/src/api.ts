@@ -238,7 +238,15 @@ export type TerminalView = {
 /** What another part of the app says a terminal is doing: a line for its card and, when something
  *  waits on the operator, the button that answers it ("Answer" on a permission). Both are optional:
  *  the Terminals screen falls back to its own status line and to Open. */
-export type TerminalActivity = { label?: string; level?: "ok" | "warn" | "bad"; action?: { label: string; path: string } };
+export type TerminalActivity = {
+  /** A staff member's status code: the card says it in the reader's language, with `label` (the
+   *  host's words for what it waits on) after it. Without it, `label` is the whole line. */
+  status?: string;
+  label?: string;
+  level?: "ok" | "warn" | "bad" | "idle";
+  /** `kind` names an action the app has words for ("answer"); `label` is the host's fallback. */
+  action?: { label: string; path: string; kind?: string };
+};
 
 export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
 
@@ -610,7 +618,71 @@ export type JournalEntry = { id: number; at: string; author: "operator" | "orche
 export type BriefSection = { section: string; body: string; updated_at: string | null; updated_by: string | null };
 
 /** A message sent to a staff member, and how far it got. */
-export type StaffMessage = { id: string; staff_id: string; origin: "orchestrator" | "operator"; text: string; mode: string; state: "queued" | "written" | "submitted" | "acknowledged" | "failed"; attempts: number; created_at: string; updated_at: string; error: string };
+export type StaffMessage = { id: string; staff_id: string; staff_session_id?: string | null; origin: "orchestrator" | "operator"; text: string; mode: string; state: MessageState; attempts: number; created_at: string; updated_at: string; error: string; delivery?: StaffDelivery };
+export type MessageState = "queued" | "written" | "submitted" | "acknowledged" | "failed";
+
+/** How a message reached a command-line member: pasted or by pointer, the Enters it took, when each state was reached. */
+export type StaffDelivery = { via: string; degraded_to: string; enters: number; written_at: string | null; submitted_at: string | null; acknowledged_at: string | null };
+
+/** What a command-line agent can do, as `daedalus/harness/capabilities.py` has it. The views decide by
+ *  these fields, never by the harness's name, so a sixth CLI needs a row there and nothing here. */
+export type HarnessCapabilities = {
+  harness: string;
+  label: string;
+  status_channel: string;
+  status_channel_label: string;
+  steer: "native" | "tui_queue" | "degrade_to_queue" | "cancel_and_send";
+  permissions: "structured" | "hook_then_keys" | "keys" | "none";
+  questions: "structured" | "hook" | "none";
+  team_tools: "mcp" | "extension" | "none";
+  first_prompt: "argv" | "channel";
+  interrupt: "keys" | "structured";
+  companion: boolean;
+  tested_versions: [string, string];
+  supported_major: number;
+};
+
+/** Whether the host still hears a staff member (`daedalus/harness/health.py`). */
+export type ChannelHealth = {
+  team_tools: "connected" | "missing" | "waiting" | "builtin" | "none";
+  last_hook_at: string | null;
+  last_team_call_at: string | null;
+  last_signal_at: string | null;
+  silent_s: number | null;
+  silence_after_s: number;
+  silent: boolean;
+  last_message: { id: string; state: MessageState } | null;
+  last_acknowledged_at: string | null;
+  problems: ("team_tools_missing" | "silent" | "message_failed")[];
+  level: "ok" | "warn";
+};
+
+/** `GET /api/staff/{id}/session`: the member's live session as its runtime knows it. */
+export type StaffSessionView = {
+  staff: { id: string; name: string; harness: string; project_id: string };
+  session: { id: string; status: string; waiting_for: string; status_at: string; started_at: string; terminal_id: string | null; task_id: string | null; branch: string | null; worktree_path: string | null; pause_requested: boolean; cli_session_id?: string | null; last_signal_at?: string | null } | null;
+  capabilities?: HarnessCapabilities | null;
+  launch?: { harness: string; model: string; effort: string; agent: string; permission_mode: string; env: string | null; version: string | null; launch_id: string | null; companion_terminal_id: string | null; worktree: string | null; branch: string | null; task_id: string | null };
+  channel?: Record<string, unknown>;
+  health?: ChannelHealth | null;
+  requests?: Ask[];
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cost_usd?: number | null; window_used_pct?: number | null; transcript_ref?: string; [k: string]: unknown } | null;
+};
+
+/** One turn of a command-line member's transcript, read from its CLI's own store. */
+export type StaffTurn = {
+  index: number;
+  role: "user" | "assistant" | "orchestrator" | "system";
+  text: string;
+  tools: { name: string; summary: string; ok: boolean | null }[];
+  started_at: string;
+  ended_at: string;
+  usage: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cost_usd: number | null } | null;
+};
+
+export type StaffEventRow = { seq: number; at: string; type: string; payload: Record<string, unknown> };
+
+export type StaffChanges = { files: { path: string; added: number | null; removed: number | null }[]; added: number; removed: number; untracked: string[]; base?: string; detail?: string };
 
 /** What GET /api/sessions answers: a page of agents and the project folders they are in. */
 export type SessionList = {
