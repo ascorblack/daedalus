@@ -178,7 +178,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // exercise is the scripted session every shell goes through: plain commands and their status, a
 // directory change, the user's alias, forged marks, a nested shell, a long command and its busy
 // flag, and the nonce kept from the programs the shell starts.
-func (s *shellSession) exercise(nested, innerEcho string) {
+func (s *shellSession) exercise(nested, nestedPrompt, innerEcho string) {
 	t := s.t
 	check := func(r term.CommandRecord, command string, code int) {
 		t.Helper()
@@ -225,6 +225,12 @@ func (s *shellSession) exercise(nested, innerEcho string) {
 	s.type_(nested)
 	var w struct {
 		Matched string `json:"matched"`
+	}
+	// The nested shell has no marks to wait for. Quiet output says it is at its prompt, except for a
+	// shell that is quiet for a long time while it starts (pwsh): there its prompt is waited for.
+	if nestedPrompt != "" {
+		s.f.call(t, "terminal.wait_for", map[string]any{"id": s.id, "regex": nestedPrompt, "scope": "output",
+			"since_seq": head, "timeout_ms": 60000}, &w)
 	}
 	s.f.call(t, "terminal.wait_for", map[string]any{"id": s.id, "idle_ms": 500, "timeout_ms": 15000}, &w)
 	s.type_(innerEcho)
@@ -299,7 +305,7 @@ PROMPT_COMMAND=user_prompt
 `})
 	before := listing(t, home)
 	s := startShell(t, f, "bash1", "bash", home, nil, "bash")
-	s.exercise("bash", "echo inner-$((6*7))")
+	s.exercise("bash", "", "echo inner-$((6*7))")
 
 	// The user's prompt command still ran, and saw the status of the command before it.
 	s.run("false")
@@ -328,7 +334,7 @@ alias ll='echo LL-ALIAS'
 trap 'USER_TRAP=$((USER_TRAP+1))' DEBUG
 `})
 	s := startShell(t, f, "bash2", "bash", home, map[string]string{"DAEDALUS_SI_BASH_MODE": "debug"}, "bash")
-	s.exercise("bash", "echo inner-$((6*7))")
+	s.exercise("bash", "", "echo inner-$((6*7))")
 	head := s.info().OutputSeq
 	s.type_(`echo "trap=$USER_TRAP"`)
 	var w struct {
@@ -392,7 +398,7 @@ PS1='%# '
 	})
 	before := listing(t, home)
 	s := startShell(t, f, "zsh1", "zsh", home, nil, "zsh")
-	s.exercise("zsh", "echo inner-$((6*7))")
+	s.exercise("zsh", "", "echo inner-$((6*7))")
 
 	// The user's files ran as their own (a typeset is not a function's local), their precmd hook
 	// still sees the status, and ZDOTDIR is theirs again (here: unset, as it started).
@@ -463,7 +469,7 @@ end
 	before := listing(t, home)
 	s := startShell(t, f, "fish1", "fish", home, map[string]string{"XDG_CONFIG_HOME": config,
 		"XDG_DATA_HOME": filepath.Join(xdg, "data"), "XDG_CACHE_HOME": filepath.Join(xdg, "cache")}, "fish")
-	s.exercise("fish", "echo inner-(math 6 x 7)")
+	s.exercise("fish", "", "echo inner-(math 6 x 7)")
 
 	// The user's prompt is kept and still sees the status of the command before it.
 	s.run("false")
@@ -490,7 +496,7 @@ func TestPwshIntegration(t *testing.T) {
 	})
 	s := startShell(t, f, "pwsh1", "pwsh", home, map[string]string{"POWERSHELL_TELEMETRY_OPTOUT": "1"}, "pwsh")
 	s.physicalCwd = true
-	s.exercise("pwsh -NoLogo", "echo inner-$(6*7)")
+	s.exercise("pwsh -NoLogo", `PS [^\r\n]*> `, "echo inner-$(6*7)")
 	s.end()
 }
 
