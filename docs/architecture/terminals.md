@@ -73,7 +73,9 @@ The daemon runs on Windows as the host environment of a native install (below). 
   file, because the default execution policy refuses every script file; the user's policy is not
   changed. Older console hosts drop OSC sequences they do not know, and then the marks never
   arrive: the shell works, and `terminal.commands` answers 1007.
-- **Signals:** `INT` is a Ctrl+C typed into the console; `TERM`, `HUP`, `QUIT` and `KILL` terminate
+- **Signals:** `INT` is a Ctrl+C typed into the console (the daemon turns the processing of Ctrl+C
+  back on before its first program: the launcher starts it in a process group of its own, which
+  ignores Ctrl+C, and every program would inherit that); `TERM`, `HUP`, `QUIT` and `KILL` terminate
   the job (with `group`) or the program; the rest answer 1007. `terminal.kill` closes the console
   first, which is the hangup (attached programs get `CTRL_CLOSE_EVENT`), and terminates the job
   after the grace. There is no foreground process group, so `busy` comes only from the shell's marks.
@@ -302,6 +304,9 @@ its last 64 KiB.
   terminal it can find: on Linux and macOS, the process tree, the session, and every process whose
   environment carries the terminal's `DAEDALUS_TERMINAL_ID`. That catches a child that called
   `setsid` after its parent exited. Windows is described above.
+- A program starts with the default action for `SIGHUP` and `SIGINT` even when the daemon was
+  started with them ignored (in the background of a script, under `nohup`): a shell hands an
+  ignored signal on to every command, and Ctrl+C would otherwise interrupt nothing.
 - A program that exits while a background job still holds the PTY open is reported exited after
   half a second of draining; closing the PTY hangs the job up, as closing a terminal window would.
 - Exited terminals are kept, with their screens, for an hour, then forgotten.
