@@ -41,6 +41,31 @@ logger = logging.getLogger(__name__)
 
 ImageLoader = Callable[[str], Awaitable[tuple[bytes, str]]]
 
+_CONTEXT_OVERFLOW_SIZES = re.compile(
+    r"maximum context length is (?P<window>\d+) tokens.*?requested (?:a total of )?\d+ tokens"
+    r"(?: \((?P<prompt>\d+) (?:tokens )?in the messages, (?P<output>\d+) (?:tokens )?in the completion\))?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def context_overflow_sizes(text: str) -> dict[str, int]:
+    """The window, prompt and requested output a context refusal states, for the core's retry.
+
+    vLLM and OpenAI-shaped servers say "maximum context length is 256000 tokens. However, you requested
+    256023 tokens (190487 in the messages, 65536 in the completion)". The core sizes its one corrective
+    retry from these numbers when it has them — the output cap it can still afford — and otherwise
+    guesses from its own estimate, which is what ran short in the first place.
+    """
+    match = _CONTEXT_OVERFLOW_SIZES.search(text)
+    if match is None:
+        return {}
+    sizes = {"context_window": int(match.group("window"))}
+    if match.group("prompt") is not None:
+        sizes["input_tokens"] = int(match.group("prompt"))
+        sizes["requested_output_tokens"] = int(match.group("output"))
+    return sizes
+
+
 _CONTEXT_ERROR_MARKERS = (
     "context length",
     "context_length",
@@ -447,9 +472,14 @@ class OpenAICompatibleProvider(ILLMProvider):
             "model": model,
             "messages": wire,
             "max_tokens": request.max_tokens,
-            "temperature": self.endpoint.temperature if self.endpoint.temperature is not None else request.temperature,
             "stream": stream,
         }
+        # The core leaves the temperature unset unless a caller states one, so the server's own
+        # generation config (or the model's recommended sampling) applies; a null on the wire is not
+        # "unset" to every server, so the key is left out rather than sent empty.
+        temperature = self.endpoint.temperature if self.endpoint.temperature is not None else request.temperature
+        if temperature is not None:
+            body["temperature"] = temperature
         if stream:
             body["stream_options"] = {"include_usage": True}
         if request.tools:
@@ -457,6 +487,9 @@ class OpenAICompatibleProvider(ILLMProvider):
             forced = extra.get("forced_tool_choice")
             if forced:
                 body["tool_choice"] = {"type": "function", "function": {"name": forced}}
+            elif extra.get("tool_choice_required"):
+                # "Some tool, no prose": the core asks for it when a run must act rather than write.
+                body["tool_choice"] = "required"
             elif isinstance(extra.get("tool_choice"), dict):
                 body["tool_choice"] = extra["tool_choice"]
         thinking = bool(extra.get("enable_thinking", False))
@@ -547,7 +580,7 @@ class OpenAICompatibleProvider(ILLMProvider):
                 LLMRateLimitError(f"{self.endpoint.id}: llama.cpp busy: {text[:300]}"), ProviderVerdict("rate_limit", True)
             )
         if status in (400, 413, 422) and any(m in lowered for m in _CONTEXT_ERROR_MARKERS):
-            raise LLMContextWindowExceeded(f"{self.endpoint.id}: {text[:300]}")
+            raise LLMContextWindowExceeded(f"{self.endpoint.id}: {text[:300]}", **context_overflow_sizes(text))
         verdict = classify_failure(status, text)
         if verdict.reason == "rate_limit":
             raise _classified(LLMRateLimitError(f"{self.endpoint.id}: rate limited: {text[:300]}"), verdict)

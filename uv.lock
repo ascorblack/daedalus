@@ -1681,7 +1681,7 @@ wheels = [
 
 [[package]]
 name = "protocore"
-version = "2.0.0a4"
+version = "2.0.0a21"
 source = { editable = "../protocore-exp" }
 dependencies = [
     { name = "jinja2" },

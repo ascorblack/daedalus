@@ -385,3 +385,43 @@ async def test_opencode_sends_the_session_id_and_deepseek_shaped_thinking() -> N
     assert captured["headers"]["x-opencode-session"] == "sess-42"
     assert captured["headers"]["user-agent"].startswith("daedalus/")
     assert captured["json"]["thinking"] == {"type": "enabled"} and captured["json"]["reasoning_effort"] == "high"
+
+
+async def test_an_unset_temperature_is_left_off_the_wire() -> None:
+    """The core leaves the temperature to the server unless a caller states one; a null is not "unset" everywhere."""
+    provider = _provider(_sse([_chunk({"content": "x"}, finish="stop")]))
+    async for _ in provider.stream_with_tools(_request()):
+        pass
+    assert "temperature" not in provider.captured["json"]  # type: ignore[attr-defined]
+
+    stated = _request()
+    stated = stated.model_copy(update={"temperature": 0.2})
+    provider = _provider(_sse([_chunk({"content": "x"}, finish="stop")]))
+    async for _ in provider.stream_with_tools(stated):
+        pass
+    assert provider.captured["json"]["temperature"] == 0.2  # type: ignore[attr-defined]
+
+
+async def test_a_required_tool_choice_is_rendered() -> None:
+    provider = _provider(_sse([_chunk({"content": "x"}, finish="stop")]))
+    async for _ in provider.stream_with_tools(_request(tool_choice_required=True)):
+        pass
+    assert provider.captured["json"]["tool_choice"] == "required"  # type: ignore[attr-defined]
+
+
+async def test_a_context_refusal_carries_the_sizes_the_server_stated() -> None:
+    from protocore.contracts.llm import LLMContextWindowExceeded
+
+    body = json.dumps({"error": {"message": "This model's maximum context length is 256000 tokens. However, you requested 256023 tokens (190487 in the messages, 65536 in the completion). Please reduce the length of the messages or completion.", "type": "BadRequestError"}})
+    provider = _provider(body, status=400)
+    with pytest.raises(LLMContextWindowExceeded) as raised:
+        async for _ in provider.stream_with_tools(_request()):
+            pass
+    assert (raised.value.context_window, raised.value.input_tokens, raised.value.requested_output_tokens) == (256000, 190487, 65536)
+
+    bare = _provider(json.dumps({"error": {"message": "prompt is too long"}}), status=400)
+    with pytest.raises(LLMContextWindowExceeded) as raised:
+        async for _ in bare.stream_with_tools(_request()):
+            pass
+    assert raised.value.context_window is None and raised.value.input_tokens is None
+
