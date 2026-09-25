@@ -34,6 +34,7 @@ from protocore.contracts.types import (
     ToolUseBlock,
 )
 from protocore.runtime.context.compaction import CompactionState
+from protocore.runtime.context.ledger import is_ledger
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 from protocore.runtime.live_control import new_queued_prompt
@@ -1609,7 +1610,11 @@ class SessionManager:
                 "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": seqs} if seqs else {"seqs": []},
             },
         )
-        rebuilt = [message, *tail]
+        # The core's compaction ledger — exact values, files and operator words, recorded by code as
+        # the run compacted — is carried over as it is, never through the summariser: a record a model
+        # rewrites on every compaction compounds its errors. The core rebuilds it on its next pass.
+        ledgers = [m for m in history if is_ledger(m)]
+        rebuilt = [message, *ledgers[-1:], *tail]
         state.persist_gen += 1  # any persist captured before this point describes a history that is gone
         await self._reset_observed_prompt(state, before=[*history, *tail], after=rebuilt)
         if state.engine is not None:
@@ -4615,8 +4620,8 @@ def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 60
     """A compact textual rendering of the history for the summariser."""
     lines: list[str] = []
     for message in history:
-        if message.role is MessageRole.system:
-            continue
+        if message.role is MessageRole.system or is_ledger(message):
+            continue  # the ledger is carried beside the summary, not through it
         for block in message.content_blocks:
             if isinstance(block, TextBlock):
                 text = prompts.without_turn_context(block.text).strip()  # the clock and the board of a past turn are not history

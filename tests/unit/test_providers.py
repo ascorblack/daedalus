@@ -223,7 +223,7 @@ def test_dsml_guard_keeps_prose_after_the_block_and_marker_mentions() -> None:
     assert shown + rest == "the marker <|DSML| appears in prose only" and calls == []
 
 
-async def test_structured_completion_returns_a_response_the_core_summariser_can_read() -> None:
+async def test_structured_completion_returns_the_object_as_its_json_text() -> None:
     from protocore.contracts.llm import LLMResponse
 
     body = json.dumps({"choices": [{"message": {"content": '{"summary": "Ran ls; touched /srv/x.py"}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
@@ -240,7 +240,7 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
     from protocore.runtime.context.compaction import CompactionState, run_tier2_summarisation
     from protocore.runtime.runtime_constants import default_runtime_constants
 
-    body = json.dumps({"choices": [{"message": {"content": '{"summary": "Listed /srv with Exec and read config.py."}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    body = json.dumps({"choices": [{"message": {"content": "## Progress\nListed /srv with Exec and read config.py."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
     provider = _provider(body)
     history: list[Message] = [Message(role=MessageRole.user, content_blocks=[TextBlock(text="do the thing")])]
     for i in range(8):
@@ -251,6 +251,10 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
     assert result.turns_summarised > 0 and result.tokens_freed > 0
     summaries = [m for m in history if m.metadata.get("protocore.compaction_summary")]
     assert summaries and "<compacted-turn" in summaries[0].text
+    assert "Listed /srv with Exec and read config.py." in summaries[0].text
+    # The summary was asked for as plain text, with the instruction as the system message.
+    sent = provider.captured["json"]  # type: ignore[attr-defined]
+    assert "response_format" not in sent and sent["messages"][0]["role"] == "system"
     # The most recent turns stay verbatim so the model knows where it stopped.
     assert history[-1].content_blocks[0].content.startswith("file line")  # type: ignore[union-attr]
 
@@ -303,7 +307,7 @@ async def test_core_tier2_keeps_operator_turns_verbatim() -> None:
     from protocore.runtime.context.compaction import CompactionState, run_tier2_summarisation
     from protocore.runtime.runtime_constants import default_runtime_constants
 
-    body = json.dumps({"choices": [{"message": {"content": '{"summary": "did things"}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    body = json.dumps({"choices": [{"message": {"content": "## Progress\ndid things"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
     provider = _provider(body)
     history: list[Message] = [Message(role=MessageRole.user, content_blocks=[TextBlock(text="do the thing")])]
     for i in range(4):
@@ -424,14 +428,6 @@ async def test_a_context_refusal_carries_the_sizes_the_server_stated() -> None:
         async for _ in bare.stream_with_tools(_request()):
             pass
     assert raised.value.context_window is None and raised.value.input_tokens is None
-
-
-async def test_a_summary_the_model_did_not_close_is_closed() -> None:
-    """The live shape: JSON mode, finish=stop, the whole summary written and the final brace missing."""
-    unclosed = '{"summary": "Turn 1: explored the repo; two tool calls; contents not yet read (UNKNOWN)."'
-    body = json.dumps({"choices": [{"message": {"content": unclosed}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
-    response = await _provider(body).complete_structured(_request(), {"type": "object"})
-    assert json.loads(response.message.text)["summary"].endswith("(UNKNOWN).")
 
 
 async def test_a_summary_the_output_cap_cut_is_still_refused() -> None:

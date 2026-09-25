@@ -2262,14 +2262,17 @@ class TelegramFront:
             p = event.payload
             before, after = int(p.get("tokens_before") or 0), int(p.get("tokens_after") or 0)
             summarised = int(p.get("tier2_summarised") or 0) + int(p.get("tier3_folded") or 0)
+            dropped = int(p.get("floor_dropped") or 0)
             # A pass that changed nothing is not news; the events keep the record.
-            outbox = await self.outbox_for_session(session_id) if summarised or (before and before - after >= 0.05 * before) else None
+            outbox = await self.outbox_for_session(session_id) if summarised or dropped or (before and before - after >= 0.05 * before) else None
             if outbox is not None:
+                # The floor removes spans without a summary; that is worth saying in so many words.
+                floor = f" {dropped} message(s) removed without a summary (their exact values are in the compaction ledger)." if dropped else ""
                 try:
                     await outbox.send_html(
                         f"<p>🗜 <b>Context compacted</b> ({p.get('reason', 'routine')}): "
                         f"{int(p.get('tokens_before') or 0):,} → {int(p.get('tokens_after') or 0):,} tokens; "
-                        f"{int(p.get('tier2_summarised') or 0)} turn(s) summarised. Older detail is now a summary in the transcript.</p>"
+                        f"{int(p.get('tier2_summarised') or 0)} turn(s) summarised.{floor} Older detail is now a summary in the transcript.</p>"
                     )
                 except Exception:  # noqa: BLE001
                     logger.warning("could not post the compaction note", exc_info=True)

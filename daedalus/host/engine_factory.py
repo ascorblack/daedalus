@@ -102,12 +102,11 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # The skill catalogue (name + when-to-use line per skill) must fit whole: past the budget the core
         # drops the descriptions, and a bare name is not a reason to load a skill.
         skill_index_budget_ratio=0.04,
-        # Summaries must not be cut mid-JSON: the word budget the summariser is asked for is sized to this cap
-        # at four tokens a word, so a Cyrillic summary of a large unit still fits.
-        compaction_summary_max_output_tokens=4096,
-        # A summariser writes sentences whatever it is given: a small tool exchange comes back
-        # no smaller, so units under this size are kept as they are instead of paid for.
-        compaction_summary_min_unit_tokens=1500,
+        # A summariser writes a few lines whatever it is given: a small tool exchange comes back
+        # no smaller, so units under this size are joined with their neighbours rather than sent alone.
+        compaction_summary_min_unit_tokens=800,
+        # One deadline for every summariser call the session makes, in-run and between runs.
+        compaction_summary_timeout_seconds=config.compaction.call_timeout_seconds,
         # The host compacts the whole history between runs; the core's tiers only catch a run that grows past that.
         # A server that reserves the output budget inside the window (vLLM) rejects a prompt above
         # window − max output, so the trigger must sit below that cliff, not only below the window —
