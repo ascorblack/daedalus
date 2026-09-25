@@ -72,7 +72,11 @@ def run() -> None:
             assert posts[-1][0] == "cancel"
 
             request.fill("Ask before deleting files")
-            page.get_by_role("button", name=prepare).click()
+            # The new proposal has to exist before it is made ready: updating straight after the click
+            # raced the request under load, readied the cancelled proposal, and the new one then
+            # replaced it still planning, so the review never opened.
+            with page.expect_response("**/api/prompt-change/request"):
+                page.get_by_role("button", name=prepare).click()
             state["proposal"].update(state="ready", stage="ready", summary="Added confirmation before deletion.", rules=revised, diff=proposal["diff"])
             expect(dialog).to_be_visible(timeout=8000)
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

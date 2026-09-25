@@ -253,6 +253,10 @@ def the_grid(browser, problems: list[str]) -> None:  # type: ignore[no-untyped-d
     ids = ["k1tests00000", "k2devsrv0000", "k3staff00000", "k4htop000000"]
     for i in ids:
         term.emit(i, f"terminal {i}\r\n")
+    # Each pane's size goes out before its snapshot arrives, and the host's confirmation comes after
+    # that snapshot, which is drawn at the old size: the order that once left a pane at 80 × 24 after
+    # it had sent 80 × 23. Without the delay only a loaded machine produced it.
+    term.snapshot_delay = 0.3
     context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark")
     context.add_init_script(DEBUG)
     page = open_page(context, term, f"terminals/{ids[0]}?with={','.join(ids[1:])}", ".term-grid")
@@ -267,8 +271,9 @@ def the_grid(browser, problems: list[str]) -> None:  # type: ignore[no-untyped-d
         elif sizes[i][0][0] < 20 or sizes[i][0][1] < 4:
             problems.append(f"pane {i} sent a size too small to be a real pane: {sizes[i][0]}")
     # What each pane sent is what its terminal was fitted to in that pane, not a size from elsewhere.
-    # The grid follows the size the host confirms, and xterm.js applies a resize only between writes,
-    # so under load it lands a little after the RESIZE went out: wait for it rather than read once.
+    # A pane may pass through the attach's size for a moment while the snapshot drawn at it is still
+    # being parsed, so the settled grid is what is compared; one that settles at a size other than the
+    # one it sent is the defect (the host's confirmation once overtook that snapshot and was undone).
     grids: dict = {}
     for _ in range(25):
         grids = {i: page.evaluate("(id) => window.__terminals.size(id)", i) for i in ids}

@@ -139,7 +139,7 @@ export function backoffDelay(attempt: number, random: () => number): number {
 
 type Pending =
   | { kind: "write"; data: Uint8Array; end: number }
-  | { kind: "snapshot"; frame: Extract<ServerFrame, { kind: "snapshot" }> }
+  | { kind: "snapshot"; frame: Extract<ServerFrame, { kind: "snapshot" }>; after: EventMessage[] }
   | { kind: "event"; event: EventMessage };
 
 /** Events delivered in stream order rather than on arrival. */
@@ -346,6 +346,16 @@ export class TerminalConnection {
         this.setState({ kind: "exited", code: event.code, signal: event.signal });
       }
       if (ORDERED.has(event.type)) return this.ordered(event);
+      // A `size` that arrives while the snapshot before it still waits for earlier writes would be
+      // undone by that snapshot's reset, which resizes to the PTY's size at attach: a pane sent 80×23,
+      // the daemon confirmed it, and then the snapshot put the screen back to 80×24 for good. It is held
+      // and handed over just after the snapshot runs — outside xterm.js's write callbacks, since a
+      // resize from inside one parses the queued writes again.
+      const waiting = event.type === "size" ? this.waitingSnapshot() : null;
+      if (waiting) {
+        waiting.after.push(event);
+        return;
+      }
       this.options.onEvent?.(event);
       return;
     }
@@ -354,7 +364,7 @@ export class TerminalConnection {
       this.snapshotSeq = frame.seq;
       // Marks held for bytes the snapshot replaces are described again by the `marks` after it.
       this.early = this.early.filter((e) => e.seq > frame.seq);
-      this.apply({ kind: "snapshot", frame });
+      this.apply({ kind: "snapshot", frame, after: [] });
       return;
     }
     if (this.receivedSeq === null) this.receivedSeq = frame.seq;
@@ -394,6 +404,15 @@ export class TerminalConnection {
     for (const { event } of due) this.apply({ kind: "event", event });
   }
 
+  /** The latest snapshot received and not yet applied, if any. */
+  private waitingSnapshot(): Extract<Pending, { kind: "snapshot" }> | null {
+    for (let i = this.deferred.length - 1; i >= 0; i--) {
+      const op = this.deferred[i];
+      if (op.kind === "snapshot") return op;
+    }
+    return null;
+  }
+
   private apply(op: Pending): void {
     if (this.deferred.length || (op.kind === "snapshot" && this.inFlight > 0)) {
       this.deferred.push(op);
@@ -419,6 +438,7 @@ export class TerminalConnection {
       // Acknowledged as soon as it is parsed, whatever its size: the daemon's window starts again
       // from the snapshot, and it should not wait for 64 KiB of new output to hear so.
       this.write(op.frame.data, op.frame.seq, true);
+      for (const event of op.after) guarded(() => this.options.onEvent?.(event))();
     } else {
       this.write(op.data, op.end, false);
     }
