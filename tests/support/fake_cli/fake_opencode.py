@@ -104,6 +104,8 @@ class FakeOpenCode(FakeAgent):
         self.mcp: McpClient | None = None
         self.last_esc = 0.0
         self.current_message: dict[str, Any] | None = None
+        self.ids_by_text: dict[str, list[str]] = {}
+        """``messageID`` a client chose for a prompt, by its text: the user message takes that id."""
         if args.get("--session"):
             self.current = args.get("--session")
             self.load(self.current)
@@ -144,6 +146,12 @@ class FakeOpenCode(FakeAgent):
             self.log("port_in_use", port=self.port)
             await self.quit(1)
             return False
+        for path in self.config.get("instructions") or []:
+            with contextlib.suppress(OSError):
+                self.log("system_prompt", text=Path(str(path)).read_text(encoding="utf-8"))
+        roots = (self.config.get("skills") or {}).get("paths") or []
+        if roots:
+            self.log("skills", names=sorted(p.parent.name for root in roots for p in Path(str(root)).glob("**/SKILL.md")))
         spec = (self.config.get("mcp") or {}).get("daedalus_team")
         if isinstance(spec, dict) and spec.get("type") == "local":
             command = [str(c) for c in spec.get("command") or []]
@@ -201,7 +209,13 @@ class FakeOpenCode(FakeAgent):
         return False
 
     def add_message(self, role: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
-        info: dict[str, Any] = {"id": "msg_" + new_id().replace("-", "")[:24], "sessionID": self.current, "role": role, "time": {"created": ms()}}
+        ident = "msg_" + new_id().replace("-", "")[:24]
+        if role == "user":
+            text = "".join(str(p.get("text") or "") for p in parts)
+            chosen = self.ids_by_text.get(text) or []
+            if chosen:
+                ident = chosen.pop(0)
+        info: dict[str, Any] = {"id": ident, "sessionID": self.current, "role": role, "time": {"created": ms()}}
         if role == "assistant":
             info.update(modelID=self.args.get("--model", "anthropic/claude-sonnet-4").split("/")[-1], providerID="anthropic", tokens={"input": 900, "output": 60, "cache": {"read": 400, "write": 0}}, cost=0.001)
         message: dict[str, Any] = {"info": info, "parts": []}
@@ -278,7 +292,9 @@ class FakeOpenCode(FakeAgent):
         kind = "bash" if tool == "Bash" else tool
         self.tui.open_dialog(Dialog("permission", f"Permission required: {kind}", [f"  {summary}"], ["Allow once", "Allow always", "Reject"],
                                     on_choose=lambda i: settle(future, {"reply": meanings[i], "via": "tui"}), on_escape=lambda: settle(future, {"reply": "reject", "via": "tui"})))
-        self.publish("permission_asked", {"id": ident, "sessionID": self.current, "permission": kind, "patterns": [summary], "metadata": {}, "tool": {"callID": tool_id}})
+        # The shape 1.18.23 sent (recorded): the command in the metadata, the call it belongs to.
+        metadata = {"command": summary} if kind == "bash" else {"filePath": summary}
+        self.publish("permission_asked", {"id": ident, "sessionID": self.current, "permission": kind, "patterns": [summary], "metadata": metadata, "always": [f"{summary.split(' ')[0]} *"], "tool": {"messageID": self.current_message["info"]["id"] if self.current_message else "", "callID": tool_id}})
         try:
             answer = await future
         finally:
@@ -315,6 +331,14 @@ class FakeOpenCode(FakeAgent):
             result = f"error: {exc or 'timed out'}"
         await self.on_tool_end(f"daedalus_team_{name}", arguments, tool_id, result, not result.startswith("error"))
         return result
+
+    async def quit(self, code: int = 0) -> None:
+        if code == 0 and self.current and not self.done.is_set():
+            # What the real TUI leaves on the screen when it exits.
+            self.tui.restore()
+            sys.stdout.write(f"\r\n  Session   {self.sessions[self.current].get('title')}\r\n  Continue  opencode -s {self.current}\r\n")
+            sys.stdout.flush()
+        await super().quit(code)
 
     async def on_session_end(self) -> None:
         if self.mcp is not None:
@@ -373,6 +397,8 @@ class FakeOpenCode(FakeAgent):
             if method == "GET":
                 return 200, list(self.sessions.values())
             if method == "POST":
+                if body.get("model"):
+                    self.log("session_model", model=body["model"])
                 return 200, self.new_session(title=str(body.get("title") or ""))
         if len(parts) >= 2 and parts[0] == "session":
             session_id = parts[1]
@@ -388,6 +414,12 @@ class FakeOpenCode(FakeAgent):
                 return 200, True
             if parts[2:] == ["prompt_async"] and method == "POST":
                 text = "".join(str(p.get("text", "")) for p in body.get("parts") or [] if p.get("type") == "text")
+                if body.get("messageID"):
+                    if not str(body["messageID"]).startswith("msg"):
+                        return 400, {"error": "messageID must start with msg"}
+                    self.ids_by_text.setdefault(text, []).append(str(body["messageID"]))
+                if body.get("model"):
+                    self.log("prompt_model", model=body["model"])
                 self.current = session_id
                 self.log("submitted", text=text, busy=self.busy, via="prompt_async")
                 await self.submit(text)

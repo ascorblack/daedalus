@@ -1,0 +1,6 @@
+{"t": 0.0, "path": "/hook/<launch>/team", "body": {"client": {"name": "codex-mcp-client", "protocol": "2025-06-18", "version": "0.155.1"}, "stage": "initialize", "tool": "hello"}}
+{"t": 0.0, "path": "/hook/<launch>/team", "body": {"stage": "tools/list", "tool": "hello"}}
+{"t": 16.056, "path": "/hook/<launch>/team", "body": {"client": {"name": "codex-mcp-client", "protocol": "2025-06-18", "version": "0.155.1"}, "stage": "initialize", "tool": "hello"}}
+{"t": 16.057, "path": "/hook/<launch>/team", "body": {"stage": "tools/list", "tool": "hello"}}
+{"t": 30.511, "path": "/hook/<launch>/team", "body": {"client": {"name": "codex-mcp-client", "protocol": "2025-06-18", "version": "0.155.1"}, "stage": "initialize", "tool": "hello"}}
+{"t": 30.511, "path": "/hook/<launch>/team", "body": {"stage": "tools/list", "tool": "hello"}}

@@ -777,6 +777,14 @@ passed on with its last words. `GET /api/staff/{id}/session`, `…/transcript`, 
 composer and its "read". The self-check after an update runs one short session, with one tiny prompt
 on the cheapest model.
 
+Codex and OpenCode work as staff through their own servers rather than through their screens. Codex
+runs its app server as a second terminal beside the TUI; the host starts the thread on it with the
+member's instructions and the TUI attaches to that thread, so every message the host sends by the
+server shows in the TUI, and approvals and questions come to the host as the server's requests.
+OpenCode's TUI carries its server inside it, on a loopback port of the launch and behind a password
+made for that launch; messages go to it under ids the host chooses and come back as its events. The
+team tools, the instructions and the skill are launch configuration in both, never your own.
+
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
 bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.

@@ -1,0 +1,3 @@
+{"t": 0.0, "path": "/hook/<launch>/team", "body": {"client": {"name": "opencode", "protocol": "2025-11-25", "version": "1.18.23"}, "stage": "initialize", "tool": "hello"}}
+{"t": 0.012, "path": "/hook/<launch>/team", "body": {"stage": "tools/list", "tool": "hello"}}
+{"t": 1106.711, "path": "/hook/<launch>/team?wait_ms=15000", "body": {"artifacts": [], "call_id": "l2:3c85cc8b:1", "kind": "checkpoint", "note": "self-check", "tool": "report"}}
