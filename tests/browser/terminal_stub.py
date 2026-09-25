@@ -19,6 +19,7 @@ import json
 import struct
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -171,6 +172,12 @@ class TerminalStub:
         self.load = load_answer()
         # What a sandboxed create or restart reports as left read-only, as the host would.
         self.skipped: list[dict[str, str]] = []
+        # Seconds between an attach's hello and the snapshot behind it. A loaded machine spaces them
+        # like this, and a size the page sends in that gap is confirmed only after the snapshot drawn
+        # at the old size. A check sets it so the frames come in that order on every run; whether the
+        # snapshot is still being parsed when the confirmation lands is left to xterm.js's timing,
+        # which is why the exact order is pinned by `connection.test.ts` as well.
+        self.snapshot_delay = 0.0
 
     # -- the terminals ------------------------------------------------------------------------
 
@@ -350,6 +357,8 @@ class TerminalStub:
     def attach(self, client: Client, request: dict[str, Any]) -> None:
         term = client.term
         self.send(client, self.hello(client))
+        if self.snapshot_delay:
+            time.sleep(self.snapshot_delay)
         last = int(request.get("lastSeq") or 0)
         tail = bool(request.get("haveState")) and 0 <= last <= len(term.stream) and term.last_resize_seq <= last
         client.attached = True
