@@ -1,12 +1,11 @@
 // @vitest-environment jsdom
 // The main chat decided without a browser: one card per request, grouped by project and oldest
 // first; the one line an answered request collapses to, the same in every window; the dispatches in
-// the order the operator reads them; the model preselected in Settings; and the main orchestrator's
-// own chat kept out of the list it is pinned above.
+// the order the operator reads them; the model preselected in Settings; and the address of the main
+// chat, which is orchestration mode's home.
 
 import { afterEach, describe, expect, it } from "vitest";
-import type { Dispatch, MainAsk, Preset, ProjectFolder, SessionSummary } from "../api";
-import { arrange } from "../grouping";
+import type { Dispatch, MainAsk, Preset } from "../api";
 import { setLang } from "../i18n";
 import { parse } from "../router";
 import { eventTone, parseEvents } from "../turns";
@@ -88,9 +87,11 @@ describe("the dispatches", () => {
 });
 
 describe("the main chat in the app", () => {
-  it("has an address of its own that is not a destination of the menu", () => {
-    const route = parse("/app/main", "");
-    expect([route.screen, route.session, route.project]).toEqual(["main", null, null]);
+  it("is orchestration mode's home, and its old address still leads there", () => {
+    const route = parse("/app/orchestration", "");
+    expect([route.screen, route.session, route.project, route.detail]).toEqual(["orchestration", null, null, null]);
+    const old = parse("/app/main", "");
+    expect([old.screen, old.project, old.detail]).toEqual(["orchestration", null, null]);
   });
 
   it("reads the main orchestrator's wake-ups as a card of reports", () => {
@@ -99,14 +100,6 @@ describe("the main chat in the app", () => {
     expect(batch?.lines.map((l) => l.tone)).toEqual(["ok", "warn"]);
     expect(batch?.lines[1].text.endsWith("nobody there is working")).toBe(true);
     expect(eventTone("Bakery closed dispatch d1 as blocked: needs a password")).toBe("bad");
-  });
-
-  it("keeps its chat out of the list it is pinned above, and its project while it holds nothing else", () => {
-    const main = { id: "p-main", name: "Main", system: "dispatcher", created_at: "2026-09-01T00:00:00Z", settings: { snapshots: false, system: "dispatcher" }, folders: [], total: 1, active: 0, loops: 0, last_message_at: "" } as unknown as ProjectFolder;
-    const session = (id: string, metadata: Record<string, unknown>) => ({ id, title: id, project_id: "p-main", status: "idle", last_message_at: "2026-09-25T10:00:00Z", created_at: "2026-09-25T10:00:00Z", metadata }) as unknown as SessionSummary;
-    expect(arrange([session("now", { dispatcher: true })], [main]).folders).toEqual([]);
-    const replaced = arrange([session("now", { dispatcher: true }), session("before", { dispatcher_retired: true })], [main]).folders;
-    expect(replaced.map((f) => f.rows.map((r) => r.s.id))).toEqual([["before"]]);
   });
 });
 

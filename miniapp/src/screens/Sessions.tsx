@@ -7,7 +7,8 @@ import { relTime, shortModel, untilShort } from "../format";
 import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
 import { MoveSessionSheet, ProjectChip, ProjectSettingsSheet, useProjects } from "../projects";
-import { navigate, parse, pathFor, projectHome } from "../router";
+import { navigate, parse, pathFor } from "../router";
+import { agentsListing } from "../mode";
 import { PageHeader, go, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { useStreamUp } from "../events";
@@ -58,7 +59,9 @@ export function SessionsScreen({ onOpen, toast, current, compact, bare, project 
   const searchField = <input type="search" className="field search" placeholder={t("search.placeholder")} value={query} maxLength={500} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }} aria-label={t("search.label")} />;
   const inProject = projects.find((p) => p.id === project);
 
-  const listing = searching ? results : data ? { ...data, sessions: [...data.sessions, ...extra], next_cursor: next } : data;
+  // The Agents list never shows what belongs to orchestration mode, found by a search or not.
+  const raw = searching ? results : data ? { ...data, sessions: [...data.sessions, ...extra], next_cursor: next } : data;
+  const listing = useMemo(() => (raw ? agentsListing(raw) : raw), [raw]);
   const sessions = listing?.sessions ?? [];
   const folders = useMemo(
     () => arrange(sessions, listing?.projects ?? [], { project, results: searching }),
@@ -236,7 +239,6 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
     </>
   );
   const chevron = <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>;
-  if (folder.orchestrated) return <OrchestratedEntry folder={folder} compact={compact} onSettings={editProject} editing={editing} onCloseSettings={() => setEditing(false)} toast={toast} />;
   return (
     <section ref={section} data-project={folder.key} className={`folder ${single ? "single" : ""} ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
       <div className="folder-top">
@@ -286,33 +288,6 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
     </section>
   );
 }, sameFolder);
-
-/** A project with an orchestrator, as one entry: the orchestrator's mark, what is going on inside, and
- *  how many of its requests wait for the operator. It opens the project's focus mode, where its
- *  sessions are; the lens of the list (the project picked in the switcher) is left as it was. */
-function OrchestratedEntry({ folder, compact, onSettings, editing, onCloseSettings, toast }: { folder: Folder; compact?: boolean; onSettings: () => void; editing: boolean; onCloseSettings: () => void; toast: (text: string) => void }) {
-  const o = folder.orchestrated!;
-  const href = projectHome(folder.key);
-  const meta = [t("focus.entry.orchestrator"), plural("team.count.staff", o.staff), o.working > 0 ? plural("team.count.working", o.working) : ""].filter(Boolean).join(" · ");
-  return (
-    <section data-project={folder.key} className="folder orchestrated">
-      <div className="folder-top">
-        <a className="folder-head orchestrated-head" href={href} onClick={(e) => go(e, href)} title={t("focus.entry.open", { name: folder.name })} aria-label={t("focus.entry.open", { name: folder.name })}>
-          <Icon name="conductor" size={16} />
-          <span className="orchestrated-main">
-            <span className="folder-name truncate">{folder.name}</span>
-            <span className="orchestrated-meta truncate">{meta}</span>
-          </span>
-          {o.working > 0 && <span className="folder-live"><Dot status="running" /></span>}
-          {o.needs_you > 0 && <span className="needs-badge" title={plural("focus.entry.needs", o.needs_you)} aria-label={plural("focus.entry.needs", o.needs_you)}>{o.needs_you}</span>}
-          {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
-        </a>
-        <button className="iconbtn small quiet folder-actions" onClick={onSettings} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
-      </div>
-      {editing && <ProjectSettingsSheet project={{ ...folder.project, sessions: [] }} onClose={onCloseSettings} onRemoved={onCloseSettings} toast={toast} />}
-    </section>
-  );
-}
 
 /** "Loop every 40m · run #4 · next in 12m", or the reason it is paused. */
 function loopLine(s: SessionSummary): string {

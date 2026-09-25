@@ -15,7 +15,7 @@ import { relTime } from "../format";
 import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { go, PageHeader } from "../shell";
-import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
+import { ORCHESTRATION_LIST, navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
 import { answeredBy, canAlways } from "../staff/model";
 import { HealthLine } from "../staff/health";
 import { invalidate, useQuery } from "../store";
@@ -87,7 +87,7 @@ export function ProjectTabs({ projectId, current }: { projectId: string; current
 
 // ── the header ───────────────────────────────────────────────────────────────────────────────
 
-/** The project's header on a phone: back to all projects, its name and how the work goes, the
+/** The project's header on a phone: back to orchestration's list of projects, its name and how the work goes, the
  *  environment it runs in, and its other pages behind a menu. */
 export function ProjectPhoneHead({ projectId, title, subtitle, actions, extra }: { projectId: string; title?: string; subtitle?: string; actions?: ReactNode; extra?: MenuItem[] }) {
   const { project } = useProject(projectId);
@@ -107,7 +107,7 @@ export function ProjectPhoneHead({ projectId, title, subtitle, actions, extra }:
     <PageHeader
       title={title ?? project?.name ?? "…"}
       subtitle={subtitle ?? (team ? line : undefined)}
-      back={pathFor("agents")}
+      back={ORCHESTRATION_LIST}
       actions={
         <>
           {actions}

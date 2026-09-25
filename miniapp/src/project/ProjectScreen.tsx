@@ -5,7 +5,7 @@
 import { lazy, Suspense } from "react";
 import { Skeleton } from "../components";
 import { t } from "../i18n";
-import { back as goBack, navigate, pathFor, projectHome, projectPagePath, useRoute } from "../router";
+import { ORCHESTRATION, ORCHESTRATION_LIST, back as goBack, navigate, projectHome, projectPagePath, useRoute } from "../router";
 import { useProject } from "./data";
 import { focusView } from "./focus";
 import { BriefPage, EnableOrchestrator, FoldersPage, JournalPage, TerminalsPage, WakeupsPage } from "./pages";
@@ -34,7 +34,7 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
         key={orchestrator.session_id}
         id={orchestrator.session_id}
         focus={{ projectId, kind: "orchestrator" }}
-        onBack={() => navigate(pathFor("agents"))}
+        onBack={() => navigate(wide ? ORCHESTRATION : ORCHESTRATION_LIST)}
         toast={toast}
         // On a phone the request waiting longest sits under the chat's header: the orchestrator's
         // chat is the tab a project opens on, and a question there should not wait for a scroll. A

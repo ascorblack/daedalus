@@ -163,8 +163,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "nav.usage": { en: "Usage", ru: "Расход" },
   "nav.health": { en: "Health", ru: "Состояние" },
   "nav.settings": { en: "Settings", ru: "Настройки" },
-  "nav.project": { en: "Project", ru: "Проект" },
   "nav.more": { en: "More", ru: "Ещё" },
+  "nav.orchestration": { en: "Orchestration", ru: "Оркестрация" },
 
   // The shell's own chrome: the menu's group names, the sidebar's buttons and the project chip.
   "nav.group.work": { en: "Work", ru: "Работа" },
@@ -3061,7 +3061,6 @@ Object.assign(DICT, {
   "focus.terminals.empty": { en: "No terminals in this project.", ru: "В проекте нет терминалов." },
   "focus.terminals.pick": { en: "Pick a terminal on the left.", ru: "Выберите терминал слева." },
 
-  "focus.entry.orchestrator": { en: "orchestrator", ru: "оркестратор" },
   "focus.entry.needs": { en: "{n} needs you|{n} need you", ru: "{n} ждёт вас|{n} ждут вас|{n} ждут вас" },
   "focus.entry.open": { en: "Open project {name}", ru: "Открыть проект {name}" },
   "focus.palette": { en: "Open project {name}", ru: "Открыть проект {name}" },
@@ -3279,7 +3278,6 @@ Object.assign(DICT, {
 
 // The main orchestrator: its pinned entry, its chat's cards, and its model in Settings.
 Object.assign(DICT, {
-  "nav.main": { en: "Main", ru: "Главный" },
   "main.title": { en: "Main orchestrator", ru: "Главный оркестратор" },
   "main.entry.sub": { en: "hand work to a project", ru: "поручить работу проекту" },
   "main.entry.working": { en: "working…", ru: "работает…" },
@@ -3337,4 +3335,21 @@ Object.assign(DICT, {
   "settings.main.sub": { en: "The chat pinned first that hands your requests to projects and follows them.", ru: "Чат, закреплённый первым: передаёт ваши поручения проектам и следит за ними." },
   "settings.main.middle": { en: "mid-tier", ru: "средняя" },
   "settings.main.hint": { en: "It routes and follows rather than doing the work, so a mid-tier model is enough; the model chip in its chat changes this too.", ru: "Он распределяет и следит, а не делает работу сам, — хватит модели среднего уровня; выбор модели в его чате тоже меняет эту настройку." },
+});
+
+// The two modes: Agents, and Orchestration with the main orchestrator and the orchestrated projects.
+Object.assign(DICT, {
+  "mode.label": { en: "Mode", ru: "Режим" },
+  "mode.agents": { en: "Agents", ru: "Агенты" },
+  "mode.orchestration": { en: "Orchestration", ru: "Оркестрация" },
+  "mode.to.orchestration": { en: "Switch to orchestration", ru: "Перейти в оркестрацию" },
+  "mode.to.agents": { en: "Switch to agents", ru: "Перейти к агентам" },
+  "mode.waiting": { en: "{n} waits for you in orchestration|{n} wait for you in orchestration", ru: "{n} ждёт вас в оркестрации|{n} ждут вас в оркестрации|{n} ждут вас в оркестрации" },
+  "orch.label": { en: "Orchestration", ru: "Оркестрация" },
+  "orch.projects": { en: "Projects", ru: "Проекты" },
+  "orch.empty": { en: "No project has an orchestrator yet. Ask the main orchestrator to start one, or find a project with ⌘K and switch its orchestrator on.", ru: "Пока ни у одного проекта нет оркестратора. Попросите главного оркестратора начать проект или найдите проект через ⌘K и включите ему оркестратор." },
+  "orch.row.setup": { en: "setting up", ru: "настройка" },
+  "orch.row.working": { en: "working…", ru: "работает…" },
+  "orch.row.waiting": { en: "waiting for an answer", ru: "ждёт ответа" },
+  "orch.row.idle": { en: "idle", ru: "не занят" },
 });

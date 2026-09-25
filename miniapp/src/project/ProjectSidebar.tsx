@@ -11,7 +11,7 @@ import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { PaneHandle } from "../layout";
 import { relTime } from "../format";
-import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
+import { ORCHESTRATION, navigate, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
 import { go } from "../shell";
 import { HarnessBadge, StaffAvatar } from "../team/parts";
 import { StaffSheet } from "../team/StaffSheet";
@@ -56,7 +56,8 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
       <Icon name="columns" size={18} />
     </button>
   );
-  const allProjects = pathFor("agents");
+  // A project is entered from orchestration mode's list, and its way back leads there.
+  const allProjects = ORCHESTRATION;
 
   if (p.collapsed) {
     return (

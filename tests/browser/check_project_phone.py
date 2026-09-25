@@ -1,7 +1,8 @@
 """A project on a phone, at 390 and 400 px with a touch screen, in both languages.
 
 The project's four tabs take the place of the app's own and light the one on screen; the header names
-the project, says how its work goes and leads back to every project, where the app's own tabs return.
+the project, says how its work goes and leads back to orchestration's list of projects, where the app's
+own tabs return.
 The request that has waited longest for the operator is a banner answered with one tap — an option, or
 words of the operator's own — and the next one takes its place until none is left. The team lists its
 members with what each is on and opens a member's conversation, which gives the whole height to it and
@@ -164,10 +165,10 @@ def run_one(page: Page, lang: str, width: int) -> None:
     page.wait_for_selector(".journal-entry", timeout=10000)
     tabs(page, words, None)
 
-    # The header's back leaves the project, and the app's own tabs come back.
+    # The header's back leaves the project for orchestration's list, and the app's own tabs come back.
     page.goto(f"{BASE}/project/{PID}/team?token=t&lang={lang}")
     page.locator(".pagehead a.iconbtn[href]").first.tap()
-    page.wait_for_url("**/app/agents**")
+    page.wait_for_url("**/app/orchestration/projects**")
     expect(page.locator("nav.project-tabs")).to_have_count(0)
     expect(page.locator("nav.tabbar")).to_be_visible()
 

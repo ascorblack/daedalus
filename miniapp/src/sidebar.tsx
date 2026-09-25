@@ -1,10 +1,11 @@
-// The left column on a desktop: the sessions, grouped by project, with the project switcher, search
-// and New at the top and the menu button at the bottom. It is the one column beside the
+// The left column on a desktop in Agents mode: the switch to orchestration mode, then the sessions,
+// grouped by project, with the project switcher, search and New at the top and the menu button at the
+// bottom. Orchestration mode has its column of its own (orchestration.tsx). It is the one column beside the
 // conversation — the destinations live in the menu that opens over the content, not in a second
 // column. Folded, it is a 48 px strip: the same controls as icons, and a dot for every agent that is
 // working or waiting.
 
-import { Suspense, lazy, useCallback, useEffect, useState, type ReactNode, type RefObject } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type RefObject } from "react";
 import { SessionList, Project } from "./api";
 import { Dot } from "./components";
 import { Icon } from "./icons";
@@ -18,6 +19,8 @@ import { useStreamUp } from "./events";
 import { t } from "./i18n";
 import { agentName } from "./grouping";
 import { Bell } from "./bell";
+import { agentsListing } from "./mode";
+import { ModeSwitch } from "./orchestration";
 
 const SessionsScreen = lazy(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen })));
 
@@ -40,10 +43,6 @@ export type SidebarProps = {
   menuOpen: boolean;
   onMenu: () => void;
   menuButton: RefObject<HTMLButtonElement | null>;
-  /** Room above the list for an entry pinned first, above every project: the main orchestrator's.
-   *  The project's focus column keeps the same slot, so the entry stays put when a project is entered.
-   *  Folded, the same entry sits in the strip, drawn as an icon by whoever passes it. */
-  pinned?: ReactNode;
 };
 
 export function Sidebar(p: SidebarProps) {
@@ -70,7 +69,7 @@ export function Sidebar(p: SidebarProps) {
           </a>
           {toggle}
           <Bell />
-          {p.pinned}
+          <ModeSwitch mode="agents" strip />
           <ProjectChip projects={p.projects} current={p.project} onOpen={p.onProjects} collapsed />
           <button className="iconbtn quiet" onClick={p.onPalette} title={t("shell.search.title")} aria-label={t("shell.search.label")}><Icon name="search" size={18} /></button>
           <button className="iconbtn quiet" onClick={() => navigate(pathFor("agents", null, { new: "1" }))} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={18} /></button>
@@ -90,7 +89,7 @@ export function Sidebar(p: SidebarProps) {
         <Bell />
         {toggle}
       </div>
-      {p.pinned && <div className="sidebar-pinned" aria-label={t("focus.pinned")}>{p.pinned}</div>}
+      <div className="sidebar-mode"><ModeSwitch mode="agents" /></div>
       <div className="sidebar-body">
         <Suspense fallback={null}>
           <SessionsScreen onOpen={p.onOpen} toast={p.toast} current={p.session ?? undefined} compact project={p.project} projects={p.projects} onProjects={p.onProjects} />
@@ -102,12 +101,14 @@ export function Sidebar(p: SidebarProps) {
   );
 }
 
-/** The strip's view of the list: one dot per agent that is working or waiting, the open one marked. */
+/** The strip's view of the list: one dot per agent that is working or waiting, the open one marked.
+ *  Orchestration's sessions are not agents of this mode, busy as they are. */
 function LiveDots({ current, onOpen }: { current: string | null; onOpen: (id: string) => void }) {
   // Every change of state arrives as an event while the stream is up; the slow poll is the net.
   const streaming = useStreamUp();
   const { data } = useQuery<SessionList>("/api/sessions", { pollMs: streaming ? 60000 : 5000, staleMs: 3000 });
-  const live = (data?.sessions ?? []).filter((s) => s.status === "running" || s.status === "waiting").slice(0, 8);
+  const listing = useMemo(() => (data ? agentsListing(data) : null), [data]);
+  const live = (listing?.sessions ?? []).filter((s) => s.status === "running" || s.status === "waiting").slice(0, 8);
   if (live.length === 0) return null;
   return (
     <div className="strip-dots" role="list">

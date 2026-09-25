@@ -6,12 +6,17 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project" | "main";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "orchestration";
 
 export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
-/** Screens reached from inside something else rather than from the navigation: a project's own pages,
- *  and the main orchestrator's chat, which is pinned above the list rather than a destination of the menu. */
-const INNER: Screen[] = ["project", "main"];
+/** Orchestration is a mode of its own rather than a destination of the menu: the switch at the top of
+ *  the sidebar (the tab bar on a phone) goes there, and so does everything that belongs to it. */
+const INNER: Screen[] = ["orchestration"];
+
+/** Orchestration mode's home: the main orchestrator's chat. */
+export const ORCHESTRATION = `${BASE}/orchestration`;
+/** On a phone, which has no left column, the list the left column holds on a desktop. */
+export const ORCHESTRATION_LIST = `${BASE}/orchestration/projects`;
 
 export type Route = {
   screen: Screen;
@@ -21,7 +26,7 @@ export type Route = {
   with: string | null;
   /** The settings section, a board task, an inbox entry, the terminal shown full screen… */
   detail: string | null;
-  /** The project a project screen is about: /app/project/<id>/<page>. */
+  /** The project orchestration mode is focused on: /app/orchestration/project/<id>/<page>. */
   project: string | null;
   /** Which of the project's pages: team, board, journal… Null is the project's home, its orchestrator. */
   page: string | null;
@@ -34,15 +39,19 @@ export type Route = {
 const ALIASES: Record<string, Screen> = { sessions: "agents", proposals: "changes", cron: "schedules" };
 
 export function parse(pathname = window.location.pathname, search = window.location.search): Route {
-  let path = pathname.startsWith(BASE) ? pathname.slice(BASE.length) : pathname;
+  let path = canonical(pathname).split("?")[0];
+  path = path.startsWith(BASE) ? path.slice(BASE.length) : path;
   path = path.replace(/^\/+|\/+$/g, "");
   const [head, ...rest] = path.split("/").map(decodeURIComponent);
   const query = new URLSearchParams(search);
   const screen = ([...SCREENS, ...INNER] as string[]).includes(head) ? (head as Screen) : ALIASES[head] ?? "agents";
   const detail = rest[0] || null;
-  if (screen === "project") {
-    const page = rest[1] || null;
-    return { screen, session: null, with: null, detail: null, project: detail, page, inner: page === "s" || page === "staff" ? rest[2] || null : null, query };
+  if (screen === "orchestration") {
+    if (detail === "project") {
+      const page = rest[2] || null;
+      return { screen, session: null, with: null, detail: null, project: rest[1] || null, page, inner: page === "s" || page === "staff" ? rest[3] || null : null, query };
+    }
+    return { screen, session: null, with: null, detail, project: null, page: null, inner: null, query };
   }
   return { screen, session: screen === "agents" ? detail : null, with: screen === "agents" ? query.get("with") : null, detail: screen === "agents" ? null : detail, project: null, page: null, inner: null, query };
 }
@@ -53,24 +62,41 @@ export function pathFor(screen: Screen, detail?: string | null, query?: Record<s
   return withQuery(p, query);
 }
 
+const PROJECT = `${ORCHESTRATION}/project`;
+
 /** One of a project's pages. */
 export function projectPagePath(projectId: string, page: string, query?: Record<string, string | null | undefined>): string {
-  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/${encodeURIComponent(page)}`, query);
+  return withQuery(`${PROJECT}/${encodeURIComponent(projectId)}/${encodeURIComponent(page)}`, query);
 }
 
 /** A project's home in its focus mode: the orchestrator's chat, or the way to switch one on. */
 export function projectHome(projectId: string, query?: Record<string, string | null | undefined>): string {
-  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}`, query);
+  return withQuery(`${PROJECT}/${encodeURIComponent(projectId)}`, query);
 }
 
 /** A session of a project, opened without leaving the project's focus mode. */
 export function projectSessionPath(projectId: string, sessionId: string, query?: Record<string, string | null | undefined>): string {
-  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/s/${encodeURIComponent(sessionId)}`, query);
+  return withQuery(`${PROJECT}/${encodeURIComponent(projectId)}/s/${encodeURIComponent(sessionId)}`, query);
 }
 
 /** A command-line staff member's view inside the project: its terminal or its Feed, its messages, its requests. */
 export function projectStaffPath(projectId: string, staffId: string, query?: Record<string, string | null | undefined>): string {
-  return withQuery(`${BASE}/project/${encodeURIComponent(projectId)}/staff/${encodeURIComponent(staffId)}`, query);
+  return withQuery(`${PROJECT}/${encodeURIComponent(projectId)}/staff/${encodeURIComponent(staffId)}`, query);
+}
+
+/**
+ * The address a link means, in the shape the app uses now.
+ *
+ * The host writes `/app/project/<id>/…` and `/app/main` into notifications, pushes and Telegram
+ * messages, and those already sent keep their words: a tap on one weeks later must still land in
+ * orchestration mode, where a project and the main chat now live. Everything else is returned as it came.
+ */
+export function canonical(path: string): string {
+  const m = /^\/app\/(project|main)(?=\/|\?|$)(.*)$/.exec(path);
+  if (!m) return path;
+  if (m[1] === "project") return `${PROJECT}${m[2]}`;
+  // The main chat is orchestration's home; whatever followed it (the panel's query) goes along.
+  return `${ORCHESTRATION}${m[2].replace(/^\/[^?]*/, "")}`;
 }
 
 function withQuery(path: string, query?: Record<string, string | null | undefined>): string {
@@ -102,6 +128,7 @@ if ((window.history.state as HistoryState)?.d === undefined) {
 }
 
 export function navigate(path: string, opts: { replace?: boolean } = {}): void {
+  path = canonical(path);
   const current = window.location.pathname + window.location.search;
   if (current === path) return;
   if (opts.replace) window.history.replaceState({ d: depth }, "", path);
@@ -135,8 +162,18 @@ export function useRoute(): Route {
   return route;
 }
 
-/** Legacy addresses still reach the right screen: /app/#settings, /app/?startapp=session_<id>. */
-export function migrateLegacyLocation(startParam?: string | null): void {
+/** Legacy addresses still reach the right screen: /app/#settings, /app/?startapp=session_<id>,
+ *  /app/project/<id>. A bare /app opens the mode this device was last in. */
+export function migrateLegacyLocation(startParam?: string | null, mode?: "agents" | "orchestration"): void {
+  const here = window.location.pathname + window.location.search;
+  if (canonical(here) !== here) {
+    navigate(canonical(here), { replace: true });
+    return;
+  }
+  if (mode === "orchestration" && /^\/app\/?$/.test(window.location.pathname) && !window.location.hash && !startParam) {
+    navigate(ORCHESTRATION + window.location.search, { replace: true });
+    return;
+  }
   const hash = window.location.hash.replace(/^#/, "");
   if (hash && ((SCREENS as string[]).includes(hash) || ALIASES[hash])) {
     navigate(pathFor(ALIASES[hash] ?? (hash as Screen)), { replace: true });

@@ -593,11 +593,12 @@ class FocusStub:
     """A project with its orchestrator switched on, as focus mode reads it, kept between requests.
 
     Everything the focus column, the orchestrator's chat and the project's pages ask for is answered
-    here: the project list and the agents listing with the orchestrated entry, the sessions of the
-    orchestrator and of a Daedalus staff member, the project's requests (answered once, the second
-    answer refused as the host refuses it), the brief, the journal in pages, the wake-ups, the
-    terminals, what was sent to a member and the member's controls. The team and the board are the
-    two stubs above. What the page sent is recorded, so a check can assert the exact request.
+    here: the project list and the agents listing (with the counts orchestration mode lists the
+    project by), the sessions of the orchestrator and of a Daedalus staff member, the project's
+    requests (answered once, the second answer refused as the host refuses it), the brief, the
+    journal in pages, the wake-ups, the terminals, what was sent to a member and the member's
+    controls. The team and the board are the two stubs above. What the page sent is recorded, so a
+    check can assert the exact request.
 
     ``bakery(lang)`` invents the one project the check and the pictures share; the operator's words and
     the orchestrator's answers are in the page's language, and the lines the host writes for the

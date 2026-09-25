@@ -5,7 +5,7 @@ import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
 import type { OnboardingState } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
-import { back, migrateLegacyLocation, navigate, pathFor, projectHome, projectPagePath, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
+import { ORCHESTRATION, ORCHESTRATION_LIST, back, migrateLegacyLocation, navigate, pathFor, projectHome, projectPagePath, projectSessionPath, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { Sidebar, useSidebar } from "./sidebar";
 import { NavMenu } from "./navmenu";
@@ -28,6 +28,8 @@ import { listenForOpen, syncPush } from "./push";
 import { Icon } from "./icons";
 import { focusView, phoneTab } from "./project/focus";
 import { MainEntry } from "./main/MainEntry";
+import { Mode, modeOf, rememberMode, storedMode } from "./mode";
+import { OrchestrationList, OrchestrationSidebar, useOrchestrationWaiting } from "./orchestration";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -114,6 +116,21 @@ export function App() {
   useLang();
   const route = useRoute();
   const wide = useWide();
+  // Which mode the shell is in: the route's, where the route belongs to one, and otherwise the one the
+  // operator was last in — Terminals, Settings and the other shared screens keep the column they were
+  // opened from. Remembered per device, so a reload or a bare /app opens the same mode again.
+  // A bare /app is the landing, not a choice of Agents: it is sent on to the remembered mode below,
+  // and must not overwrite that memory on its way through.
+  const landing = /^\/app\/?$/.test(window.location.pathname);
+  const routeMode = landing ? null : modeOf(route);
+  const [lastMode, setLastMode] = useState<Mode>(storedMode);
+  useEffect(() => {
+    if (routeMode && routeMode !== lastMode) {
+      rememberMode(routeMode);
+      setLastMode(routeMode);
+    }
+  }, [routeMode, lastMode]);
+  const mode = routeMode ?? lastMode;
   const [picking, setPicking] = useState(false);
   const [more, setMore] = useState(false);
   const [palette, setPalette] = useState(false);
@@ -159,10 +176,14 @@ export function App() {
   useAppBadge(notifications.unseen);
   const projects = useProjects();
   const projectList = projects.data ?? [];
+  // The project lens of Agents mode offers the projects that mode lists: none with an orchestrator.
+  const agentProjects = projectList.filter((p) => !p.settings.orchestrator?.enabled && p.system !== "dispatcher");
   // A project removed elsewhere must not leave the shell filtering by something that is gone.
+  // So must one that went over to orchestration mode: the Agents list would be empty through its lens.
   useEffect(() => {
-    if (project && projects.data && !projects.data.some((p) => p.id === project)) pickProject("");
+    if (project && projects.data && !projects.data.some((p) => p.id === project && !p.settings.orchestrator?.enabled)) pickProject("");
   }, [project, projects.data, pickProject]);
+  const waiting = useOrchestrationWaiting();
   // What this installation can do decides what the app offers. Until the answer arrives the nav is the
   // one a server install has: hiding a destination and putting it back a moment later reads as a glitch.
   // A minute rather than five: the mode never changes, but whether a change of the agent's own is
@@ -241,7 +262,7 @@ export function App() {
 
   useEffect(() => {
     const tg = telegram();
-    migrateLegacyLocation(tg?.initDataUnsafe?.start_param);
+    migrateLegacyLocation(tg?.initDataUnsafe?.start_param, storedMode());
     if (!tg?.initData) {
       // Outside Telegram the system decides, unless the reader picked a scheme (?scheme=dark sticks).
       const wanted = new URLSearchParams(window.location.search).get("scheme");
@@ -299,15 +320,18 @@ export function App() {
     };
   }, []);
 
-  // A project's focus mode: entering a project's route swaps the sessions column for the project's own
-  // and puts the project in the centre. The decision is made here and nowhere else, so every other
-  // screen keeps the shell it always had.
-  const focusProject = route.screen === "project" ? route.project : null;
-  // The main orchestrator's chat is a conversation like any other: on a phone it takes the screen.
-  const mainChat = route.screen === "main";
+  // A project's focus mode: entering a project's route swaps the column for the project's own and puts
+  // the project in the centre. The decision is made here and nowhere else, so every other screen keeps
+  // the shell it always had.
+  const focusProject = route.screen === "orchestration" ? route.project : null;
+  // Orchestration's home is the main orchestrator's chat; on a phone, which has no left column, the
+  // list the column holds is a page of its own.
+  const orchestrationList = route.screen === "orchestration" && !focusProject && route.detail === "projects";
+  const mainChat = route.screen === "orchestration" && !focusProject && !orchestrationList;
   const focusChat = (!!focusProject && (route.page === null || route.page === "s" || route.page === "staff")) || mainChat;
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
-  const inDetail = !!route.session || !!route.detail || !!focusProject || mainChat;
+  // Orchestration's home and its list are the mode's top, as the start screen is Agents'.
+  const inDetail = !!route.session || (!!route.detail && !orchestrationList) || !!focusProject;
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
@@ -316,12 +340,12 @@ export function App() {
       tg.enableVerticalSwipes?.();
       return;
     }
-    const onBack = () => back(focusProject || mainChat ? pathFor("agents") : pathFor(route.screen));
+    const onBack = () => back(focusProject ? ORCHESTRATION_LIST : pathFor(route.screen));
     tg.BackButton.onClick(onBack);
     tg.BackButton.show();
     tg.disableVerticalSwipes?.();
     return () => tg.BackButton?.offClick(onBack);
-  }, [inDetail, route.screen, focusProject, mainChat]);
+  }, [inDetail, route.screen, focusProject]);
 
   // The list screens come back where the reader left them.
   const main = useRef<HTMLDivElement>(null);
@@ -354,7 +378,10 @@ export function App() {
   const open = useCallback((id: string) => navigate(sessionPath(id)), []);
   const closeSession = () => back(pathFor("agents"));
   const paletteItems = (): PaletteItem[] => {
-    const sessions = peek<SessionList>("/api/sessions")?.sessions ?? [];
+    const listed = peek<SessionList>("/api/sessions");
+    const sessions = listed?.sessions ?? [];
+    const orchestratedSessionPath = (sessionId: string, projectId: string) =>
+      listed?.projects.find((p) => p.id === projectId)?.orchestrator?.session_id === sessionId ? projectHome(projectId) : projectSessionPath(projectId, sessionId);
     // The terminals as the last listing left them: the Terminals screen's (with previews) or the
     // full view's. Nothing is fetched for the palette; a terminal opened a second ago may be missing.
     const listing = peek<TerminalList>("/api/terminals?preview=6") ?? peek<TerminalList>("/api/terminals");
@@ -374,15 +401,21 @@ export function App() {
       ...(!listing || envUp("container") ? [{ id: "new-term-container", label: t("term.palette.container"), icon: "terminal" as const, run: () => void newTerminal("container")() }] : []),
       ...(envUp("host") ? [{ id: "new-term-host", label: t("term.palette.host"), icon: "lock" as const, run: () => void newTerminal("host")() }] : []),
     ];
+    // Both modes' places are offered whichever mode is open: a project with an orchestrator opens in
+    // orchestration mode, a lens is Agents mode's, and each item says which by where it leads.
+    const orchestratedIds = new Set(projectList.filter((p) => p.settings.orchestrator?.enabled).map((p) => p.id));
     return [
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
-      { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
-      ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => pickProject(p.id) })),
+      { id: "mode", label: t(mode === "agents" ? "mode.to.orchestration" : "mode.to.agents"), icon: mode === "agents" ? "compass" : "bots", run: () => navigate(mode === "agents" ? ORCHESTRATION : pathFor("agents")) },
+      { id: "main", label: t("main.title"), icon: "compass", run: () => navigate(ORCHESTRATION) },
+      { id: "projects", label: t("shell.projects"), hint: agentProjects.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => { navigate(pathFor("agents")); setSwitching(true); } },
+      ...agentProjects.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => { pickProject(p.id); navigate(pathFor("agents")); } })),
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `open-${p.id}`, label: t("focus.palette", { name: p.name }), icon: "conductor" as const, run: () => navigate(projectHome(p.id)) })),
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `team-${p.id}`, label: t("shell.search.team", { name: p.name }), icon: "bots" as const, run: () => navigate(projectPagePath(p.id, "team")) })),
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `board-${p.id}`, label: t("shell.search.board", { name: p.name }), icon: "board" as const, run: () => navigate(projectPagePath(p.id, "board")) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
-      ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
+      // An orchestrated session opens inside its project, not in the Agents list.
+      ...sessions.filter((s) => !s.metadata?.dispatcher).map((s) => ({ id: `s-${s.id}`, label: s.title, hint: orchestratedIds.has(s.project_id) ? `${s.project} · ${s.model ?? ""}` : s.model ?? "", icon: orchestratedIds.has(s.project_id) ? "conductor" as const : "bots" as const, run: () => (orchestratedIds.has(s.project_id) ? navigate(orchestratedSessionPath(s.id, s.project_id)) : open(s.id)) })),
       ...terminalItems,
     ];
   };
@@ -428,13 +461,13 @@ export function App() {
   } else if (sessionId) {
     content = (
       <ErrorBoundary key={sessionId}>
-        <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
+        <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} leaveForOrchestration />
       </ErrorBoundary>
     );
   } else {
     content = (
       <ErrorBoundary key={route.screen}>
-        {route.screen === "agents" && <StartScreen onOpen={open} toast={showToast} project={project} projects={projectList} onProjects={wide ? undefined : () => setSwitching(true)} />}
+        {route.screen === "agents" && <StartScreen onOpen={open} toast={showToast} project={project} projects={agentProjects} onProjects={wide ? undefined : () => setSwitching(true)} />}
         {route.screen === "voice" && <VoiceScreen onOpen={open} toast={showToast} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} project={projectList.find((p) => p.id === project) ?? null} />}
@@ -456,8 +489,9 @@ export function App() {
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
         {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
-        {route.screen === "main" && <MainScreen toast={showToast} />}
-        {route.screen === "project" &&
+        {mainChat && <MainScreen toast={showToast} />}
+        {orchestrationList && <OrchestrationList />}
+        {focusProject !== null &&
           (!route.project ? (
             <div className="empty"><b>{t("team.noproject")}</b></div>
           ) : (
@@ -468,14 +502,17 @@ export function App() {
   }
 
   const strip = sidebarCollapsed;
-  // The main orchestrator is pinned above every project, in both columns, folded or not.
-  const pinned = <MainEntry current={mainChat} strip={strip} />;
+  // Inside a project the main orchestrator stays one click away, pinned above the project's column.
+  const pinned = <MainEntry current={false} strip={strip} />;
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
   const terminalOpen = route.screen === "terminals" && !!route.detail;
   // A project on a phone has its own four tabs in the place of the app's (project/phone.tsx); a
   // session inside it is a detail with a back of its own and no bar under it.
   const projectBar = !wide && focusProject ? phoneTab(focusView(route.page, route.inner)) : null;
+  // The main chat on a phone keeps the app's tabs under it, in the column rather than over it: they
+  // are how the operator switches back to Agents, and the chat is orchestration's home, not a detail.
+  const flowTabs = !wide && mainChat;
   const menuButtonEl = (
     <button ref={menuButton} className={`sidebar-menu ${strip ? "iconbtn quiet" : ""}`} onClick={() => setMenu((m) => !m)} title={t("nav.menu.title")} aria-label={t("nav.menu")} aria-haspopup="menu" aria-expanded={menu}>
       <Icon name="more" size={18} />
@@ -485,7 +522,7 @@ export function App() {
     </button>
   );
   return (
-    <div className={`app ${projectBar ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
+    <div className={`app ${projectBar || flowTabs ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
       {wide && focusProject && (
         <ErrorBoundary key={focusProject}>
         <Suspense fallback={<nav className="sidebar project-sidebar" />}>
@@ -504,7 +541,10 @@ export function App() {
         </Suspense>
         </ErrorBoundary>
       )}
-      {wide && !focusProject && (
+      {wide && !focusProject && mode === "orchestration" && (
+        <OrchestrationSidebar onMain={mainChat} collapsed={strip} onToggle={toggleSidebar} width={sidebarWidth} onWidth={setSidebarWidth} onPalette={openPalette} menu={menuButtonEl} />
+      )}
+      {wide && !focusProject && mode === "agents" && (
         <Sidebar
           screen={route.screen}
           session={sessionId}
@@ -515,7 +555,7 @@ export function App() {
           width={sidebarWidth}
           onWidth={setSidebarWidth}
           onPalette={openPalette}
-          projects={projectList}
+          projects={agentProjects}
           project={project}
           onProjects={() => setSwitching(true)}
           onOpen={open}
@@ -523,7 +563,6 @@ export function App() {
           menuOpen={menu}
           onMenu={() => setMenu((m) => !m)}
           menuButton={menuButton}
-          pinned={pinned}
         />
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
@@ -535,8 +574,8 @@ export function App() {
         <Suspense fallback={<div className="empty">{t("common.loading")}</div>}>{content}</Suspense>
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
-      {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
-      {!wide && !sessionId && !focusProject && !mainChat && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {switching && <ProjectSwitcher projects={agentProjects} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
+      {!wide && !sessionId && !focusProject && !terminalOpen && <TabBar screen={route.screen} counts={counts} waiting={waiting} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} flow={flowTabs} />}
       {projectBar?.bar && focusProject && (
         <ErrorBoundary key={`tabs-${focusProject}`}>
           <Suspense fallback={<nav className="tabbar project-tabs" aria-hidden />}>

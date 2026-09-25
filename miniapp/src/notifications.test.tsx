@@ -44,6 +44,9 @@ describe("where an entry leads", () => {
     expect(entryPath({ link: "/app/board/t1", session_id: "s1" })).toBe("/app/board/t1");
     expect(entryPath({ link: "", session_id: "s1" })).toBe("/app/agents/s1");
     expect(entryPath({ link: "https://example.com", session_id: null })).toBe("/app/inbox");
+    // A project's or the main chat's link, as the host writes it, opens in orchestration mode.
+    expect(entryPath({ link: "/app/project/p1/board?task=t1", session_id: null })).toBe("/app/orchestration/project/p1/board?task=t1");
+    expect(entryPath({ link: "/app/main", session_id: null })).toBe("/app/orchestration");
   });
 });
 

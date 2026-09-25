@@ -1,8 +1,8 @@
 """The main orchestrator in the app, at 1440 px and on a 390 px phone, in both languages.
 
-What is checked is what the operator relies on. Its entry is pinned above every project in the
-sidebar (and in a project's own column), with a pill that counts the questions waiting; on a phone it
-is the first thing under the start composer. Its chat shows the questions the projects put to the
+What is checked is what the operator relies on. Its chat is orchestration mode's home, reached by the
+mode switch at the top of the sidebar (on a phone, by the tab bar); in that mode its entry comes first
+in the column, with a pill that counts the questions waiting. Its chat shows the questions the projects put to the
 operator as cards grouped by project — options as buttons, words of one's own, Allow and Deny — and
 answering one posts exactly the answer with the window it came from, after which the card is one line
 that says where it was answered. A card that lost to an answer given elsewhere says so. The work
@@ -70,14 +70,16 @@ def desktop(page: Page, lang: str) -> None:
     serve(page, main)
     page.goto(f"{BASE}/agents?token=t&lang={lang}")
 
-    entry = page.locator(".sidebar .sidebar-pinned .main-entry")
+    # Agents mode has no entry of its own for the main chat: the switch leads there.
+    expect(page.locator(".sidebar .main-entry")).to_have_count(0)
+    page.locator(".sidebar .mode-tab[data-mode='orchestration']").click()
+    page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
+    expect(page.locator(".chat .chat-title")).to_have_text("Main")
+    assert ("/api/main", {}) in main.posts, "the first visit opens the main chat's session"
+    entry = page.locator("nav.orch-sidebar .orch-main .main-entry")
     expect(entry).to_be_visible()
     expect(entry.locator(".main-entry-name")).to_have_text(words["title"])
     expect(entry.locator(".main-pill")).to_have_text(words["pill"])
-    entry.click()
-    page.wait_for_url("**/app/main")
-    expect(page.locator(".chat .chat-title")).to_have_text("Main")
-    assert ("/api/main", {}) in main.posts, "the first visit opens the main chat's session"
     expect(entry).to_have_class(re.compile(r"\bcurrent\b"))
 
     board = page.locator(".main-board")
@@ -144,18 +146,23 @@ def phone(page: Page, lang: str) -> None:
     main = MainStub()
     serve(page, main)
     page.goto(f"{BASE}/agents?token=t&lang={lang}")
-    first = page.locator(".start-list .start-main .main-entry")
-    expect(first).to_be_visible()
-    expect(first.locator(".main-pill")).to_have_text(WORDS[lang]["pill"])
+    expect(page.locator(".start-list .main-entry")).to_have_count(0)
     fits(page, f"{lang} phone start")
-    first.click()
-    page.wait_for_url("**/app/main")
+    page.locator(".tabbar a[data-screen='orchestration']").click()
+    page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
     expect(page.locator(".main-board .ask-card").first).to_be_visible()
-    expect(page.locator(".tabbar")).to_have_count(0)
+    # The app's tabs stay under the main chat, in the column: the chat is a mode's home, not a detail.
+    expect(page.locator(".tabbar.flow")).to_be_visible()
     fits(page, f"{lang} phone main chat")
     for button in page.locator(".main-board .ask-options button").all()[:2]:
         box = button.bounding_box()
         assert box and box["height"] >= 32, f"{lang} phone: a card button is {box and box['height']}px tall"
+    # Its entry, with the pill, heads the list behind it.
+    page.locator(".chat-head > button.iconbtn").first.click()
+    page.wait_for_url("**/app/orchestration/projects**")
+    first = page.locator(".orch-list .main-entry")
+    expect(first).to_be_visible()
+    expect(first.locator(".main-pill")).to_have_text(WORDS[lang]["pill"])
 
 
 def main() -> int:

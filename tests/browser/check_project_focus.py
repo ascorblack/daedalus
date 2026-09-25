@@ -1,16 +1,16 @@
 """A project's focus mode on a desktop, at 1440 and 2560 px, in both languages, and that it does not
 break at 390 px.
 
-What is checked is what the operator relies on. In the agents list an orchestrated project is one
-entry that says what goes on inside and how many requests wait, and it opens focus mode; the column
-then holds only the project — the way back, the orchestrator, the team with each member's state and,
+What is checked is what the operator relies on. In orchestration mode's column an orchestrated project
+is one entry that says what goes on inside and how many requests wait, and it opens focus mode; the
+column then holds only the project — the way back, the orchestrator, the team with each member's state and,
 for a launch that waits, why; the one-off helpers, the terminals and the project's pages. The
 orchestrator's chat shows the events it was woken with as a card, its steps as lines, and its question
 as a card answered right there, with one of its options or words of the operator's own. The panel
 beside it has the project's tabs; beside a staff member's session it has the session's tabs too, and a
 header with the member's controls and the messages sent to it. The journal pages back, and takes a
 note. A project without an orchestrator offers to switch one on, and says what it costs. "All
-projects" goes back to the list with the project lens as it was. Nothing scrolls sideways.
+projects" goes back to orchestration's home, and Agents mode keeps its project lens as it was. Nothing scrolls sideways.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ WORDS = {
         "lev": "Write to Lev…", "folder": "Folder added", "created": "Task created", "assigned": "Assigned", "watch": "Watch set", "asked": "Asked you",
         "answered": "answered in the project's chat: Before delivery", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
         "note": "Add a note", "enable": "Switch the orchestrator on", "on": "Switch on", "cost": "fifteen times", "pause": "Pause after the turn", "accepted": "accepted",
-        "entry": "orchestrator", "needs": "1 needs you", "autonomy": "autonomy: normal",
+        "staff": "6 staff", "needs": "1 needs you", "autonomy": "autonomy: normal",
         "spent": "$2.05 today", "levspend": "$1.20 today · 412k tokens", "iraspend": "subscription · window 23 %", "totals": "Today $2.05 · 7 days $10.90 · All $33.80",
         "orchspend": "Orchestrator: $0.85 today · 96k tokens",
     },
@@ -50,7 +50,7 @@ WORDS = {
         "lev": "Написать сотруднику Lev…", "folder": "Папка добавлена", "created": "Задача создана", "assigned": "Назначено", "watch": "Наблюдение поставлено", "asked": "Спросил вас",
         "answered": "ответ в чате проекта: До доставки", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
         "note": "Добавить заметку", "enable": "Включить оркестратор", "on": "Включить", "cost": "в пятнадцать раз", "pause": "После хода — пауза", "accepted": "принято",
-        "entry": "оркестратор", "needs": "1 ждёт вас", "autonomy": "самостоятельность: обычная",
+        "staff": "6 сотрудников", "needs": "1 ждёт вас", "autonomy": "самостоятельность: обычная",
         "spent": "$2.05 сегодня", "levspend": "$1.20 сегодня · токенов: 412k", "iraspend": "подписка · окно 23 %", "totals": "Сегодня $2.05 · 7 дней $10.90 · Всего $33.80",
         "orchspend": "Оркестратор: $0.85 сегодня · токенов: 96k",
     },
@@ -84,15 +84,17 @@ def desktop(page: Page, lang: str, width: int) -> None:
     serve(page, focus)
     page.goto(f"{BASE}/agents?token=t&lang={lang}")
 
-    # The agents list: the orchestrated project is one entry, and its sessions are not rows.
-    entry = page.locator(".sidebar .folder.orchestrated", has_text="Bakery 2.0")
-    expect(entry).to_be_visible()
-    expect(entry.locator(".orchestrated-meta")).to_contain_text(words["entry"])
-    expect(entry.locator(".needs-badge")).to_have_text("1")
+    # Agents mode lists nothing of the project; orchestration mode lists it as one entry.
+    expect(page.locator(f".sidebar [data-project='{PID}']")).to_have_count(0)
     expect(page.locator(".sidebar .erow", has_text="Orchestrator · Bakery 2.0")).to_have_count(0)
     chip_before = page.locator(".sidebar .project-chip").inner_text()
-    entry.locator(".orchestrated-head").click()
-    page.wait_for_url(f"**/app/project/{PID}")
+    page.locator(".sidebar .mode-tab[data-mode='orchestration']").click()
+    entry = page.locator("nav.orch-sidebar .orch-row", has_text="Bakery 2.0")
+    expect(entry).to_be_visible()
+    expect(entry.locator(".orch-row-meta")).to_contain_text(words["staff"])
+    expect(entry.locator(".needs-badge")).to_have_text("1")
+    entry.click()
+    page.wait_for_url(f"**/app/orchestration/project/{PID}")
 
     # The column is the project's alone.
     side = page.locator("nav.project-sidebar")
@@ -158,7 +160,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(page.locator(".panel .brief-card")).to_have_count(6)
     expect(page.locator(".panel .brief-card.allowed_without_operator")).to_contain_text(words["onlyyou"])
     expect(page.locator(".panel .brief-card.notes")).to_contain_text(words["byorch"])
-    assert f"/app/project/{PID}?" in page.url and "panel=brief" in page.url, page.url
+    assert f"/app/orchestration/project/{PID}?" in page.url and "panel=brief" in page.url, page.url
     page.locator(".panel .panel-tab[data-tab='wakeups']").click()
     expect(page.locator(".panel .wakeup-row").first).to_contain_text(invented["wake.note"])
     page.locator(".panel .panel-tab[data-tab='folders']").click()
@@ -166,7 +168,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
 
     # A staff member's session, inside the project: its header, its messages, both sets of tabs.
     side.locator(".focus-staff", has_text="Lev").click()
-    page.wait_for_url(f"**/app/project/{PID}/s/sess-lev**")
+    page.wait_for_url(f"**/app/orchestration/project/{PID}/s/sess-lev**")
     head = page.locator(".staff-head")
     expect(head).to_contain_text("Lev")
     expect(head).to_contain_text("agent/lev/photos")
@@ -180,7 +182,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
 
     # The journal: a page of thirty, the older ones on request, and a note of the operator's own.
     side.locator(".focus-row", has_text=words["journal"]).click()
-    page.wait_for_url(f"**/app/project/{PID}/journal")
+    page.wait_for_url(f"**/app/orchestration/project/{PID}/journal")
     expect(page.locator(".journal-entry")).to_have_count(30)
     # What the project spends, over the journal: the totals and the orchestrator's own share today.
     expect(page.locator(".journal-usage")).to_contain_text(words["totals"])
@@ -194,6 +196,15 @@ def desktop(page: Page, lang: str, width: int) -> None:
     assert focus.notes == ["Friday: new prices"], focus.notes
     fits(page, f"{lang} {width} journal")
 
+    # And back to orchestration's home; Agents mode's lens is as it was.
+    page.locator("nav.project-sidebar .focus-back").click()
+    page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
+    expect(page.locator("nav.project-sidebar")).to_have_count(0)
+    expect(page.locator("nav.orch-sidebar")).to_be_visible()
+    page.locator("nav.orch-sidebar .mode-tab[data-mode='agents']").click()
+    page.wait_for_url("**/app/agents")
+    assert page.locator(".sidebar .project-chip").inner_text() == chip_before
+
     # A project without an orchestrator: what one is, what it costs, and the switch.
     page.goto(f"{BASE}/project/{GARDEN}?token=t&lang={lang}")
     page.get_by_role("button", name=words["enable"]).click()
@@ -203,12 +214,6 @@ def desktop(page: Page, lang: str, width: int) -> None:
     sheet.get_by_role("button", name=words["on"], exact=True).click()
     expect(page.locator(".chat.in-project.orchestrator textarea")).to_have_attribute("placeholder", words["placeholder"])
     assert focus.enabled == [(GARDEN, {"model": "", "autonomy": "normal", "concurrency_cap": 10})], focus.enabled
-
-    # And back to every project, with the lens as it was.
-    page.locator("nav.project-sidebar .focus-back").click()
-    page.wait_for_url("**/app/agents")
-    expect(page.locator("nav.project-sidebar")).to_have_count(0)
-    assert page.locator(".sidebar .project-chip").inner_text() == chip_before
 
 
 def phone(page: Page, lang: str) -> None:

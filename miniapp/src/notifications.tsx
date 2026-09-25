@@ -10,7 +10,7 @@ import { useState, type ReactNode } from "react";
 import { ApiError, api, type Notification, type NotificationPage, type NotificationSummary, type Project, type SessionList } from "./api";
 import { absTime, relTime } from "./format";
 import { Icon, type IconName } from "./icons";
-import { navigate, pathFor, sessionPath } from "./router";
+import { canonical, navigate, pathFor, sessionPath } from "./router";
 import { invalidate, peek, prime, useQuery } from "./store";
 import { SUMMARY_KEY, streamUp, useStreamUp } from "./events";
 import { toast } from "./dialogs";
@@ -171,7 +171,8 @@ export async function markAllSeen(): Promise<void> {
 
 /** Where an entry takes the reader: its own link, else its session, else the centre. */
 export function entryPath(entry: Pick<Notification, "link" | "session_id">): string {
-  if (entry.link && entry.link.startsWith("/app/")) return entry.link;
+  // The host's links to a project or the main chat are older than orchestration mode's addresses.
+  if (entry.link && entry.link.startsWith("/app/")) return canonical(entry.link);
   if (entry.session_id) return sessionPath(entry.session_id);
   return pathFor("inbox");
 }

@@ -6,7 +6,8 @@
 import type { Ask, Dispatch, MainAsk, Preset } from "../api";
 import { t } from "../i18n";
 
-export const MAIN_PATH = "/app/main";
+/** The main chat is orchestration mode's home. */
+export const MAIN_PATH = "/app/orchestration";
 
 /** The requests still waiting, one group per project, the groups and the cards oldest first. */
 export function groupAsks(asks: MainAsk[]): { key: string; name: string; asks: MainAsk[] }[] {

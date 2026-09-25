@@ -1,10 +1,8 @@
 // @vitest-environment jsdom
 // A project's focus mode decided without a browser: the route, the panel's tabs, the team as the
-// sidebar draws it, the orchestrator's steps and events, and the one entry in the agents list.
+// sidebar draws it, the orchestrator's steps and events. What the agents list leaves out is mode.test.ts's.
 
 import { describe, expect, it } from "vitest";
-import type { ProjectFolder, SessionSummary } from "../api";
-import { arrange } from "../grouping";
 import { PANEL_TABS, PROJECT_TABS, defaultPanelTab, readPanelQuery, readPanelTab, tabsFor } from "../panel";
 import { parse, projectHome, projectPagePath, projectSessionPath } from "../router";
 import { eventTone, parseEvents, systemNote } from "../turns";
@@ -17,10 +15,10 @@ function member(over: Partial<Staff> = {}): Pick<Staff, "status" | "queued" | "o
 
 describe("a project's route", () => {
   it("names the orchestrator, a session of the project, or one of its pages", () => {
-    const home = parse("/app/project/p1", "");
-    expect([home.screen, home.project, home.page, home.inner]).toEqual(["project", "p1", null, null]);
+    const home = parse("/app/orchestration/project/p1", "");
+    expect([home.screen, home.project, home.page, home.inner]).toEqual(["orchestration", "p1", null, null]);
     expect(focusView(home.page, home.inner)).toEqual({ kind: "orchestrator" });
-    const staff = parse("/app/project/p1/s/sess-ira", "?panel=board");
+    const staff = parse("/app/orchestration/project/p1/s/sess-ira", "?panel=board");
     expect(focusView(staff.page, staff.inner)).toEqual({ kind: "session", id: "sess-ira" });
     expect(staff.query.get("panel")).toBe("board");
     expect(focusView("journal", null)).toEqual({ kind: "page", page: "journal" });
@@ -32,11 +30,11 @@ describe("a project's route", () => {
   });
 
   it("builds the addresses it parses", () => {
-    expect(projectHome("p 1", { panel: "board" })).toBe("/app/project/p%201?panel=board");
-    expect(projectSessionPath("p1", "s1")).toBe("/app/project/p1/s/s1");
-    expect(projectPagePath("p1", "terminals", { t: "t9", other: null })).toBe("/app/project/p1/terminals?t=t9");
-    const back = parse("/app/project/p1/s/s1", "");
-    expect([back.page, back.inner]).toEqual(["s", "s1"]);
+    expect(projectHome("p 1", { panel: "board" })).toBe("/app/orchestration/project/p%201?panel=board");
+    expect(projectSessionPath("p1", "s1")).toBe("/app/orchestration/project/p1/s/s1");
+    expect(projectPagePath("p1", "terminals", { t: "t9", other: null })).toBe("/app/orchestration/project/p1/terminals?t=t9");
+    const back = parse(projectSessionPath("p1", "s1"), "");
+    expect([back.screen, back.project, back.page, back.inner]).toEqual(["orchestration", "p1", "s", "s1"]);
   });
 
   it("is offered for real projects only", () => {
@@ -167,39 +165,6 @@ describe("the events the orchestrator was woken with", () => {
     expect(wrapped.lines[0].tone).toBe("warn");
     expect(parseEvents("Hello")).toBeNull();
     expect(eventTone("Ada stopped with an error on \"Menu\": boom")).toBe("bad");
-  });
-});
-
-describe("the agents list", () => {
-  const at = "2026-09-24T10:00:00Z";
-  function agent(id: string, project: string, over: Partial<SessionSummary> = {}): SessionSummary {
-    return { id, title: id, status: "idle", created_at: at, last_message_at: at, run_id: null, project_id: project, project, ...over };
-  }
-  function folder(id: string, over: Partial<ProjectFolder> = {}): ProjectFolder {
-    return { id, name: id, created_at: at, settings: { snapshots: false }, folders: [], total: 0, active: 0, loops: 0, last_message_at: "", ...over };
-  }
-
-  it("draws an orchestrated project as one entry with its counts, and lists none of its sessions", () => {
-    const orchestration = { enabled: true, session_id: "orch", staff: 4, working: 2, needs_you: 1 };
-    const projects = [folder("bakery", { total: 3, orchestrator: orchestration }), folder("plain", { total: 1, orchestrator: null })];
-    const sessions = [agent("orch", "bakery", { metadata: { orchestrator_of: "bakery" } }), agent("ira", "bakery", { metadata: { staff_id: "st-ira" } }), agent("notes", "plain")];
-    const { folders } = arrange(sessions, projects);
-    const bakery = folders.find((f) => f.key === "bakery")!;
-    expect(bakery.orchestrated).toEqual(orchestration);
-    expect(bakery.rows).toEqual([]);
-    expect(bakery.single).toBe(false);
-    const plain = folders.find((f) => f.key === "plain")!;
-    expect(plain.orchestrated).toBeNull();
-    expect(plain.rows.map((r) => r.s.id)).toEqual(["notes"]);
-    // The entry redraws when its counts change: they are its whole signature.
-    const busier = arrange(sessions, [folder("bakery", { total: 3, orchestrator: { ...orchestration, working: 3 } })]).folders[0];
-    expect(busier.sig).not.toBe(bakery.sig);
-  });
-
-  it("still finds an orchestrated project's sessions in a search", () => {
-    const projects = [folder("bakery", { orchestrator: { enabled: true, session_id: "orch", staff: 1, working: 0, needs_you: 0 } })];
-    const { folders } = arrange([agent("ira", "bakery")], projects, { results: true });
-    expect(folders[0].rows.map((r) => r.s.id)).toEqual(["ira"]);
   });
 });
 

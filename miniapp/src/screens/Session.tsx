@@ -35,6 +35,8 @@ import { EventCard, FocusChat, FocusChatContext, StepLines, useFocusChat } from 
 import { StaffHeader, StaffMessages, useMember } from "../project/staff";
 import { BriefPage, FoldersPage, WakeupsPage } from "../project/pages";
 import { ProjectBoard } from "../board/ProjectBoard";
+import { useMain } from "../main/data";
+import { orchestrationPathOf } from "../mode";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -71,9 +73,12 @@ export type SessionScreenProps = {
   banner?: ReactNode;
   /** The composer's words while nothing runs, when the chat is not an ordinary agent's. */
   placeholder?: string;
+  /** Opened by its plain address in Agents mode: a session that belongs to orchestration mode (the
+   *  main chat, anything of a project with an orchestrator) moves there as soon as it is known to. */
+  leaveForOrchestration?: boolean;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, placeholder }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, placeholder, leaveForOrchestration = false }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -99,6 +104,14 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
   );
   const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane, context: panelContext, at: panelAt });
   const orchestrating = focus?.kind === "orchestrator";
+  // A link from before orchestration mode, a notification or the palette may name an orchestrated
+  // session by its plain address; only the session itself says where it belongs, so the move waits
+  // for it. The address is replaced, so Back does not return to the plain one and move again.
+  const mainSession = useMain(leaveForOrchestration).data?.session_id;
+  const orchestrationPath = leaveForOrchestration && detail ? orchestrationPathOf(detail, mainSession) : null;
+  useEffect(() => {
+    if (orchestrationPath) navigate(orchestrationPath + window.location.search, { replace: true });
+  }, [orchestrationPath]);
   const staffName = useMember(focus && detail?.staff ? detail.staff.id : null).data?.name ?? "";
   const asks = useAsks(orchestrating ? focus!.projectId : null);
   const focusChat = useMemo<FocusChat | null>(() => (focus ? { projectId: focus.projectId, orchestrator: orchestrating, asks, toast } : null), [focus?.projectId, orchestrating, asks, toast]);

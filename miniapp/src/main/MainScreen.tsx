@@ -5,7 +5,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "../api";
 import { t } from "../i18n";
-import { navigate, pathFor } from "../router";
+import { ORCHESTRATION_LIST, navigate } from "../router";
 import { invalidate } from "../store";
 import { errorText } from "../ui";
 import { MainBoard } from "./cards";
@@ -38,7 +38,8 @@ export function MainScreen({ toast }: { toast: (text: string) => void }) {
       <SessionScreen
         key={sessionId}
         id={sessionId}
-        onBack={() => navigate(pathFor("agents"))}
+        // Home has nothing behind it but the list of projects, which on a phone is a page of its own.
+        onBack={() => navigate(ORCHESTRATION_LIST)}
         toast={toast}
         banner={<MainBoard view={data} toast={toast} />}
         placeholder={t("main.composer")}

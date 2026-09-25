@@ -7,7 +7,7 @@ import { Icon, IconName } from "./icons";
 import { Sheet } from "./dialogs";
 import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
-import { t } from "./i18n";
+import { plural, t } from "./i18n";
 import { LangPicker } from "./components";
 import { insideTerminal } from "./terminal/keys";
 
@@ -17,7 +17,7 @@ function tagFor(s: Screen, selfdev: SelfDevMode): string {
   return screenTag(s, selfdev, BETA);
 }
 
-export const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", terminals: "terminal", harnesses: "wrench", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings", project: "folder", main: "compass" };
+export const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", terminals: "terminal", harnesses: "wrench", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings", orchestration: "compass" };
 
 /** A destination's name, in the reader's language. The components below re-render with it because
  *  the shell's own `useLang` does; nothing here holds a translated string of its own. */
@@ -25,7 +25,9 @@ export function screenTitle(s: Screen): string {
   return t(`nav.${s}`);
 }
 
-const PRIMARY: Screen[] = ["agents", "inbox", "board"];
+/** On a phone the first two tabs are the two modes: the switch between them is one tap from every
+ *  screen that shows the bar, and orchestration's tab carries the count of what waits there. */
+const PRIMARY: Screen[] = ["agents", "orchestration", "inbox", "board"];
 /** Screens that carry a beta tag beside their name: new, usable, not yet finished. */
 const BETA: Screen[] = ["voice"];
 const MORE: Screen[] = ["voice", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
@@ -64,21 +66,25 @@ export function PageHeader({ title, subtitle, actions, back, children }: { title
   );
 }
 
-export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onMore: () => void; moreOpen: boolean }) {
+/** `waiting`: what waits for the operator in orchestration mode, shown quietly on its tab from
+ *  elsewhere. `flow`: the bar stands in the column (under the main chat) rather than over the page. */
+export function TabBar({ screen, counts, selfdev, onMore, moreOpen, waiting = 0, flow = false }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onMore: () => void; moreOpen: boolean; waiting?: number; flow?: boolean }) {
   const more = visibleScreens(MORE, selfdev);
   const inMore = more.includes(screen);
   const moreCount = more.reduce((n, s) => n + countFor(s, counts), 0);
   return (
-    <nav className="tabbar" aria-label={t("shell.nav.primary")}>
+    <nav className={`tabbar five ${flow ? "flow" : ""}`} aria-label={t("shell.nav.primary")}>
       {PRIMARY.map((s) => {
         const n = countFor(s, counts);
+        const quiet = s === "orchestration" && screen !== "orchestration" ? waiting : 0;
         return (
-          <a key={s} href={pathFor(s)} className={screen === s && !moreOpen ? "active" : ""} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))}>
+          <a key={s} href={pathFor(s)} data-screen={s} className={screen === s && !moreOpen ? "active" : ""} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))}>
             <span className="glyph">
               <Icon name={ICONS[s]} size={22} />
               {n > 0 && <span className="tab-badge">{n > 99 ? "99+" : n}</span>}
+              {quiet > 0 && <span className="tab-badge mode-count" data-waiting={quiet} aria-label={plural("mode.waiting", quiet)}>{quiet > 99 ? "99+" : quiet}</span>}
             </span>
-            {screenTitle(s)}
+            <span className="tab-label">{screenTitle(s)}</span>
           </a>
         );
       })}
@@ -87,7 +93,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
           <Icon name={inMore ? ICONS[screen] : "more"} size={22} />
           {moreCount > 0 && <span className="tab-badge dot" aria-label={t("shell.waiting", { n: moreCount })} />}
         </span>
-        {inMore ? screenTitle(screen) : t("nav.more")}
+        <span className="tab-label">{inMore ? screenTitle(screen) : t("nav.more")}</span>
       </button>
     </nav>
   );
@@ -168,7 +174,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
   );
 }
 
-const GO_KEYS: Record<string, Screen> = { a: "agents", v: "voice", i: "inbox", b: "board", t: "terminals", c: "changes", m: "memory", u: "usage", s: "settings" };
+const GO_KEYS: Record<string, Screen> = { a: "agents", o: "orchestration", v: "voice", i: "inbox", b: "board", t: "terminals", c: "changes", m: "memory", u: "usage", s: "settings" };
 
 /** Keyboard on a desktop: Ctrl/⌘ K opens the palette, `g` then a letter goes to a screen. Never inside a text field. */
 export function useShortcuts(onPalette: () => void, selfdev: SelfDevMode) {
