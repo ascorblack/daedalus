@@ -102,10 +102,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
   const panelContext = focus ? focus.kind : main ? "main" : "session";
   const panelTabs = tabsFor(panelContext);
   // In focus mode the panel's tab is written into the project's own address, so opening the board
-  // beside the orchestrator does not leave the project for the agents list.
+  // beside the orchestrator does not leave the project for the agents list. The main chat keeps its
+  // panel in orchestration's home for the same reason. Written as the session's plain address, every
+  // toggle and tab left orchestration for /app/agents/<main>, drew the Agents column and a second
+  // conversation there, and came back once that conversation moved itself home: the whole shell was
+  // built twice on each click, and Back stepped through the detour.
   const panelAt = useMemo(
-    () => (focus ? (q: Record<string, string | null>) => (focus.kind === "orchestrator" ? projectHome(focus.projectId, q) : projectSessionPath(focus.projectId, id, q)) : undefined),
-    [focus?.projectId, focus?.kind, id],
+    () => (focus ? (q: Record<string, string | null>) => (focus.kind === "orchestrator" ? projectHome(focus.projectId, q) : projectSessionPath(focus.projectId, id, q))
+      : main ? (q: Record<string, string | null>) => pathFor("orchestration", null, q)
+      : undefined),
+    [focus?.projectId, focus?.kind, id, main],
   );
   const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane, context: panelContext, at: panelAt });
   const orchestrating = focus?.kind === "orchestrator";

@@ -3,6 +3,7 @@
 // file only mounts what that names, with the project's way back instead of the agents list's.
 
 import { lazy, Suspense } from "react";
+import { SessionScreen } from "../chunks";
 import { Skeleton } from "../components";
 import { t } from "../i18n";
 import { ORCHESTRATION, ORCHESTRATION_LIST, back as goBack, navigate, projectHome, projectPagePath, useRoute } from "../router";
@@ -12,7 +13,6 @@ import { BriefPage, EnableOrchestrator, FoldersPage, JournalPage, TerminalsPage,
 import { SetupLine } from "../main/cards";
 import { PhoneBoard, PhoneTeam, PhoneTerminals } from "./phone";
 
-const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 const TeamPage = lazy(() => import("../team/TeamPage").then((m) => ({ default: m.TeamPage })));
 const ProjectBoard = lazy(() => import("../board/ProjectBoard").then((m) => ({ default: m.ProjectBoard })));
 const StaffView = lazy(() => import("../staff/StaffView").then((m) => ({ default: m.StaffView })));

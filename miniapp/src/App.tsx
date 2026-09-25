@@ -30,61 +30,41 @@ import { MainEntry } from "./main/MainEntry";
 import { Mode, modeHome, modeOf, rememberMode, storedMode } from "./mode";
 import { OrchestrationList, OrchestrationSidebar, useOrchestrationWaiting } from "./orchestration";
 import { Rail } from "./rail";
-
-// One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
-// settings, the usage charts and the conversation view as well. The service worker keeps each
-// chunk once it has been used, so a screen visited before opens offline too.
-//
-// `lazy` remembers the promise it was given, rejection included, so a chunk that failed to arrive
-// once never arrives at all: re-rendering the screen replays the same rejection and only a reload
-// recovers. The target here is a phone on a flaky link, where a failed chunk is a normal event and
-// not a broken build, so the loader is retried a couple of times before the boundary sees it.
-function screen<T>(load: () => Promise<T>): () => Promise<T> {
-  return async () => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await load();
-      } catch (e) {
-        if (attempt >= 2) throw e;
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-      }
-    }
-  };
-}
+import { SessionScreen, chunk, retried, whenIdle } from "./chunks";
 
 /** A chunk that is not where the page thinks it is: the build moved under an open page. */
 function isChunkError(message: string): boolean {
   return /dynamically imported|Importing a module script failed|error loading dynamically imported/i.test(message);
 }
 
-const StartScreen = lazy(screen(() => import("./screens/Start").then((m) => ({ default: m.StartScreen }))));
-const InboxScreen = lazy(screen(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen }))));
-const BoardScreen = lazy(screen(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen }))));
-const SessionScreen = lazy(screen(() => import("./screens/Session").then((m) => ({ default: m.SessionScreen }))));
-const VoiceScreen = lazy(screen(() => import("./screens/Voice").then((m) => ({ default: m.VoiceScreen }))));
-const ProposalsScreen = lazy(screen(() => import("./screens/Proposals").then((m) => ({ default: m.ProposalsScreen }))));
-const SchedulesScreen = lazy(screen(() => import("./screens/Schedules").then((m) => ({ default: m.SchedulesScreen }))));
-const UsageScreen = lazy(screen(() => import("./screens/Usage").then((m) => ({ default: m.UsageScreen }))));
-const SettingsScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen }))));
-const HealthScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen }))));
-const MemoryScreen = lazy(screen(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
-const TerminalsScreen = lazy(screen(() => import("./screens/Terminals").then((m) => ({ default: m.TerminalsScreen }))));
-const TerminalFullScreen = lazy(screen(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
-const HarnessesScreen = lazy(screen(() => import("./screens/Harnesses").then((m) => ({ default: m.HarnessesScreen }))));
-const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
-const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
-const ProjectScreen = lazy(screen(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
-const ProjectSidebar = lazy(screen(() => import("./project/ProjectSidebar").then((m) => ({ default: m.ProjectSidebar }))));
-const ProjectTabs = lazy(screen(() => import("./project/phone").then((m) => ({ default: m.ProjectTabs }))));
-const MainScreen = lazy(screen(() => import("./main/MainScreen").then((m) => ({ default: m.MainScreen }))));
-const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
+// One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
+// settings, the usage charts and the conversation view as well. The service worker keeps each
+// chunk once it has been used, so a screen visited before opens offline too. Every loader is
+// retried (see chunks.ts), because a failed chunk on a flaky link is a normal event.
+const StartScreen = lazy(retried(() => import("./screens/Start").then((m) => ({ default: m.StartScreen }))));
+const InboxScreen = lazy(retried(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen }))));
+const BoardScreen = lazy(retried(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen }))));
+const VoiceScreen = lazy(retried(() => import("./screens/Voice").then((m) => ({ default: m.VoiceScreen }))));
+const ProposalsScreen = lazy(retried(() => import("./screens/Proposals").then((m) => ({ default: m.ProposalsScreen }))));
+const SchedulesScreen = lazy(retried(() => import("./screens/Schedules").then((m) => ({ default: m.SchedulesScreen }))));
+const UsageScreen = lazy(retried(() => import("./screens/Usage").then((m) => ({ default: m.UsageScreen }))));
+const SettingsScreen = lazy(retried(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen }))));
+const HealthScreen = lazy(retried(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen }))));
+const MemoryScreen = lazy(retried(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
+const TerminalsScreen = lazy(retried(() => import("./screens/Terminals").then((m) => ({ default: m.TerminalsScreen }))));
+const TerminalFullScreen = lazy(retried(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
+const HarnessesScreen = lazy(retried(() => import("./screens/Harnesses").then((m) => ({ default: m.HarnessesScreen }))));
+const ServicesScreen = lazy(retried(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
+const LoginScreen = lazy(retried(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
+const ProjectScreen = chunk(retried(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
+const ProjectSidebar = chunk(retried(() => import("./project/ProjectSidebar").then((m) => ({ default: m.ProjectSidebar }))));
+const ProjectTabs = lazy(retried(() => import("./project/phone").then((m) => ({ default: m.ProjectTabs }))));
+const MainScreen = chunk(retried(() => import("./main/MainScreen").then((m) => ({ default: m.MainScreen }))));
+const OnboardingScreen = lazy(retried(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
 function prefetchSession(): void {
-  const idle = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
-  const pull = () => void import("./screens/Session").catch(() => undefined);  // a prefetch that fails is not an error: the screen retries when it is opened
-  if (idle) idle(pull);
-  else window.setTimeout(pull, 2000);
+  whenIdle(SessionScreen.prefetch);
 }
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -169,6 +149,12 @@ export function App() {
   const openPalette = useCallback(() => setPalette(true), []);
   const offline = useOffline();
   useEffect(prefetchSession, []);
+  // In orchestration mode a project, or the main chat from inside one, is what the operator opens
+  // next. Fetched ahead, the column and the centre render in the click's own frame; left to the click,
+  // both drew their loading fallback first.
+  useEffect(() => {
+    if (mode === "orchestration") whenIdle(() => (ProjectScreen.prefetch(), ProjectSidebar.prefetch(), MainScreen.prefetch()));
+  }, [mode]);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   // Nothing in the app works without a model, so the app asks for one before it shows anything else.

@@ -3,16 +3,15 @@
 // the first time makes its session; after that it is the same session every time, from any device,
 // until the operator replaces it.
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { api } from "../api";
 import { t } from "../i18n";
 import { ORCHESTRATION_LIST, navigate } from "../router";
 import { invalidate } from "../store";
 import { errorText } from "../ui";
+import { SessionScreen } from "../chunks";
 import { MainFlow } from "./cards";
 import { MAIN_KEY, useMain } from "./data";
-
-const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 
 export function MainScreen({ toast }: { toast: (text: string) => void }) {
   const { data, error } = useMain();

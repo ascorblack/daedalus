@@ -139,8 +139,10 @@ def judge(name: str, m: dict) -> list[str]:
             if got and any(float(d.rstrip("s") or 0) > 0 for d in got["d"].split(",")):
                 problems.append(f"{name}: a transition is active on {part} during the drag: {got}")
     # The page's own ticking commits a few times either way; a commit per move is the defect, and
-    # would show as STEPS more than the still baseline.
-    if m["commitsWhileMoving"] - m["commitsWhileStill"] > 2:
+    # would show as STEPS more than the still baseline. The margin is half of that, not two: the
+    # conversation's once-a-second poll commits up to three times in a burst, and whether that burst
+    # falls in the still stretch or the moving one is a matter of a few milliseconds of load order.
+    if m["commitsWhileMoving"] - m["commitsWhileStill"] > STEPS // 2:
         problems.append(f"{name}: React committed {m['commitsWhileMoving']} times in {STEPS} moves, against {m['commitsWhileStill']} with the pointer still")
     if m["writesWhileMoving"]:
         problems.append(f"{name}: the width was written to storage {m['writesWhileMoving']} times during the drag")
