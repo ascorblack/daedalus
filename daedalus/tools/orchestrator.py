@@ -144,9 +144,22 @@ async def peek(context: ToolContext, op: str, path: str = "", folder: str | None
     return await _call(context, "peek", op=op, path=path, folder=folder, pattern=pattern, ref=ref, offset=offset, limit=limit)
 
 
+QUESTION_PROPERTIES: dict[str, Any] = {
+    "title": {"type": "string", "description": "A few words naming the decision, shown as the question's name in the operator's list."},
+    "text": {"type": "string", "description": "The decision in one or two sentences, with what hangs on it. Markdown."},
+    "options": {"type": "array", "items": {"type": "string"}, "description": "The choices, if there are some."},
+    "multi": {"type": "boolean", "description": "Several options may be chosen together."},
+    "allow_free": {"type": "boolean", "description": "Default true: the operator may answer in their own words instead of an option. false when only the options make sense."},
+    "context": {"type": "string", "description": "What the operator needs to decide without reading the whole conversation."},
+    "task_id": {"type": "string", "description": "The task it is about, if any."},
+    "urgent": {"type": "boolean", "description": "Whether work is blocked until it is answered."},
+    "dispatch_id": {"type": "string", "description": "The main orchestrator's dispatch this question belongs to, if any."},
+}
+
+
 class AskOperator(Tool):
-    """Written out rather than decorated: its third argument is called ``context``, which the decorator keeps
-    for the tool context."""
+    """Written out rather than decorated: its questions carry an argument called ``context``, which the
+    decorator keeps for the tool context."""
 
     @property
     def name(self) -> str:
@@ -157,37 +170,59 @@ class AskOperator(Tool):
         return ToolDefinition(
             name=self.name,
             description=(
-                "Put a decision only the operator can make to them, with the options you see. It returns at once with the "
-                "request's short id; do not wait for the answer — it arrives as an event in a later wake-up. Link it to a "
-                "task with task_id when it is about one."
+                "Put decisions only the operator can make to them. Ask everything you need at once: questions=[{title, "
+                "text, options?, multi?, urgent?, dispatch_id?, context?}, …] (up to 12), or one question with title and "
+                "text. The operator sees them as a list, answers any of them and sends the answers together. It returns "
+                "at once with each question's short id; do not wait — the answers arrive as events in a later wake-up, "
+                "in one wake-up when they were sent together. WithdrawQuestions takes back those that no longer matter."
             ),
             parameters=ToolParameterSchema(
                 properties={
-                    "question": {"type": "string", "description": "The decision, in one or two sentences."},
-                    "options": {"type": "array", "items": {"type": "string"}, "description": "The choices, if there are some."},
-                    "context": {"type": "string", "description": "What the operator needs to decide without reading the whole conversation."},
-                    "task_id": {"type": "string", "description": "The task it is about, if any."},
-                    "urgent": {"type": "boolean", "description": "Whether work is blocked until it is answered."},
-                    "dispatch_id": {"type": "string", "description": "The main orchestrator's dispatch this question belongs to, if any."},
+                    "questions": {
+                        "type": "array",
+                        "description": "Several questions at once, each with its own title and text.",
+                        "items": {"type": "object", "properties": QUESTION_PROPERTIES, "required": ["title", "text"]},
+                    },
+                    **QUESTION_PROPERTIES,
                 },
-                required=["question"],
+                required=[],
             ),
         )
 
     async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        questions = arguments.get("questions")
+        if questions is not None and not isinstance(questions, list):
+            return error(context, "questions is a list of objects, each with a title and a text")
         options = arguments.get("options") or []
         if not isinstance(options, list):
             return error(context, "options is a list of strings")
         return await _call(
             context,
             "ask_operator",
-            question=str(arguments.get("question") or ""),
+            questions=questions or None,
+            title=str(arguments.get("title") or ""),
+            text=str(arguments.get("text") or ""),
             options=[str(o) for o in options],
+            multi=bool(arguments.get("multi")),
+            allow_free=arguments.get("allow_free") is not False,
             context=str(arguments.get("context") or ""),
             task_id=str(arguments["task_id"]) if arguments.get("task_id") else None,
             urgent=bool(arguments.get("urgent")),
             dispatch_id=str(arguments["dispatch_id"]) if arguments.get("dispatch_id") else None,
         )
+
+
+@tool(
+    name="WithdrawQuestions",
+    description=(
+        "Take back questions of yours that still wait for the operator, one or many, when the answer no longer "
+        "matters — the work changed, you found the answer yourself, a newer question replaces it. ids: their short "
+        "ids. reason: a few words the operator sees where each question was. A question already answered is reported "
+        "with its answer instead."
+    ),
+)
+async def withdraw_questions(context: ToolContext, ids: list[str], reason: str) -> ToolResult:
+    return await _call(context, "withdraw_questions", ids=ids, reason=reason)
 
 
 @tool(
@@ -477,7 +512,7 @@ async def unwatch(context: ToolContext, id: str) -> ToolResult:
 
 
 TOOLS = [
-    brief, folders, journal, team, tasks, peek, AskOperator, project_report,
+    brief, folders, journal, team, tasks, peek, AskOperator, withdraw_questions, project_report,
     hire, staff_edit, dismiss, assign, tell, read_staff, answer, interrupt, pause, release, harnesses,
     wake_me, Watch, unwatch,
 ]

@@ -220,8 +220,8 @@ async def test_a_linked_question_shows_in_the_main_chat_and_answer_needs_the_ope
         orchestrator = await office(m.r)
         sid = await m.main.ensure()
         dispatch = await m.dispatches.create(await m.r.refreshed(), text="Choose a database", from_session=sid)
-        await m.r.call(orchestrator, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=dispatch.id)
-        await m.r.call(orchestrator, "ask_operator", question="Unrelated: new logo?")
+        await m.r.call(orchestrator, "ask_operator", title="Postgres or SQLite?", text="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=dispatch.id)
+        await m.r.call(orchestrator, "ask_operator", title="Unrelated: new logo?", text="Unrelated: new logo?")
         view = await m.main.view()
         [card] = view["asks"]
         assert card["text"].startswith("Postgres or SQLite?") and card["project_name"] == "Bakery" and card["asker"] == "orchestrator" and view["questions"] == 1
@@ -332,7 +332,7 @@ async def test_the_main_routes_the_cancel_card_the_setup_button_and_the_model_ch
 
             await m.r.manager.projects.set_setup(m.r.project.id, "dispatcher")
             dispatch = await m.dispatches.create(await m.r.refreshed(), text="Survey", kind="setup", from_session=sid)
-            await m.r.call(orchestrator, "ask_operator", question="Deadline?", options=["Friday", "Monday"])
+            await m.r.call(orchestrator, "ask_operator", title="Deadline?", text="Deadline?", options=["Friday", "Monday"])
             view = (await client.get("/api/main", headers=headers)).json()
             assert [d["id"] for d in view["dispatches"]] == [dispatch.id] and view["dispatches"][0]["project_name"] == "Bakery"
             assert view["questions"] == 1 and view["setup"] == [{"project_id": m.r.project.id, "name": "Bakery"}]
@@ -370,8 +370,8 @@ async def test_a_mirrored_requests_notification_opens_the_main_chat(settings: Se
         service = NotificationService(db)
         service.register_link(m.main.request_link)
         dispatch = await m.dispatches.create(await m.r.refreshed(), text="Choose")
-        await m.r.call(orchestrator, "ask_operator", question="Linked?", dispatch_id=dispatch.id)
-        await m.r.call(orchestrator, "ask_operator", question="Not linked?")
+        await m.r.call(orchestrator, "ask_operator", title="Linked?", text="Linked?", dispatch_id=dispatch.id)
+        await m.r.call(orchestrator, "ask_operator", title="Not linked?", text="Not linked?")
         linked, unlinked = sorted(await m.r.manager.asks.open_for(m.r.project.id), key=lambda a: a.text)
         assert await service.link_for(str(linked.detail["event_ref"]), "/app/agents/x") == "/app/main"
         assert await service.link_for(str(unlinked.detail["event_ref"]), "/app/agents/x") == "/app/agents/x"

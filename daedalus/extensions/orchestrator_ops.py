@@ -9,6 +9,7 @@ first call. The results are text for the model: short, with the ids it needs for
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,7 @@ from daedalus.extensions.watches import WatchRefused
 from daedalus.host.peek import PeekRefused
 from daedalus.staff_runtime import LiveSession
 from daedalus.stores.projects import BRIEF_SECTIONS, OPERATOR_ONLY_SECTIONS, Project, ProjectError, ProjectFolder
-from daedalus.stores.staff import HARNESS_NAMES, StaffError
+from daedalus.stores.staff import HARNESS_NAMES, Ask, StaffError
 
 if TYPE_CHECKING:
     from daedalus.extensions.orchestrator import Orchestrators
@@ -352,30 +353,145 @@ async def peek(orch: Orchestrators, project: Project, session_id: str, *, op: st
 # -- speaking to the operator ----------------------------------------------------------------------
 
 
-async def ask_operator(orch: Orchestrators, project: Project, session_id: str, *, question: str, options: list[str] | None = None, context: str = "", task_id: str | None = None, urgent: bool = False, dispatch_id: str | None = None) -> str:
-    text = question.strip()
+ASK_BATCH_MAX = 12
+"""Questions in one AskOperator call. More than a screenful at once is a survey, not a set of decisions."""
+TITLE_MAX = 120
+
+
+@dataclass(frozen=True, slots=True)
+class _Question:
+    title: str
+    text: str
+    options: list[str]
+    multi: bool
+    allow_free: bool
+    urgent: bool
+    task_id: str | None
+    dispatch_id: str | None
+
+
+async def _question(orch: Orchestrators, project: Project, raw: Any, where: str) -> _Question:
+    """One question checked before anything is asked, so a batch with a bad question asks nothing and
+    the refusal names which one."""
+    if not isinstance(raw, dict):
+        raise Refused(f"{where} is not an object with a title and a text")
+    title = " ".join(str(raw.get("title") or "").split())
+    text = str(raw.get("text") or "").strip()
+    if not title:
+        raise Refused(f"{where} has no title: give each question a few words the operator can scan in a list")
+    if len(title) > TITLE_MAX:
+        raise Refused(f"{where}'s title is longer than {TITLE_MAX} characters; say it in a few words and put the rest in text")
     if not text:
-        raise Refused("the question is empty")
-    if context.strip():
-        text += f"\n\nContext: {context.strip()}"
-    labels = list(dict.fromkeys(str(o).strip()[:200] for o in (options or []) if str(o or "").strip()))[:8]
+        raise Refused(f"{where} has no text")
+    context = str(raw.get("context") or "").strip()
+    if context:
+        text += f"\n\nContext: {context}"
+    options = raw.get("options") or []
+    if not isinstance(options, list):
+        raise Refused(f"{where}'s options are a list of strings")
+    labels = list(dict.fromkeys(str(o).strip()[:200] for o in options if str(o or "").strip()))[:8]
+    multi = bool(raw.get("multi")) and len(labels) > 1
+    allow_free = raw.get("allow_free") is not False or not labels
+    task_id = str(raw["task_id"]) if raw.get("task_id") else None
     if task_id:
         row = await orch.manager.db.fetchone("SELECT 1 FROM board_tasks WHERE id = ? AND project_id = ?", (task_id, project.id))
         if row is None:
-            raise Refused(f"no task {task_id} on {project.name}'s board")
+            raise Refused(f"{where}: no task {task_id} on {project.name}'s board")
     linked: str | None = None
+    dispatch_id = str(raw["dispatch_id"]).strip() if raw.get("dispatch_id") else ""
     if dispatch_id:
         # The link that shows this question in the main orchestrator's chat as well as this one. It is
         # checked here, so a question is never shown under another project's dispatch or a closed one.
         dispatch = await orch.manager.dispatches.get(dispatch_id)
         if dispatch is None or dispatch.project_id != project.id:
-            raise Refused(f"{project.name} has no dispatch {dispatch_id!r}; the state block lists its open dispatches")
+            raise Refused(f"{where}: {project.name} has no dispatch {dispatch_id!r}; the state block lists its open dispatches")
         if dispatch.status not in ("open", "blocked"):
-            raise Refused(f"dispatch {dispatch.id} is {dispatch.status}; ask without it")
+            raise Refused(f"{where}: dispatch {dispatch.id} is {dispatch.status}; ask without it")
         linked = dispatch.id
-    ask = await orch.open_request(project, session_id, kind="question", text=text[:8000], options=labels, detail={"urgent": bool(urgent)}, task_id=task_id, dispatch_id=linked)
-    shown = " It is shown in the main orchestrator's chat too." if ask.dispatch_id else ""
-    return f"asked the operator as [{ask.short_id}]; do not wait — the answer arrives as an event in a later wake-up.{shown}"
+    return _Question(title, text[:8000], labels, multi, allow_free, bool(raw.get("urgent")), task_id, linked)
+
+
+async def ask_operator(
+    orch: Orchestrators,
+    project: Project,
+    session_id: str,
+    *,
+    questions: list[Any] | None = None,
+    title: str = "",
+    text: str = "",
+    options: list[str] | None = None,
+    multi: bool = False,
+    allow_free: bool = True,
+    context: str = "",
+    task_id: str | None = None,
+    urgent: bool = False,
+    dispatch_id: str | None = None,
+) -> str:
+    """One question, or several at once. Every question is checked before any is asked, and all of
+    them are asked before the call returns, so the ids come back at once and the operator's list
+    fills in one go. The answers come later, together if the operator answers them together."""
+    if questions:
+        if not isinstance(questions, list):
+            raise Refused("questions is a list of {title, text, options?, multi?, urgent?, dispatch_id?, context?}")
+        if len(questions) > ASK_BATCH_MAX:
+            raise Refused(f"at most {ASK_BATCH_MAX} questions at once; ask what blocks the work first")
+        if text or title:
+            raise Refused("give either questions=[…] or one question with its title and text, not both")
+        raws: list[Any] = list(questions)
+    else:
+        raws = [{"title": title, "text": text, "options": options, "multi": multi, "allow_free": allow_free, "context": context, "task_id": task_id, "urgent": urgent, "dispatch_id": dispatch_id}]
+    single = len(raws) == 1
+    checked = [await _question(orch, project, raw, "the question" if single else f"question {i + 1}") for i, raw in enumerate(raws)]
+    asked: list[Ask] = []
+    for q in checked:
+        detail: dict[str, Any] = {"urgent": q.urgent, "multi": q.multi, "allow_free": q.allow_free}
+        asked.append(await orch.open_request(project, session_id, kind="question", title=q.title, text=q.text, options=q.options, detail=detail, task_id=q.task_id, dispatch_id=q.dispatch_id))
+    shown = " Those with a dispatch_id are shown in the main orchestrator's chat too." if any(a.dispatch_id for a in asked) else ""
+    if single:
+        shown = " It is shown in the main orchestrator's chat too." if asked[0].dispatch_id else ""
+        return f"asked the operator as [{asked[0].short_id}]; do not wait — the answer arrives as an event in a later wake-up.{shown}"
+    listed = "; ".join(f"[{a.short_id}] {a.title}" for a in asked)
+    return f"asked the operator {len(asked)} questions: {listed}. Do not wait — the answers arrive as events, together when the operator answers them together.{shown}"
+
+
+async def withdraw_questions(orch: Orchestrators, project: Project, session_id: str, *, ids: list[str] | None = None, reason: str = "") -> str:
+    """Take back questions of its own that still wait, one or many. Each id is judged on its own: one
+    answered a moment ago is reported with its answer, which is news the orchestrator needs, rather
+    than failing the rest."""
+    why = " ".join((reason or "").split())
+    if not why:
+        raise Refused("say why, in a few words: the operator sees it where the question was")
+    refs = [str(i).strip() for i in (ids or []) if str(i or "").strip()]
+    if not refs:
+        raise Refused("give the ids of the questions to withdraw; the state block lists those still waiting")
+    team = orch.team
+    if team is None:
+        raise Refused("the team is not running on this installation")
+    withdrawn: list[str] = []
+    refused: list[str] = []
+    for ref in dict.fromkeys(refs):
+        ask = await orch.manager.asks.get(ref)
+        if ask is None:
+            row = await orch.manager.db.fetchone("SELECT id FROM asks WHERE short_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 1", (ref.lower().lstrip("[").rstrip("]"), project.id))
+            ask = await orch.manager.asks.get(row["id"]) if row is not None else None
+        if ask is None or ask.project_id != project.id:
+            refused.append(f"{ref}: {project.name} has no such request")
+        elif ask.origin != "orchestrator":
+            refused.append(f"[{ask.short_id}]: not yours to withdraw — it is a staff member's request")
+        elif not ask.open:
+            if ask.resolved_by == "system":
+                refused.append(f"[{ask.short_id}]: already withdrawn")
+            else:
+                refused.append(f"[{ask.short_id}]: already answered by the {ask.resolved_by}: {orch._answer_text(ask)}")
+        elif await team.withdraw(ask, why=why, by="orchestrator"):
+            withdrawn.append(f"[{ask.short_id}]")
+        else:
+            refused.append(f"[{ask.short_id}]: answered a moment ago; its answer arrives as an event")
+    if not withdrawn:
+        raise Refused("nothing withdrawn — " + "; ".join(refused))
+    await orch.manager.projects.record(project.id, "orchestrator", "withdrawal", f"Withdrew {', '.join(withdrawn)}: {why}", {"asks": ",".join(withdrawn)})
+    tail = f" Not withdrawn: {'; '.join(refused)}." if refused else ""
+    return f"withdrew {', '.join(withdrawn)}; the operator sees each one go with your reason.{tail}"
 
 
 async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> str:
@@ -474,6 +590,7 @@ OPS: dict[str, Callable[..., Awaitable[str]]] = {
     "tasks": tasks,
     "peek": peek,
     "ask_operator": ask_operator,
+    "withdraw_questions": withdraw_questions,
     "project_report": project_report,
     "wake_me": wake_me,
     "watch": watch,

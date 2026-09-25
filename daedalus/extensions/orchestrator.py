@@ -71,6 +71,7 @@ WAKE_TYPES = (
     "watch.fired",
     "dispatch.created",
     "dispatch.message",
+    "ask.batch",
 )
 """What an orchestrator's queue subscribes to; :meth:`Orchestrators.classify` decides which of them wake it.
 The two ``dispatch`` types are the main orchestrator's hand-overs to a project; they wake at once."""
@@ -624,7 +625,10 @@ class Orchestrators:
     def _ask_line(self, ask: Ask, members: dict[str, Staff], now: datetime) -> str:
         asker = "you" if ask.origin == "orchestrator" else who(members.get(ask.staff_id or ""))
         suggestion = f" — your suggestion: {_one_line(ask.suggestion, 80)}" if ask.suggestion else ""
-        return f"[{ask.short_id}] {asker} ({ask.kind}): {_one_line(ask.text, 160)} ({_age(ask.created_at, now)}){suggestion}"
+        # The title leads when there is one: it is what the operator sees in their list, so the
+        # orchestrator can refer to a question the way the operator reads it.
+        said = f"\"{_one_line(ask.title, 80)}\" {_one_line(ask.text, 120)}" if ask.title else _one_line(ask.text, 160)
+        return f"[{ask.short_id}] {asker} ({ask.kind}): {said} ({_age(ask.created_at, now)}){suggestion}"
 
     async def _spend_line(self, project_id: str, now: datetime) -> str:
         """Today's spend, read by the same summary the app shows, so the orchestrator and the operator
@@ -770,11 +774,18 @@ class Orchestrators:
             if ask is None or ask.resolved_by == "system":
                 # A request withdrawn because what it served is over has no answer to bring.
                 return None
-            own = ask.origin == "orchestrator"
-            escalated = ask.routed_to == "operator" and ask.routed_at > ask.created_at and ask.resolved_by == "operator"
-            if not (own or escalated):
+            if ask.resolution.get("batch"):
+                # Answered with others from the operator's list: the batch's own event brings it,
+                # with the rest, as one wake-up rather than one per answer.
+                return None
+            if not self._news_to_it(ask):
                 return None
             return Wake(f"answer:{ask.id}", urgent=kind == "ask.answered")
+        if kind == "ask.batch":
+            asks = await self._batch_asks(p)
+            if not asks:
+                return None
+            return Wake(f"answers:{p.get('batch_id') or event.seq}", urgent=any(a.kind != "permission" for a in asks))
         if kind in TASK_WAKES:
             return Wake(f"task:{p.get('task_id') or event.seq}", urgent=kind == "task.merge_failed")
         if kind == "run.started":
@@ -797,6 +808,22 @@ class Orchestrators:
             return Wake(f"dispatch:{event.seq}", urgent=True)
         return None
 
+    @staticmethod
+    def _news_to_it(ask: Ask) -> bool:
+        """Whether an answer is the orchestrator's to hear: to what it asked, or to what it escalated."""
+        own = ask.origin == "orchestrator"
+        escalated = ask.routed_to == "operator" and ask.routed_at > ask.created_at and ask.resolved_by == "operator"
+        return own or escalated
+
+    async def _batch_asks(self, payload: Any) -> list[Ask]:
+        """The answers of a batch the orchestrator hears of, in the order the operator gave them."""
+        found: list[Ask] = []
+        for ask_id in payload.get("ask_ids") or []:
+            ask = await self.manager.asks.get(str(ask_id))
+            if ask is not None and ask.resolved_by not in (None, "system") and self._news_to_it(ask):
+                found.append(ask)
+        return found
+
     async def _ask_for_event(self, payload: Any) -> Ask | None:
         ref = str(payload.get("request_ref") or "")
         if ref:
@@ -817,15 +844,28 @@ class Orchestrators:
         lines: list[str] = []
         for event in events[:limit]:
             try:
-                line = await self.line(project, event)
+                # A batch of answers is one event and one wake-up, but each answer is a line of its
+                # own, worded as a single answer is: the orchestrator reads them the same way, and
+                # the app's event card draws them the same way.
+                said = await self.batch_lines(project, event) if event.type == "ask.batch" else [await self.line(project, event)]
             except Exception:  # noqa: BLE001 — an event that cannot be described is still named
                 logger.warning("could not describe %s for the orchestrator", event.type, exc_info=True)
-                line = event.type
-            lines.append(f"- {self._clock(event.at)} {line}")
+                said = [event.type]
+            lines.extend(f"- {self._clock(event.at)} {line}" for line in said)
         if len(events) > limit:
             lines.append(f"- … and {len(events) - limit} more (Team, Tasks)")
         first = self._clock(events[0].at) if events else ""
-        return f"[events · {name} · {len(events)} since {first}]\n" + "\n".join(lines)
+        return f"[events · {name} · {len(lines)} since {first}]\n" + "\n".join(lines)
+
+    async def batch_lines(self, project: Project | None, event: AppEvent) -> list[str]:
+        return [await self._answer_line(ask) for ask in await self._batch_asks(event.payload)]
+
+    async def _answer_line(self, ask: Ask) -> str:
+        answer = self._answer_text(ask)
+        if ask.origin == "orchestrator":
+            return f"the operator answered your request [{ask.short_id}] \"{_one_line(ask.heading, 120)}\": {answer}"
+        member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
+        return f"the operator answered the request [{ask.short_id}] of {who(member)} you escalated: {answer}"
 
     async def line(self, project: Project | None, event: AppEvent) -> str:
         p = event.payload
@@ -874,10 +914,7 @@ class Orchestrators:
             ask = await self._ask_for_event(p)
             if ask is None:
                 return kind
-            answer = self._answer_text(ask)
-            if ask.origin == "orchestrator":
-                return f"the operator answered your request [{ask.short_id}] \"{_one_line(ask.text, 120)}\": {answer}"
-            return f"the operator answered the request [{ask.short_id}] of {who(member)} you escalated: {answer}"
+            return await self._answer_line(ask)
         if kind in TASK_WAKES:
             actor = self._actor(str(p.get("actor") or ""), member)
             title = f"\"{_one_line(str(p.get('title') or ''), 80)}\" ({p.get('task_id')})"
@@ -919,7 +956,8 @@ class Orchestrators:
     def _answer_text(ask: Ask) -> str:
         r = ask.resolution
         if ask.kind == "permission":
-            return "granted" if r.get("allow") else "refused"
+            said = ("granted always" if r.get("always") else "granted") if r.get("allow") else "refused"
+            return f"{said} — the operator said: {_one_line(str(r['note']), 400)}" if r.get("note") else said
         if ask.kind == "folder":
             if r.get("outcome") and str(r["outcome"]) != "added":
                 # Said in full, with the advice after the dash: "approved" alone once sent the
@@ -927,7 +965,11 @@ class Orchestrators:
                 return f"{r['outcome']} — nothing was added; do not ask for it again unless that reason is gone"
             return "approved" if r.get("allow") or (r.get("selected") and r["selected"][0] == (ask.detail.get("options") or ["Add"])[0]) else "declined"
         parts = [", ".join(str(s) for s in r.get("selected") or []), str(r.get("text") or "")]
-        return _one_line(" — ".join(p for p in parts if p), 400) or "(no text)"
+        said = " — ".join(p for p in parts if p)
+        if r.get("note"):
+            # The operator's words beside the option they chose: part of the answer, not a remark.
+            said = f"{said} — note: {r['note']}" if said else str(r["note"])
+        return _one_line(said, 600) or "(no text)"
 
     async def _task_bit(self, task_id: Any) -> str:
         row = await self.manager.db.fetchone("SELECT id, title FROM board_tasks WHERE id = ?", (str(task_id),))
@@ -1131,9 +1173,9 @@ class Orchestrators:
 
     # -- its own requests -----------------------------------------------------------------------------
 
-    async def open_request(self, project: Project, session_id: str, *, kind: str, text: str, options: list[str], detail: dict[str, Any], task_id: str | None = None, dispatch_id: str | None = None) -> Ask:
+    async def open_request(self, project: Project, session_id: str, *, kind: str, text: str, options: list[str], detail: dict[str, Any], task_id: str | None = None, dispatch_id: str | None = None, title: str = "") -> Ask:
         """A request of the orchestrator's own to the operator: a row, and the event the router and the app show."""
-        ask = await self.manager.asks.open(project.id, origin="orchestrator", kind=kind, text=text, routed_to="operator", task_id=task_id, detail={**detail, "options": options}, dispatch_id=dispatch_id)
+        ask = await self.manager.asks.open(project.id, origin="orchestrator", kind=kind, title=title, text=text, routed_to="operator", task_id=task_id, detail={**detail, "options": options}, dispatch_id=dispatch_id)
         ref = f"orchestrator:{project.id}:{ask.id}"
         await self.manager.db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.event_ref', ?) WHERE id = ?", (ref, ask.id))
         ask = (await self.manager.asks.get(ask.id)) or ask
@@ -1148,7 +1190,13 @@ class Orchestrators:
                 "request_ref": ref,
                 "run_id": run_id,
                 "title": f"{project.name} · orchestrator",
-                "questions": [{"question": text[:QUESTION_MAX], "options": [{"label": o, "description": ""} for o in options], "multi": False, "custom": kind == "question"}],
+                # The title leads, so a notification or a lock screen names the decision before its detail.
+                "questions": [{
+                    "question": (f"{title}\n\n{text}" if title else text)[:QUESTION_MAX],
+                    "options": [{"label": o, "description": ""} for o in options],
+                    "multi": bool(detail.get("multi")),
+                    "custom": kind == "question" and detail.get("allow_free", True) is not False,
+                }],
                 "operator_facing": True,
                 "telegram": False,
                 "short_id": ask.short_id,

@@ -96,7 +96,7 @@ async def test_a_report_on_another_projects_dispatch_is_refused(settings: Settin
         with pytest.raises(Refused, match="no dispatch"):
             await r.call(sid, "project_report", text="done", kind="done", dispatch_id=foreign.id)
         with pytest.raises(Refused, match="no dispatch"):
-            await r.call(sid, "ask_operator", question="Which tomatoes?", dispatch_id=foreign.id)
+            await r.call(sid, "ask_operator", title="Which tomatoes?", text="Which tomatoes?", dispatch_id=foreign.id)
         still = await r.manager.dispatches.get(foreign.id)
         assert still is not None and still.open
     finally:
@@ -157,7 +157,7 @@ async def test_a_linked_question_outlives_a_done_dispatch_and_is_withdrawn_with_
         dispatches = install(r)
         sid = await office(r)
         dispatch = await dispatches.create(await r.refreshed(), text="Survey the folders")
-        said = await r.call(sid, "ask_operator", question="What matters most now?", dispatch_id=dispatch.id)
+        said = await r.call(sid, "ask_operator", title="What matters most now?", text="What matters most now?", dispatch_id=dispatch.id)
         assert "shown in the main orchestrator's chat too" in said
         [ask] = await r.manager.asks.open_for(r.project.id)
         assert ask.dispatch_id == dispatch.id
@@ -169,7 +169,7 @@ async def test_a_linked_question_outlives_a_done_dispatch_and_is_withdrawn_with_
         assert await events(r.manager, "ask.answered") == []
 
         second = await dispatches.create(await r.refreshed(), text="Choose a database")
-        await r.call(sid, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=second.id)
+        await r.call(sid, "ask_operator", title="Postgres or SQLite?", text="Postgres or SQLite?", options=["Postgres", "SQLite"], dispatch_id=second.id)
         [asked] = [a for a in await r.manager.asks.open_for(r.project.id) if a.dispatch_id == second.id]
         await dispatches.cancel(second, reason="not needed any more")
         withdrawn = await r.manager.asks.get(asked.id)
@@ -194,7 +194,7 @@ async def test_during_the_setup_every_request_of_the_project_belongs_to_dispatch
         ask_id = await r.team.ingress.question(live, "req-1", "Which branch is production?", ["main", "release"])
         staff_ask = await r.manager.asks.get(ask_id)
         assert staff_ask is not None and staff_ask.dispatch_id == survey.id
-        await r.call(sid, "ask_operator", question="What is the deadline?")
+        await r.call(sid, "ask_operator", title="What is the deadline?", text="What is the deadline?")
         own = [a for a in await r.manager.asks.open_for(r.project.id) if a.origin == "orchestrator"]
         assert own and own[0].dispatch_id == survey.id, "linked without the orchestrator naming it"
         state = await r.orch.project_state(await r.refreshed(), session_id=sid)
@@ -203,7 +203,7 @@ async def test_during_the_setup_every_request_of_the_project_belongs_to_dispatch
         await r.call(sid, "project_report", text="The brief is written", kind="done", dispatch_id=survey.id)
         project = await r.refreshed()
         assert project.setup_by == "", "dispatch #1 closing as done ends the setup"
-        await r.call(sid, "ask_operator", question="Anything else?")
+        await r.call(sid, "ask_operator", title="Anything else?", text="Anything else?")
         later = [a for a in await r.manager.asks.open_for(r.project.id) if a.text.startswith("Anything else")]
         assert later and later[0].dispatch_id is None
         assert not await dispatches.finish_setup(r.project.id, by="operator"), "finishing a finished setup changes nothing"
@@ -219,7 +219,7 @@ async def test_finish_setup_by_hand_unlinks_the_next_requests(settings: Settings
         await r.manager.projects.set_setup(r.project.id, "dispatcher")
         await dispatches.create(await r.refreshed(), text="Survey", kind="setup")
         assert await dispatches.finish_setup(r.project.id, by="operator")
-        await r.call(sid, "ask_operator", question="What is the deadline?")
+        await r.call(sid, "ask_operator", title="What is the deadline?", text="What is the deadline?")
         [ask] = await r.manager.asks.open_for(r.project.id)
         assert ask.dispatch_id is None
         [changed] = [e for e in await events(r.manager, "project.changed") if e.payload.get("change") == "setup.finished"]
@@ -234,8 +234,8 @@ async def test_a_replaced_orchestrators_linked_questions_are_withdrawn(settings:
         dispatches = install(r)
         sid = await office(r)
         dispatch = await dispatches.create(await r.refreshed(), text="Choose a database")
-        await r.call(sid, "ask_operator", question="Postgres or SQLite?", dispatch_id=dispatch.id)
-        await r.call(sid, "ask_operator", question="Unrelated: new logo?")
+        await r.call(sid, "ask_operator", title="Postgres or SQLite?", text="Postgres or SQLite?", dispatch_id=dispatch.id)
+        await r.call(sid, "ask_operator", title="Unrelated: new logo?", text="Unrelated: new logo?")
         await r.orch.replace(r.project.id, "testing")
         assert await dispatches.withdraw_project(r.project.id, why="the orchestrator that asked was replaced") == 1
         left = await r.manager.asks.open_for(r.project.id)

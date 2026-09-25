@@ -693,12 +693,18 @@ class Team:
         always: bool = False,
         text: str | None = None,
         selected: list[str] | None = None,
+        note: str = "",
         by: str = "operator",
         basis: str = "",
         via: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Answer a request, once. The first answer to update the row delivers; a later one is refused.
+
+        ``note`` is the operator's comment beside a chosen option ("Postgres — but keep SQLite for
+        tests"), or their reason beside a refusal. It is kept apart from ``text`` on the resolution, so
+        a window can show what was pressed and what was said; the asker is handed it as the words
+        that came with the answer.
 
         The orchestrator answers within the project's autonomy. At ``ask`` its answer to a question
         becomes a suggestion the operator confirms, and a permission is the operator's. At ``normal``
@@ -726,6 +732,9 @@ class Team:
             if outcome is not None:
                 return outcome
         resolution: dict[str, Any] = {"allow": allow, "text": text or "", "selected": list(selected or []), "via": via or ("orchestrator" if by == "orchestrator" else "app")}
+        note = (note or "").strip()
+        if note:
+            resolution["note"] = note
         if basis:
             resolution["basis"] = basis
         # "Always" is the operator's alone: a standing grant is a change to what the member may do,
@@ -738,7 +747,7 @@ class Team:
         if not await self.manager.asks.resolve(ask.id, by, resolution):
             current = await self.manager.asks.get(ask.id)
             raise AlreadyAnswered(f"request {ask.short_id} was already answered by the {current.resolved_by if current else 'someone else'}")
-        delivered, error = await self._deliver(ask, allow=allow, always=always, text=text, selected=selected, by=by)
+        delivered, error = await self._deliver(ask, allow=allow, always=always, text=text or note or None, selected=selected, by=by)
         if ask.kind == "permission" and allow:
             who = "The orchestrator" if by == "orchestrator" else "The operator"
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
@@ -836,6 +845,20 @@ class Team:
                 await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": decision, "via": via, "by": by}, member=member, project_id=ask.project_id)
             else:
                 await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": via}, member=member, project_id=ask.project_id)
+
+    async def withdraw(self, ask: Ask, *, why: str, by: str = "system") -> bool:
+        """Close a request nobody will answer any more: first close wins like any answer, the operator's
+        notification closes, and every window that shows it hears ``via: withdrawn`` and lets it go.
+        ``by`` is who withdrew it — the system when what it served is over, the orchestrator when it
+        decided the answer no longer matters. The row is resolved by the system either way: a
+        withdrawal is no answer, and nothing that reads answers may take it for one."""
+        if not await self.manager.asks.resolve(ask.id, "system", {"closed": why, "via": "withdrawn", "by": by}):
+            return False
+        await self._withdrawn(ask)
+        ref = str(ask.detail.get("event_ref") or "")
+        if ref:
+            await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": "withdrawn", "by": by, "reason": why}, project_id=ask.project_id)
+        return True
 
     async def _withdrawn(self, ask: Ask) -> None:
         """A request nobody will answer any more, because its session ended: the operator's copy closes."""

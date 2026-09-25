@@ -107,6 +107,16 @@ class AskAnswered(TypedDict):
     """app · telegram · notification · push · timeout · cli · orchestrator"""
 
 
+class AskBatch(TypedDict):
+    batch_id: str
+    ask_ids: list[str]
+    """The requests of one project the operator answered together, each already resolved and each
+    announced by its own ``ask.answered`` / ``permission.resolved``. This event is what wakes the
+    project's orchestrator, once for the whole batch instead of once per answer."""
+    by: str
+    via: str
+
+
 class PermissionPending(TypedDict):
     request_id: str
     request_ref: str
@@ -388,6 +398,7 @@ REGISTRY: dict[str, EventSpec] = {
     "session.unread_result": EventSpec(SessionUnreadResult),
     "ask.pending": EventSpec(AskPending),
     "ask.answered": EventSpec(AskAnswered),
+    "ask.batch": EventSpec(AskBatch),
     "permission.pending": EventSpec(PermissionPending),
     "permission.resolved": EventSpec(PermissionResolved),
     "terminal.created": EventSpec(TerminalCreated),

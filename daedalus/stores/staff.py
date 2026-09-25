@@ -68,6 +68,8 @@ INSTRUCTIONS_MAX = 16_000
 TEXT_MAX = 8_000
 """A message to a staff member or the text of a request. Longer text belongs in a file the message points at."""
 ASK_DETAIL_MAX = 16_000
+TITLE_MAX = 120
+"""A request's title: a line in a list, not a second text."""
 
 SHORT_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 """Crockford's base32: no i, l, o or u, so what a person reads off a lock screen is what they type."""
@@ -300,10 +302,21 @@ class Ask:
     resolution: dict[str, Any]
     dispatch_id: str | None = None
     """The main orchestrator's dispatch this request is shown under, in its chat as well as the project's."""
+    title: str = ""
+    """A few words naming the decision; empty on requests made before titles existed and on staff
+    requests, which are shown by :attr:`heading`."""
 
     @property
     def open(self) -> bool:
         return self.resolved_at is None
+
+    @property
+    def heading(self) -> str:
+        """The title, or the first line of the text: what a list of requests shows as each one's name."""
+        if self.title:
+            return self.title
+        first = next((line.strip() for line in self.text.splitlines() if line.strip()), "")
+        return first if len(first) <= TITLE_MAX else first[: TITLE_MAX - 1].rstrip() + "…"
 
     def view(self) -> dict[str, Any]:
         return {
@@ -326,6 +339,8 @@ class Ask:
             "resolved_by": self.resolved_by,
             "resolution": self.resolution,
             "dispatch_id": self.dispatch_id,
+            "title": self.title,
+            "heading": self.heading,
         }
 
 
@@ -417,6 +432,7 @@ def _ask(row: Any) -> Ask:
         resolved_by=row["resolved_by"],
         resolution=_json(row["resolution_json"]),
         dispatch_id=row["dispatch_id"],
+        title=row["title"],
     )
 
 
@@ -1007,6 +1023,7 @@ class AsksStore:
         detail: dict[str, Any] | None = None,
         suggestion: str = "",
         dispatch_id: str | None = None,
+        title: str = "",
     ) -> Ask:
         """A new request, with a short id nobody else waiting holds.
 
@@ -1028,6 +1045,7 @@ class AsksStore:
         body = _plain(text, "the request", TEXT_MAX, multiline=True)
         if not body:
             raise StaffError("a request needs text")
+        heading = _plain(title, "the title", TITLE_MAX)
         details = json.dumps(detail or {})
         if len(details) > ASK_DETAIL_MAX:
             raise StaffError(f"a request's detail is at most {ASK_DETAIL_MAX} characters of JSON")
@@ -1037,9 +1055,9 @@ class AsksStore:
             short = self._short_id()
             try:
                 await self._db.execute(
-                    "INSERT INTO asks(id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text, detail_json, routed_to, suggestion, created_at, routed_at, dispatch_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (ask_id, short, project_id, origin, kind, staff_id, staff_session_id, task_id, _plain(request_ref, "the request reference", 500), body, details, routed_to, _plain(suggestion, "the suggestion", TEXT_MAX, multiline=True), at, at, dispatch_id or None),
+                    "INSERT INTO asks(id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text, detail_json, routed_to, suggestion, created_at, routed_at, dispatch_id, title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ask_id, short, project_id, origin, kind, staff_id, staff_session_id, task_id, _plain(request_ref, "the request reference", 500), body, details, routed_to, _plain(suggestion, "the suggestion", TEXT_MAX, multiline=True), at, at, dispatch_id or None, heading),
                 )
             except sqlite3.IntegrityError:
                 if await self._db.fetchone("SELECT 1 FROM asks WHERE short_id = ? AND resolved_at IS NULL", (short,)) is None:

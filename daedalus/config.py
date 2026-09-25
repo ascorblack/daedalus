@@ -1076,6 +1076,7 @@ ORCHESTRATOR_ONLY_TOOLS = [
     "Watch",
     "Unwatch",
     "AskOperator",
+    "WithdrawQuestions",
     "ProjectReport",
     "Harnesses",
 ]

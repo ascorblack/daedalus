@@ -690,6 +690,17 @@ strongest preset; the model chip in its chat changes the project's choice. In `G
 such a project carries `orchestrator: {"enabled", "session_id", "staff", "working", "needs_you"}`
 (null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
 project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
+It asks in batches — `AskOperator(questions=[{title, text, options, multi, …}])` — and takes back what
+no longer matters with `WithdrawQuestions(ids, reason)`. What waits for you is a list in the Questions
+tab of the panel beside its chat (a sheet behind the header's button on a phone), staff waiting on a
+permission or an escalated question above its own questions; the chat itself shows one line, "N
+questions waiting". Answer some, leave others — half-answered cards are drafts kept on the device — and
+Send carries them together: `GET /api/questions?project=<id>` is the list, `POST
+/api/projects/{id}/asks/answer` takes `[{"ask_id", "selected"?, "text"?, "note"?, "allow"?,
+"always"?}]` and answers each item on its own (a request answered elsewhere first comes back as a
+`conflict`), and the answers that won wake the orchestrator once, together. The main chat's tab is the
+same list for every orchestrated project, grouped by project (`GET /api/questions`, `POST
+/api/asks/answer`).
 It sets its own alarms with `WakeMe` (in some minutes, at a moment, or on a cron at most every ten
 minutes) and is woken with the note, even mid-turn; you can leave it one too. `GET|POST
 /api/projects/{id}/wakeups` (`{"note", "in_minutes" | "at" | "cron"}`) and `DELETE …/wakeups/{id}` are

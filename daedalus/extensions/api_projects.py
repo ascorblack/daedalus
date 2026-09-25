@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from daedalus.extensions import wakeups
+from daedalus.extensions import questions, wakeups
 from daedalus.extensions.project_usage import ProjectUsage
 from daedalus.extensions.watches import WatchRefused
 from daedalus.stores.projects import FolderSpec, Project, ProjectError, ProjectFolder, ProjectSettings
@@ -145,6 +145,20 @@ class CancelBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str = Field(default="", max_length=500)
+
+
+class AnswerItem(BaseModel):
+    """One answer of a batch: an option (several where the question allows), words of the operator's
+    own, a note beside a chosen option, or allow/deny for a permission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ask_id: str = Field(min_length=1, max_length=64)
+    selected: list[str] | None = None
+    text: str | None = None
+    note: str | None = None
+    allow: bool | None = None
+    always: bool = False
 
 
 def host_bridge(settings: Any, terminals: Any = None) -> bool:
@@ -589,6 +603,34 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return dict(done.view())
+
+    @api.get("/api/questions")
+    async def list_questions(project: str | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What waits for the operator: one project's requests, or every orchestrated project's and the
+        main orchestrator's own when no project is named. Oldest first."""
+        if project is not None:
+            await existing(project)
+        return {"questions": await questions.waiting(app, project)}
+
+    async def answer_batch(items: list[AnswerItem], project_id: str | None, via: str) -> dict[str, Any]:
+        try:
+            return await questions.answer(app, [i.model_dump(exclude_none=True) for i in items], project_id=project_id, via=via)
+        except questions.Unanswerable as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @api.post("/api/projects/{project_id}/asks/answer")
+    async def answer_project_asks(project_id: str, body: list[AnswerItem], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Several answers from a project's list, sent together. Each has its own outcome; a request
+        answered elsewhere first is a ``conflict`` item, never a failure of the whole send."""
+        await existing(project_id)
+        return await answer_batch(body, project_id, "project")
+
+    @api.post("/api/asks/answer")
+    async def answer_asks(body: list[AnswerItem], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The same from the main chat's list, where the requests of every project wait together."""
+        return await answer_batch(body, None, "main")
 
     @api.post("/api/projects/{project_id}/setup/finish")
     async def finish_setup(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

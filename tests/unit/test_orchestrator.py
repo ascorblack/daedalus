@@ -393,7 +393,7 @@ async def test_the_tools_answer_from_a_real_turn(settings: Settings, db: Databas
     script = [
         {"tool": "Folders", "args": {"op": "list"}},
         {"tool": "Peek", "args": {"op": "ls"}},
-        {"tool": "AskOperator", "args": {"question": "Ship on Friday?", "options": ["yes", "no"], "context": "the menu is ready"}},
+        {"tool": "AskOperator", "args": {"title": "Ship on Friday?", "text": "Ship on Friday?", "options": ["yes", "no"], "context": "the menu is ready"}},
         {"tool": "Journal", "args": {"op": "write", "text": "Asked about Friday", "why": "the release date is theirs"}},
         {"text": "Asked; nothing else to do."},
     ]
@@ -495,7 +495,7 @@ async def test_ask_operator_returns_at_once_and_its_answer_arrives_as_an_event(s
     r = await rig(settings, db, tmp_path, [{"text": "Postgres it is."}])
     try:
         sid = (await r.orch.enable(r.project.id)).settings.orchestrator.session_id
-        said = await r.call(sid, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"], context="orders need concurrency")
+        said = await r.call(sid, "ask_operator", title="Postgres or SQLite?", text="Postgres or SQLite?", options=["Postgres", "SQLite"], context="orders need concurrency")
         assert said.startswith("asked the operator as [q") and "do not wait" in said
         [ask] = await r.manager.asks.open_for(r.project.id, routed_to="operator")
         assert ask.origin == "orchestrator" and ask.detail["options"] == ["Postgres", "SQLite"] and "Context: orders need concurrency" in ask.text

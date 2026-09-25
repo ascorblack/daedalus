@@ -238,19 +238,12 @@ class Dispatches:
         return count
 
     async def withdraw(self, ask: Ask, *, why: str) -> bool:
-        """Close a request nobody will answer: first close wins like any answer, every window collapses it."""
-        if not await self.manager.asks.resolve(ask.id, "system", {"closed": why, "via": "withdrawn"}):
+        """Close a request nobody will answer: the team's withdrawal, which every window collapses."""
+        team = self.app.extensions.get("staff")
+        if team is None:
             return False
-        ref = str(ask.detail.get("event_ref") or "")
-        notifications = self.app.notifications
-        if notifications is not None and ref:
-            try:
-                await notifications.resolve(ref, "withdrawn", via="system")
-            except Exception:  # noqa: BLE001 — the row is closed; the notification is a courtesy
-                logger.warning("could not close the notification of %s", ask.short_id, exc_info=True)
-        if ref:
-            await self._publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": "withdrawn", "by": "system"}, ask.project_id)
-        return True
+        withdrawn: bool = await team.withdraw(ask, why=why)
+        return withdrawn
 
     async def finish_setup(self, project_id: str, *, by: str) -> bool:
         """The project's setup is over: its requests are its own again. Whether it was being set up."""

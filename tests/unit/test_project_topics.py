@@ -228,7 +228,7 @@ async def test_a_question_is_answered_with_its_buttons_and_a_late_tap_is_told(se
         await s.r.orch.enable(s.r.project.id)
         sid = await s.orchestrator()
         await until_await(lambda: _bound(s, sid), "the topic")
-        await s.r.call(sid, "ask_operator", question="Postgres or SQLite?", options=["Postgres", "SQLite"])
+        await s.r.call(sid, "ask_operator", title="Postgres or SQLite?", text="Postgres or SQLite?", options=["Postgres", "SQLite"])
         [ask] = await s.r.manager.asks.open_for(s.r.project.id, routed_to="operator")
 
         async def posted() -> bool:
@@ -252,7 +252,7 @@ async def test_a_question_is_answered_with_its_buttons_and_a_late_tap_is_told(se
         assert late.said == ["too late: answered in Telegram by you: Postgres"]
 
         # Answered in the app first: the chat's message says so, and a tap there is late.
-        await s.r.call(sid, "ask_operator", question="Deploy on Friday?", options=["Yes", "No"])
+        await s.r.call(sid, "ask_operator", title="Deploy on Friday?", text="Deploy on Friday?", options=["Yes", "No"])
         second = next(a for a in await s.r.manager.asks.open_for(s.r.project.id, routed_to="operator"))
         await until_await(lambda: _sent(s, 2), "the second question was posted")
         await s.r.team.answer(second.id, selected=["No"], by="operator", via="app")
@@ -305,7 +305,7 @@ async def test_an_escalated_permission_is_posted_and_decided_and_words_answer_a_
         assert runtime.answered and runtime.answered[-1][2].allow is False
 
         # A question answered in words: "✍️ Answer", then the reply to the prompt.
-        await s.r.call(sid, "ask_operator", question="Which colour for the menu?")
+        await s.r.call(sid, "ask_operator", title="Which colour for the menu?", text="Which colour for the menu?")
         question = next(a for a in await s.r.manager.asks.open_for(s.r.project.id, routed_to="operator"))
         await until_await(lambda: _remembered(s, question.id), "the question was posted")
         await s.front._dispatch_callback(Query(f"pw:{question.id}"))  # type: ignore[arg-type]
@@ -411,7 +411,7 @@ async def test_in_private_mode_the_posts_go_to_the_private_chat_under_the_projec
         await until_await(carried, "the plain message reached the current session")
 
         # A question, answered by replying to it.
-        await s.r.call(sid, "ask_operator", question="Which day for the release?")
+        await s.r.call(sid, "ask_operator", title="Which day for the release?", text="Which day for the release?")
         question = next(a for a in await s.r.manager.asks.open_for(s.r.project.id, routed_to="operator"))
         await until_await(lambda: _remembered(s, question.id), "the question was posted")
         asked = s.bot.sent[-1]

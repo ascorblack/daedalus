@@ -1294,6 +1294,13 @@ UPDATE staff_sessions SET folder_id = (SELECT r.folder_id FROM folder_references
 DROP TABLE folder_references;
 """)
 
+# A request gains a short title of its own. An orchestrator asks in batches now, and the operator
+# answers them from a list: a list of whole paragraphs could not be scanned. Older rows keep an
+# empty title and are shown by the first line of their text.
+MIGRATIONS.append("""
+ALTER TABLE asks ADD COLUMN title TEXT NOT NULL DEFAULT '';
+""")
+
 
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session

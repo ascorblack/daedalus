@@ -433,7 +433,7 @@ async def test_ask_operator_and_report_refuse_a_dispatch_the_project_does_not_ha
     try:
         sid = await office(r)
         with pytest.raises(Refused, match="no dispatch"):
-            await r.call(sid, "ask_operator", question="Ship on Friday?", dispatch_id="d12345")
+            await r.call(sid, "ask_operator", title="Ship on Friday?", text="Ship on Friday?", dispatch_id="d12345")
         assert await r.manager.asks.open_for(r.project.id) == [], "nothing is asked under a dispatch that is not there"
     finally:
         await r.manager.close()
