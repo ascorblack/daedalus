@@ -2255,6 +2255,11 @@ input.field[type="range"] {
 /* The provider's failure stays beside the composer until another run starts. */
 .runerror { flex:none; align-self:center; margin:var(--space-2) var(--space-3) 0; display:flex; align-items:flex-start; gap:var(--space-2); max-width:calc(100% - 24px); padding:var(--space-2) var(--space-3); border:1px solid color-mix(in srgb, var(--bad) 55%, transparent); border-radius:var(--radius-md); background:color-mix(in srgb, var(--bad) 10%, var(--surface-2)); color:var(--fg); font-size:var(--fs-13); overflow-wrap:anywhere; }
 .runerror svg { flex:none; margin-top:2px; color:var(--bad); }
+.run-outcome { display:flex; align-items:flex-start; gap:var(--space-2); margin-top:var(--space-2); padding:var(--space-2) var(--space-3); border:1px solid color-mix(in srgb, var(--bad) 55%, transparent); border-radius:var(--radius-md); background:color-mix(in srgb, var(--bad) 10%, var(--surface-2)); color:var(--fg); font-size:var(--fs-13); overflow-wrap:anywhere; }
+.run-outcome svg { flex:none; margin-top:2px; color:var(--bad); }
+.run-outcome.cause-cancelled { border-color:var(--line-strong); background:var(--surface-2); }
+.run-outcome.cause-cancelled svg { color:var(--muted); }
+.run-outcome-detail { margin-top:2px; color:var(--muted); }
 
 /* Composer card: the text owns its row; controls never compete with its width. */
 .composer { gap:var(--space-2); }

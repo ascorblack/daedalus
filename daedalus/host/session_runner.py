@@ -71,6 +71,7 @@ from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
 from daedalus.host.presence import Presence
 from daedalus.host.request_manifests import RequestManifestStore
+from daedalus.host.run_outcome import outcome_message, run_outcome
 from daedalus.host.services import SessionServices, locator, session_scratch_dir
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
@@ -224,6 +225,10 @@ class SessionState:
     """What that bound said in its own words — the upstream's error text for a provider failure. The operator is shown this,
     not an inference from the reply: a run the provider refused ends with the model writing a closing message, and without
     this the message is the only trace of a failure that produced nothing."""
+    last_compaction: dict[str, Any] | None = None
+    """The current run's latest ``compaction_completed`` payload: when the run dies of size, what says which tier gave out."""
+    last_outcome: dict[str, Any] | None = None
+    """How the last settled run ended when it produced no answer (see ``run_outcome``); ``None`` when it answered."""
     overflow_streak: int = 0
     """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
     outage_streak: int = 0
@@ -3104,6 +3109,7 @@ class SessionManager:
         state.last_error_permanent = False
         state.soft_stop_cause = ""
         state.soft_stop_detail = ""
+        state.last_compaction = None
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
         if message is not None and not continue_turn:
@@ -3313,6 +3319,9 @@ class SessionManager:
         finally:
             state.settled.set()  # the next run may start: the history is written and the files are snapshotted
         if status in ("completed", "failed", "cancelled"):
+            # Before anything announces the end: the closing line is part of the turn the app redraws.
+            await self._close_without_answer(state, run_id, status)
+        if status in ("completed", "failed", "cancelled"):
             # A run parked on a question is not finished; an interrupted one never reaches here.
             finished = self._finished_payload(state, run_id, status, duration_s)
             await self._publish(state, "run.finished", finished)
@@ -3355,6 +3364,38 @@ class SessionManager:
             logger.warning("session %s: the provider refused the run for good; not driving it again", state.session.id)
         elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and not state.running:
             self._schedule_outage_recovery(state)
+
+    async def _close_without_answer(self, state: SessionState, run_id: str, status: str) -> None:
+        """A run that produced no answer says so, as the closing line of its turn in the transcript.
+
+        Only the transcript: the model's working history does not carry it, so it costs no context and
+        cannot read as an answer. ``state.last_outcome`` is what a loop's next iteration is told.
+        """
+        steps = 0
+        last_tool = ""
+        if state.engine is not None:
+            for message in state.engine.history:
+                if message.metadata.get("daedalus.run_id") not in (run_id, None) or message.role is not MessageRole.assistant:
+                    continue
+                for block in message.content_blocks:
+                    if isinstance(block, ToolUseBlock):
+                        steps += 1
+                        last_tool = block.name
+        outcome = run_outcome(
+            status,
+            error_kind=state.last_error_kind,
+            error_message=state.last_error_message or state.soft_stop_detail,
+            compaction=state.last_compaction,
+            steps=steps,
+            last_tool=last_tool,
+        )
+        state.last_outcome = outcome
+        if outcome is None:
+            return
+        try:
+            await self.sessions.append_transcript(state.session.id, [outcome_message(outcome, run_id)])
+        except Exception:  # noqa: BLE001 — the line is a courtesy; the run's own record is already written
+            logger.warning("could not write the closing line of run %s", run_id, exc_info=True)
 
     OUTAGE_NOTE = (
         "[The previous turn stopped because the model provider was unreachable for a while. "
@@ -3674,6 +3715,8 @@ class SessionManager:
             state.last_error_message = p["message"]
             state.last_error_permanent = p.get("retryable") is False
             logger.warning("run error in session %s (%s): %s", getattr(getattr(state, "session", None), "id", "?"), p.get("kind") or "-", p["message"][:500])
+        elif event.type is EventType.COMPACTION_COMPLETED:
+            state.last_compaction = dict(p)
         elif event.type is EventType.STATE_CHANGED and p.get("reason") in RECOVERY_REASONS:
             if p.get("reason") == "soft_stop_notified":
                 state.soft_stop_cause = str(p.get("soft_stop_cause") or "")

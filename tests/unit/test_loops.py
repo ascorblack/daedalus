@@ -219,3 +219,36 @@ async def test_loops_do_not_inject_across_live_sessions(app: Any) -> None:
     assert any("Loop iteration 2" in t and "foreign work" in t for t in new_b)  # B's 2nd iteration -> B
     assert not any("foreign work" in t for t in new_a)  # B's prompt did not reach A
     assert not any("owner work" in t for t in new_b)    # A's prompt did not reach B
+
+
+async def test_an_iteration_that_ended_without_an_answer_is_news_to_the_next_one(app: Any) -> None:
+    """The case that asked for it: iteration 189 died on compaction and 190 started as if nothing had happened."""
+    from daedalus.host.run_outcome import run_outcome
+
+    loops = Loops(app)
+    state = await app.manager.create_session("board")
+    sid = state.session.id
+    await loops.create(sid, instruction="keep the board current", interval_seconds=600)
+    state.run_origin = "loop"
+    state.last_outcome = run_outcome(
+        "failed",
+        error_kind="llm_context_window_exceeded",
+        error_message="reactive force_compaction exhausted retries",
+        compaction={"outcome": "at_floor", "tier2_failures": {"transport": 3}},
+        steps=176,
+        last_tool="Write",
+    )
+    await loops.on_run_finished(sid, "tick-189", "failed")
+    await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), sid))
+    await loops.tick()
+
+    prompt = app.submitted[-1][1]
+    assert prompt.startswith("[The previous loop iteration did not finish: The run ended without an answer:")
+    assert "compaction could not make it fit" in prompt and "at_floor" in prompt and "transport 3" in prompt
+    assert "<loop_instruction>\nkeep the board current\n</loop_instruction>" in prompt
+    # Told once: the iteration after it starts clean.
+    state.last_outcome = None
+    await loops.on_run_finished(sid, "tick-190", "completed")
+    await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), sid))
+    await loops.tick()
+    assert app.submitted[-1][1].startswith("[Loop iteration")

@@ -409,6 +409,19 @@ export type ModelFallback = { from: string; to: string; reason: string };
 export type MediaItem = { id: string; kind: "image" | "animation" | "video" | "audio"; mime_type: string; filename: string; byte_size: number; width?: number | null; height?: number | null; alt: string; caption: string; url?: string };
 export type MediaPresentation = { id: string; layout: "single" | "album"; items: MediaItem[] };
 
+/** How a run that produced no answer ended: the closing line of its turn. The host writes it; the text
+ *  the app shows is its own, translated, from `cause`. */
+export type RunOutcome = {
+  status: "failed" | "cancelled";
+  cause: "context" | "compaction" | "provider" | "cancelled" | "error";
+  error_kind?: string;
+  detail?: string;
+  steps?: number;
+  last_tool?: string;
+  answered?: boolean;
+  compaction?: { outcome: string; reason?: string; prompt_after?: number; trigger?: number; summariser_failures?: Record<string, number>; floor_dropped?: number } | null;
+};
+
 export type MessageView = {
   run_id?: string | null;
   role: "system" | "user" | "assistant" | "tool";
@@ -425,6 +438,8 @@ export type MessageView = {
   /** Set when that model was not the one the session was set to answer with. */
   fallback?: ModelFallback | null;
   media?: MediaPresentation[];
+  /** Set on the row that closes a run which produced no answer. */
+  outcome?: RunOutcome | null;
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];

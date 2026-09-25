@@ -6,7 +6,7 @@
 // arriving re-renders one turn instead of six hundred. And the live turn is merged separately, so
 // the history is not rebuilt to show a word.
 
-import type { MediaPresentation, MessageView, ModelFallback } from "./api";
+import type { MediaPresentation, MessageView, ModelFallback, RunOutcome } from "./api";
 
 export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean; startedAt?: number; endedAt?: number };
 /**
@@ -48,6 +48,8 @@ export type Turn = {
   media?: MediaPresentation[];
   /** Last meaningful stream event. Transport keepalives never update this clock. */
   lastActivityAt?: number | null;
+  /** The run ended without an answer: why, and where. Drawn as the turn's closing line. */
+  outcome?: RunOutcome;
 };
 
 export type ActivityPhase = "preparing_call" | "reading" | "editing" | "testing" | "waiting_provider" | "waiting_user" | "compacting" | "responding";
@@ -110,6 +112,25 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
   const mark = (part: string) => sigs[sigs.length - 1].push(part);
   messages.forEach((m, i) => {
     const at = Date.parse(m.created_at) || 0;
+    if (m.outcome) {
+      // The closing line of a run that produced no answer belongs to that run's turn, and to the end
+      // of it — never after the host's "Context summary" that may follow, where it would be missed.
+      let index = -1;
+      for (let k = turns.length - 1; k >= 0; k--) {
+        if (!turns[k].summary && (!m.run_id || turns[k].runId === m.run_id)) {
+          index = k;
+          break;
+        }
+      }
+      if (index < 0) {
+        current = open(`o${m.seq ?? i}`, at);
+        current.runId = m.run_id || undefined;
+        index = turns.length - 1;
+      }
+      turns[index].outcome = m.outcome;
+      sigs[index].push(`o${m.seq ?? i}:${m.outcome.cause}`);
+      return;
+    }
     if (m.role === "tool" || m.internal) return;
     if (m.summary) {
       if (m.compaction?.reason !== "core") {

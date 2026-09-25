@@ -991,6 +991,19 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "folder.reach.none": { en: "On the host, and the host terminal bridge is not installed: nothing can work in it yet.", ru: "На хосте, а мост к терминалу хоста не установлен: пока с ней ничто не может работать." },
   "composer.model.context": { en: "{n} token context", ru: "Контекст: {n} токенов" },
   "session.runerror": { en: "Run failed", ru: "Ошибка запуска" },
+  // The closing line of a run that ended without an answer. It says that there is no answer first,
+  // then why; the host's own error text follows as it was given.
+  "run.outcome.title": { en: "No answer — the run stopped", ru: "Ответа нет — запуск остановился" },
+  "run.outcome.cause.context": { en: "the conversation no longer fitted the model's context window, and compaction could not make it fit", ru: "разговор перестал помещаться в окно контекста модели, и сжатие не смогло его уместить" },
+  "run.outcome.cause.compaction": { en: "compaction could not shrink the history", ru: "сжатие не смогло уменьшить историю" },
+  "run.outcome.cause.provider": { en: "the model provider failed", ru: "провайдер модели отказал" },
+  "run.outcome.cause.cancelled": { en: "it was stopped before it finished", ru: "его остановили до завершения" },
+  "run.outcome.cause.error": { en: "it failed", ru: "он завершился ошибкой" },
+  "run.outcome.compaction": { en: "last compaction pass: {outcome}", ru: "последний проход сжатия: {outcome}" },
+  "run.outcome.failures": { en: "summariser failures: {list}", ru: "сбои суммаризатора: {list}" },
+  "run.outcome.floor": { en: "the floor removed {n} messages", ru: "пол убрал сообщений: {n}" },
+  "run.outcome.steps": { en: "after {n} steps", ru: "после шагов: {n}" },
+  "run.outcome.steps.last": { en: "after {n} steps, the last one {tool}", ru: "после шагов: {n}, последний — {tool}" },
   "session.model.none": { en: "model", ru: "модель" },
 
   // ── the agents screen ──────────────────────────────────────────────────────────────────

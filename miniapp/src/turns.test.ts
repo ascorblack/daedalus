@@ -16,6 +16,26 @@ const call = (seq: number, id: string, name = "Exec") => msg(seq, { tool_calls: 
 const result = (seq: number, id: string, content: string) => msg(seq, { role: "tool", tool_results: [{ id, content, is_error: false }] });
 
 describe("buildTurns", () => {
+  it("closes a run that produced no answer with its outcome, ahead of the host's context summary", () => {
+    const outcome = { status: "failed" as const, cause: "context" as const, error_kind: "llm_context_window_exceeded", detail: "compaction exhausted retries", steps: 176 };
+    const turns = buildTurns([
+      { ...user(1, "Loop iteration 189"), run_id: "tick-189" },
+      { ...call(2, "w1", "Write"), run_id: "tick-189" },
+      { ...result(3, "w1", "written"), run_id: "tick-189" },
+      { ...msg(4, { role: "system", text: "The run ended without an answer", outcome }), run_id: "tick-189" },
+      msg(5, { role: "user", summary: true, compaction: { reason: "auto", messages: 304 }, text: "## Goal …" }),
+    ]);
+    expect(turns).toHaveLength(2);
+    expect(turns[0].outcome).toEqual(outcome);
+    expect(turns[0].answer).toBe("");
+    expect(turns[1].summary).toBeTruthy();
+  });
+  it("gives a closing line whose run it cannot find a turn of its own", () => {
+    const outcome = { status: "cancelled" as const, cause: "cancelled" as const };
+    const turns = buildTurns([msg(1, { role: "system", text: "stopped", outcome, run_id: "gone" })]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].outcome).toEqual(outcome);
+  });
   it("presents lifecycle state without reading reasoning and keeps keepalives out of its clock", () => {
     const state = { ...EMPTY_LIVE, lastActivityAt: 1000, thinking: "hidden", tools: [{ id: "r", name: "Read", args: "{}", startedAt: 1000 }] };
     const turn = applyLive(null, state, 32_000);

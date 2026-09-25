@@ -18,12 +18,15 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from daedalus.extensions.notifications import Draft
+from daedalus.host.run_outcome import loop_note
 
 if TYPE_CHECKING:
     from daedalus.app import Application
 
 logger = logging.getLogger(__name__)
 
+LOOP_FAILURE_KEY = "loop_failure"
+"""kv key prefix for the note the next iteration gets when the last one ended without an answer."""
 MODES = ("interval", "dynamic")
 STATUSES = ("active", "paused", "stopped", "done")
 MAX_INSTRUCTION_CHARS = 4000
@@ -296,11 +299,16 @@ class Loops:
                 nxt: str | None = (now + timedelta(seconds=int(loop["interval_seconds"]))).isoformat()
             else:
                 nxt = None  # the iteration schedules the next one with LoopNext, or the loop ends
+            # An iteration that died without an answer is news to the next one: it starts from what the
+            # last one left, and the chat line saying so is not something the model reads.
+            note = await self.app.db.kv_get(f"{LOOP_FAILURE_KEY}:{sid}", None)
             try:
-                await manager.submit(sid, self._prompt(loop), as_answer=False, origin="loop")
+                await manager.submit(sid, (note or "") + self._prompt(loop), as_answer=False, origin="loop")
             except RuntimeError as exc:
                 logger.warning("loop iteration for %s waits: %s", sid, exc)  # stopping or starting up: the wake-up stays due
                 return False
+            if note:
+                await self.app.db.kv_set(f"{LOOP_FAILURE_KEY}:{sid}", None)
             await self.app.db.execute(
                 "UPDATE loops SET next_run_at = ?, last_run_at = ?, run_count = run_count + 1, updated_at = ? WHERE session_id = ?",
                 (nxt, now.isoformat(), now.isoformat(), sid),
@@ -336,6 +344,8 @@ class Loops:
         state = await manager.get_state(session_id)
         if state is None or status == "awaiting":
             return
+        if state.run_origin == "loop" and state.last_outcome is not None:
+            await self.app.db.kv_set(f"{LOOP_FAILURE_KEY}:{session_id}", loop_note(state.last_outcome))
         if state.run_origin == "loop" and loop["status"] == "active":
             if loop.get("max_runs") and int(loop["run_count"]) >= int(loop["max_runs"]):
                 await self.stop(session_id, f"max runs reached ({loop['max_runs']})", status="done")

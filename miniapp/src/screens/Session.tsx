@@ -1,6 +1,6 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, ApiError, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, SessionDetail, Compacting } from "../api";
+import { api, ApiError, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, RunOutcome, SessionDetail, Compacting } from "../api";
 import { Chevron, Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
 import { MenuItem, OverflowMenu, Popover, confirmDialog, Overlay } from "../dialogs";
 import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime } from "../format";
@@ -1545,9 +1545,42 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         />
       )}
       </div>
+      {/* Outside the folded content: a loop's turn is folded by default, and this line is the one
+          thing about it that must be seen without unfolding it. */}
+      {turn.outcome && !live && <RunOutcomeLine outcome={turn.outcome} />}
     </div>
   );
 });
+
+/** The closing line of a run that produced no answer: that there is none, why the run stopped, and which
+ *  step or compaction tier gave out. Part of the turn, so a "Context summary" drawn after it cannot hide it. */
+function RunOutcomeLine({ outcome }: { outcome: RunOutcome }) {
+  const pass = outcome.compaction;
+  const failures = Object.entries(pass?.summariser_failures ?? {})
+    .map(([kind, count]) => `${kind} ${count}`)
+    .join(", ");
+  return (
+    <div className={`run-outcome cause-${outcome.cause}`} role="status" aria-label={t("run.outcome.title")}>
+      <Icon name="question" size={14} />
+      <div>
+        <b>{t("run.outcome.title")}</b> — {t(`run.outcome.cause.${outcome.cause}`)}
+        {outcome.detail && <div className="run-outcome-detail">{outcome.detail}</div>}
+        {pass && (
+          <div className="run-outcome-detail">
+            {t("run.outcome.compaction", { outcome: pass.outcome || "—" })}
+            {failures && <>{" · "}{t("run.outcome.failures", { list: failures })}</>}
+            {!!pass.floor_dropped && <>{" · "}{t("run.outcome.floor", { n: pass.floor_dropped })}</>}
+          </div>
+        )}
+        {!!outcome.steps && (
+          <div className="run-outcome-detail">
+            {outcome.last_tool ? t("run.outcome.steps.last", { n: outcome.steps, tool: outcome.last_tool }) : t("run.outcome.steps", { n: outcome.steps })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** Three turn-shaped blocks while the first read is on its way. */
 function TurnSkeleton() {
