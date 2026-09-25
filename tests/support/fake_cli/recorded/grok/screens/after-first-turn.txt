@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  3.0K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-REPORT please                                                                                   6:41 AM
+
+
+     ◈ Searched 1 MCP tool
+     ◆ Daedalus Team Report
+
+     done after tool                                                                                         6:41 AM
+
+     Worked for 0.5s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ no such tool among []                                                                                          │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Tab/→:accept suggestion  │  Shift+Tab:mode  │  Ctrl+x:shortcuts

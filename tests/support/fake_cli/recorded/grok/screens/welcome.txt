@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project
+
+
+
+
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                                │
+   │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   Grok Build  1.0.41                                                                           │
+   │  ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀                                                                                                │
+   │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   Changelog                                                                                    │
+   │  ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀                                                                                                │
+   │  ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀    • Added a new sports_search tool that can look up live NFL scores, standings, schedules,…   │
+   │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀    • Fixed the subagent fullscreen view so it no longer shows a stray [Dashboard] button in…   │
+   │  ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀    • Fixed agent frontmatter mcpServers so that headers and URLs from the active agent's ag…   │
+   │                                                                                                                │
+   │                   New worktree                                                                         ctrl+w  │
+   │                   Resume session                                                                       ctrl+r  │
+   │                   Changelog                                                                                    │
+   │                   Quit                                                                                 ctrl+q  │
+   │                                                                                                                │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+                                                                                                Logged in with API key

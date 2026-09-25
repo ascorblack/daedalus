@@ -1,0 +1,35 @@
+
+  /t/c/-/7/s/k/grok/project                                                                  3.1K / 256K │ [Dashboard]
+
+
+     ❯ SPIKE-BASH go                                                                                         6:41 AM
+
+
+     ◆ Run Remove the spike folder
+
+     done after tool                                                                                         6:41 AM
+                                                                                                                       █
+     Worked for 4.2s                                                                                                   █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ no such tool among []                                                                                          │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────── stub-model ─╯
+
+  Tab/→:accept suggestion  │  Shift+Tab:mode  │  Ctrl+x:shortcuts

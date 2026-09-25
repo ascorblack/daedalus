@@ -1,4 +1,4 @@
-"""The Codex, OpenCode and pi adapters against the real CLIs and the real daemon: the harness manager's
+"""The Codex, OpenCode, pi and Grok Build adapters against the real CLIs and the real daemon: the harness manager's
 self-check session — the launch with the adapter's configuration, the CLI's server reached through the
 daemon, the team tools loaded through ``ptyd team-mcp``, with the model turn one prompt whose ``Report``
 comes back through the team channel, and a clean exit.
@@ -11,9 +11,11 @@ runs everything but the prompt, which costs nothing. The credentials are copied 
 and used from there, without anything that could refresh them: the original sign-in is never written
 to or rotated, and no project folder of a running installation is touched.
 
-pi needs no sign-in at all: its model is a stub on loopback (``tests/support/model_stub.py``), named
-in the temporary home's ``models.json``, so the whole turn — the bridge extension, its ``Report``,
-its end of turn — runs against the real pi and costs nothing (``DAEDALUS_HARNESS_LIVE=pi``).
+pi and Grok Build need no sign-in at all: their model is a stub on loopback
+(``tests/support/model_stub.py``), named in the temporary home's configuration (pi's ``models.json``,
+Grok's ``[endpoints]`` with a key for the stub), so the whole turn — the bridge extension or the agent
+file's hooks, the ``Report``, the end of the turn — runs against the real CLI and costs nothing
+(``DAEDALUS_HARNESS_LIVE=pi,grok``).
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import pytest
 
 from daedalus.config import HarnessConfig, TerminalsConfig
 from daedalus.harness.codex import CodexAdapter
+from daedalus.harness.grok import GrokAdapter
 from daedalus.harness.opencode import OpenCodeAdapter
 from daedalus.harness.pi import PiAdapter
 from daedalus.harness.runtime import RuntimeEnvironment
@@ -157,3 +160,25 @@ async def test_the_self_check_session_against_the_real_pi(service: Terminals, ba
             offered = {str((t.get("function") or t).get("name")) for t in stub.requests[0].get("tools") or []}
             assert {"Report", "AskOrchestrator"} <= offered
             assert "self-check of the command-line agent" in json.dumps(stub.requests[0]["messages"][0])
+
+
+def grok_home(base: Path, stub: ModelStub) -> None:
+    """Grok pointed at the stub with a key of its own: no sign-in exists, so nothing can be rotated."""
+    config = base / "home" / ".grok" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[endpoints]\nmodels_base_url = "{stub.base_url}"\n\n[model.{MODEL}]\napi_key = "stub"\n\n[models]\ndefault = "{MODEL}"\n')
+
+
+@pytest.mark.skipif("grok" not in LIVE or not shutil.which("grok"), reason="set DAEDALUS_HARNESS_LIVE=grok")
+async def test_the_self_check_session_against_the_real_grok(service: Terminals, base: Path) -> None:
+    with ModelStub() as stub:
+        grok_home(base, stub)
+        env = RuntimeEnvironment(service, "container", home=str(base / "home"))
+        result = await session_check(GrokAdapter(), service, lambda: HarnessConfig(ready_timeout_s=90), env, MODEL, TURN)
+        assert result.ok, [(s.name, s.ok, s.detail) for s in result.steps]
+        assert [s.name for s in result.steps] == expected_steps()
+        if TURN:
+            # The agent file's team server reached the model through Grok's deferred tools, and the
+            # team block its system prompt as the human's rules.
+            main = next(r for r in stub.requests if {"search_tool", "use_tool"} <= {str((t.get("function") or t).get("name")) for t in r.get("tools") or []})
+            assert "self-check of the command-line agent" in json.dumps(main["messages"])

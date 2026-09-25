@@ -425,6 +425,10 @@ class Dialog:
     """Rows drawn as ``❯ 1. Yes``; Claude's trust and bypass questions draw ``❯ Yes`` and take no digit."""
     footer: str = "Enter to confirm · Esc to cancel"
     data: dict[str, Any] = field(default_factory=dict)
+    rows: str = ""
+    """``radio``: rows drawn ``┃  2 (●) Yes, proceed`` under a ``┃`` bar, as Grok Build draws them."""
+    on_ctrl_c: Callable[[], Any] | None = None
+    """Ctrl+C on the open dialog (Grok Build cancels the prompt, and the turn with it)."""
     opened_at: float = field(default_factory=time.monotonic)
 
 
@@ -436,6 +440,9 @@ class PastePart:
 
     @property
     def marker(self) -> str:
+        if self.style == "grok":
+            # As Grok Build draws it (measured): four lines or more.
+            return f"[Pasted: {self.text.count(chr(10)) + 1} lines]"
         if self.style == "claude":
             # As Claude Code draws it (measured): the count is of line breaks, and a single line has none.
             breaks = self.text.count("\n")
@@ -461,7 +468,10 @@ class Look:
     """A paste over this many lines collapses as well (0: only the length counts)."""
     burst_guard_ms: int = 0
     marker_style: str = "lines"
-    """How a collapsed paste is shown: ``lines`` (``+L lines``) or ``claude`` (see ``PastePart``)."""
+    """How a collapsed paste is shown: ``lines`` (``+L lines``), ``claude`` or ``grok`` (see ``PastePart``)."""
+    boxed: bool = False
+    """The composer is drawn in a box, ``╭─╮`` / ``│ ❯ text │`` / ``╰─╯``, with the hint line under it
+    (Grok Build) rather than between two rules."""
 
 
 class Tui:
@@ -492,6 +502,8 @@ class Tui:
         self.busy_enter: Callable[[str], Awaitable[None] | None] | None = None
         """What Enter does while a turn runs; ``None``: the composer keeps the text."""
         self.escape: Callable[[], Awaitable[None] | None] = lambda: None
+        self.cancel: Callable[[], Awaitable[None] | None] | None = None
+        """What Ctrl+C does to a running turn when ``ctrl_c_interrupts``; ``escape`` when unset."""
         self.quit: Callable[[int], Awaitable[None] | None] = lambda code: None
         self._render_pending = False
         self._escape_timer: asyncio.TimerHandle | None = None
@@ -585,7 +597,10 @@ class Tui:
             bottom.extend(d.body)
             for index, option in enumerate(d.options):
                 mark = "❯" if index == d.selected else " "
-                bottom.append(f"{mark} {index + 1}. {option}" if d.numbered else f"{mark} {option}")
+                if d.rows == "radio":
+                    bottom.append(f"  ┃  {index + 1} ({'●' if index == d.selected else '○'}) {option}")
+                else:
+                    bottom.append(f"{mark} {index + 1}. {option}" if d.numbered else f"{mark} {option}")
             bottom.append(d.footer)
         elif not self.ready:
             # No composer before the CLI is ready, as in the real TUIs: a harness (or a test) that
@@ -598,11 +613,18 @@ class Tui:
                 bottom.append(f"  ↳ queued: {text[:cols - 14]}")
             if self.notice:
                 bottom.append(self.notice)
-            bottom.append("─" * min(cols, 60))
             composer = self.composer_text().split("\n")
-            bottom.append(self.look.prompt + composer[0])
-            bottom.extend("  " + line for line in composer[1:])
-            bottom.append("─" * min(cols, 60))
+            if self.look.boxed:
+                width = min(cols, 80) - 4
+                bottom.append("  ╭" + "─" * width + "╮")
+                bottom.append(f"  │ {self.look.prompt}{composer[0]}".ljust(width + 3) + "│")
+                bottom.extend(f"  │   {line}".ljust(width + 3) + "│" for line in composer[1:])
+                bottom.append("  ╰" + "─" * (width - len(self.look.name) - 3) + f" {self.look.name} ─╯")
+            else:
+                bottom.append("─" * min(cols, 60))
+                bottom.append(self.look.prompt + composer[0])
+                bottom.extend("  " + line for line in composer[1:])
+                bottom.append("─" * min(cols, 60))
             bottom.append(f"  {self.look.busy_hint}" if self.busy else f"  {self.look.idle_hint}")
         room = max(0, rows - len(bottom) - 1)
         top = [self.look.banner] + (self.lines[-room + 1 :] if room > 1 else [])
@@ -662,6 +684,11 @@ class Tui:
                 self._dialog_key(key)
             return  # before the composer is drawn, typing goes nowhere, as in the real TUIs
         if self.dialog is not None:
+            if key.name == "ctrl_c" and self.dialog.on_ctrl_c is not None:
+                dialog, self.dialog = self.dialog, None
+                self.log("dialog_cancelled", kind=dialog.kind)
+                self.spawn(self._call(dialog.on_ctrl_c))
+                return
             self._dialog_key(key)
             return
         name = key.name
@@ -686,7 +713,7 @@ class Tui:
             self.spawn(self._call(self.escape))
         elif name == "ctrl_c":
             if self.busy and self.ctrl_c_interrupts:
-                self.spawn(self._call(self.escape))
+                self.spawn(self._call(self.cancel or self.escape))
             elif self.parts:
                 self.parts.clear()
             elif time.monotonic() - self._ctrl_c_at < 1.0:

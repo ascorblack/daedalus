@@ -8,7 +8,9 @@ and without leaving the machine.
 The script is read from the last user message:
 
 - the self-check's sentence ("Call the Report tool …"), or any message naming ``Report``: a call to
-  the CLI's tool whose name ends in ``Report``, with kind ``checkpoint``; after its result, "ready";
+  the CLI's tool whose name ends in ``Report``, with kind ``checkpoint`` — or, where the CLI hides its
+  MCP tools behind ``search_tool`` and ``use_tool`` (Grok Build), the search and then the call;
+  after its result, "ready";
 - anything else: "ready".
 
 Every request is kept in ``requests`` (the tools offered, the system prompt), for a test to look at
@@ -18,6 +20,7 @@ what the CLI sent.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -102,13 +105,22 @@ class ModelStub:
     def reply(self, request: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         messages = request.get("messages") or []
         last = messages[-1] if messages else {}
+        report_args = {"kind": "checkpoint", "note": "self-check"}
         if last.get("role") == "tool":
+            asked = next((m for m in reversed(messages) if m.get("role") == "assistant" and m.get("tool_calls")), {})
+            called = ((asked.get("tool_calls") or [{}])[0].get("function") or {}).get("name")
+            found = re.search(r"\w*daedalus_team\w*Report", _text(last.get("content")))
+            if called == "search_tool" and found:
+                # Grok defers MCP tools: found by search_tool, called through use_tool.
+                return "", {"name": "use_tool", "arguments": {"tool_name": found.group(0), "tool_input": report_args}}
             return "ready", None
         prompt = _text(next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), ""))
         tools = [str((t.get("function") or t).get("name") or "") for t in request.get("tools") or []]
         report = next((name for name in tools if name.endswith("Report")), "")
-        if report and "Report" in prompt:
-            return "", {"name": report, "arguments": {"kind": "checkpoint", "note": "self-check"}}
+        if "Report" in prompt and report:
+            return "", {"name": report, "arguments": report_args}
+        if "Report" in prompt and {"search_tool", "use_tool"} <= set(tools):
+            return "", {"name": "search_tool", "arguments": {"query": "daedalus_team Report"}}
         return "ready", None
 
     def __enter__(self) -> ModelStub:
