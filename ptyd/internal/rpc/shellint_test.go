@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -28,6 +30,9 @@ type shellSession struct {
 	f    *fixture
 	id   string
 	home string
+	// physicalCwd is a shell that does not take PWD from its environment and starts where the
+	// kernel says the process is: on macOS, the temporary directory with its links resolved.
+	physicalCwd bool
 }
 
 // shellHome is a home directory with the given files, and the listing it starts with.
@@ -70,7 +75,9 @@ func startShell(t *testing.T, f *fixture, id, program string, home string, env m
 	if _, err := exec.LookPath(program); err != nil {
 		t.Skipf("%s is not installed here; the gate's image has it", program)
 	}
-	all := map[string]string{"HOME": home}
+	// The shell's configuration is the test home's, also for the shells that look in
+	// XDG_CONFIG_HOME first (pwsh and fish): the runners set it to the runner's own.
+	all := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config")}
 	for k, v := range env {
 		all[k] = v
 	}
@@ -185,7 +192,11 @@ func (s *shellSession) exercise(nested, innerEcho string) {
 	r := s.run("cd /tmp")
 	check(r, "cd /tmp", 0)
 	eventually(t, "the directory reported as /tmp", func() bool { return s.info().Cwd == "/tmp" })
-	if r.Cwd != s.f.dir {
+	started := s.f.dir
+	if s.physicalCwd {
+		started, _ = filepath.EvalSymlinks(started)
+	}
+	if r.Cwd != started {
 		t.Fatalf("a command's directory is the one it started in: %q", r.Cwd)
 	}
 	after := s.run("true")
@@ -387,17 +398,24 @@ PS1='%# '
 	// still sees the status, and ZDOTDIR is theirs again (here: unset, as it started).
 	s.run("false")
 	head := s.info().OutputSeq
-	s.type_(`echo "env=$FROM_ZSHENV login=$FROM_ZLOGIN map=$USER_MAP[kept] pre=$USER_PRECMD zdotdir=${ZDOTDIR-unset}"`)
+	// A history file a system zshrc named (macOS's names ${ZDOTDIR:-$HOME}/.zsh_history, while
+	// ZDOTDIR is still the integration's) is where it would be without the daemon.
+	s.type_(`echo "env=$FROM_ZSHENV login=$FROM_ZLOGIN map=$USER_MAP[kept] pre=$USER_PRECMD zdotdir=${ZDOTDIR-unset} hist=${HISTFILE-unset}."`)
 	var w struct {
 		Matched string `json:"matched"`
 	}
-	f.call(t, "terminal.wait_for", map[string]any{"id": "zsh1", "regex": `env=1 login=1 map=yes pre=1 zdotdir=unset`,
-		"scope": "output", "since_seq": head, "timeout_ms": 10000}, &w)
+	f.call(t, "terminal.wait_for", map[string]any{"id": "zsh1", "regex": `env=1 login=1 map=yes pre=1 zdotdir=unset hist=(unset|` +
+		regexp.QuoteMeta(filepath.Join(home, ".zsh_history")) + `)\.`, "scope": "output", "since_seq": head, "timeout_ms": 10000}, &w)
 	if w.Matched != "regex" {
 		t.Fatalf("the user's zsh files: %q\n%s", w.Matched, f.waitOutput(t, "zsh1", ""))
 	}
 	s.end()
-	if after := listing(t, home); strings.Join(after, "\n") != strings.Join(before, "\n") {
+	// The history the system zshrc keeps in the home is not the integration's writing: the nested
+	// zsh of the session, a plain one, saves it there as it would anywhere.
+	withoutHistory := func(l []string) string {
+		return strings.Join(slices.DeleteFunc(l, func(p string) bool { return p == ".zsh_history" }), "\n")
+	}
+	if after := listing(t, home); withoutHistory(after) != withoutHistory(before) {
 		t.Fatalf("the home directory changed:\n%v\n%v", before, after)
 	}
 }
@@ -471,6 +489,7 @@ func TestPwshIntegration(t *testing.T) {
 		".config/powershell/Microsoft.PowerShell_profile.ps1": "function ll { 'LL-ALIAS' }\n",
 	})
 	s := startShell(t, f, "pwsh1", "pwsh", home, map[string]string{"POWERSHELL_TELEMETRY_OPTOUT": "1"}, "pwsh")
+	s.physicalCwd = true
 	s.exercise("pwsh -NoLogo", "echo inner-$(6*7)")
 	s.end()
 }

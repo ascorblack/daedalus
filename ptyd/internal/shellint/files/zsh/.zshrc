@@ -22,6 +22,12 @@ if [[ -n $__dsi_user_set ]]; then
 else
   unset ZDOTDIR
 fi
+# A history file named under our directory was named by a system zshrc that ran before this one,
+# while ZDOTDIR was still ours: macOS's /etc/zshrc sets HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history. It
+# goes where that line would have put it without the daemon, not into the daemon's state directory.
+if [[ ${HISTFILE-} == $__dsi_dir/* ]]; then
+  HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE#$__dsi_dir/}
+fi
 unfunction __dsi_enter __dsi_leave
 unset __dsi_dir __dsi_user_set __dsi_user_zdotdir __dsi_user_type
 
