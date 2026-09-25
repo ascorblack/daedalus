@@ -1,6 +1,7 @@
-// The main chat: the conversation with the main orchestrator, with the questions and the dispatches
-// under way in its flow, after the latest turn. Opening it the first time makes its session; after that it is the same session every
-// time, from any device, until the operator replaces it.
+// The main chat: the conversation with the main orchestrator, with the dispatches under way in its
+// flow, after the latest turn, and every project's questions in its panel's Questions tab. Opening it
+// the first time makes its session; after that it is the same session every time, from any device,
+// until the operator replaces it.
 
 import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "../api";
@@ -43,6 +44,7 @@ export function MainScreen({ toast }: { toast: (text: string) => void }) {
         toast={toast}
         flow={<MainFlow view={data} toast={toast} />}
         placeholder={t("main.composer")}
+        main
       />
     </Suspense>
   );

@@ -8,7 +8,7 @@ import { parse, projectHome, projectPagePath, projectSessionPath } from "../rout
 import { eventTone, parseEvents, systemNote } from "../turns";
 import type { Ask } from "../api";
 import type { Staff } from "../team/team";
-import { askIdOf, canFocus, requestsOf, firstWait, focusView, isChat, oldestOpen, PHONE_TABS, phoneTab, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, teamCounts, waitKey } from "./focus";
+import { canFocus, firstWait, focusView, isChat, oldestOpen, PHONE_TABS, phoneTab, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, teamCounts, waitKey } from "./focus";
 
 function member(over: Partial<Staff> = {}): Pick<Staff, "status" | "queued" | "one_off" | "archived_at"> {
   return { status: "off", queued: [], one_off: false, archived_at: null, ...over };
@@ -47,10 +47,12 @@ describe("a project's route", () => {
 });
 
 describe("the right panel in focus mode", () => {
-  it("offers the project's tabs beside the orchestrator, and both sets beside a session of the project", () => {
+  it("offers the questions and the project's tabs beside the orchestrator, and both sets beside a session of the project", () => {
     expect(tabsFor("session")).toEqual(["details", "files", "preview", "jobs"]);
-    expect(tabsFor("orchestrator")).toEqual(["board", "brief", "wakeups", "folders"]);
+    expect(tabsFor("orchestrator")).toEqual(["questions", "board", "brief", "wakeups", "folders"]);
     expect(tabsFor("member")).toEqual([...PANEL_TABS, ...PROJECT_TABS]);
+    // The main chat leads with every project's questions and keeps a session's own tabs behind them.
+    expect(tabsFor("main")).toEqual(["questions", ...PANEL_TABS]);
   });
 
   it("reads only the tabs the context has from a link", () => {
@@ -61,13 +63,16 @@ describe("the right panel in focus mode", () => {
   });
 
   it("opens on the context's first tab, and remembers the project's tab apart from a session's", () => {
-    expect(defaultPanelTab(null, 1440, tabsFor("orchestrator"))).toBe("board");
-    expect(defaultPanelTab("details", 1440, tabsFor("orchestrator"))).toBe("board");
-    const kept = new Map<string, string>([["daedalus.session.panel", "files"], ["daedalus.session.panel.project", "brief"]]);
+    expect(defaultPanelTab(null, 1440, tabsFor("orchestrator"))).toBe("questions");
+    expect(defaultPanelTab("details", 1440, tabsFor("orchestrator"))).toBe("questions");
+    const kept = new Map<string, string>([["daedalus.session.panel", "files"], ["daedalus.session.panel.project", "brief"], ["daedalus.session.panel.main", "jobs"]]);
     const storage = { getItem: (k: string) => kept.get(k) ?? null };
     expect(readPanelTab(1440, storage, "session")).toBe("files");
     expect(readPanelTab(1440, storage, "orchestrator")).toBe("brief");
+    expect(readPanelTab(1440, storage, "main")).toBe("jobs");
     expect(readPanelTab(900, storage, "orchestrator")).toBeNull();
+    // A member's panel never opens on the questions it does not have.
+    expect(defaultPanelTab("questions", 1440, tabsFor("member"))).toBe("details");
   });
 });
 
@@ -127,32 +132,9 @@ describe("the orchestrator's steps", () => {
     expect(stepDetail("Folders", { op: "add", path: "/work/bakery-bot" })).toBe("/work/bakery-bot");
     expect(stepDetail("Tasks", { op: "move", task_id: "t3a9c1", status: "review" })).toBe("t3a9c1 → review");
     expect(stepDetail("Assign", { staff: "Max", title: "Notify: endpoint" })).toBe("Max · Notify: endpoint");
-    expect(stepDetail("AskOperator", { question: "Postgres or SQLite?\nContext…" })).toBe("Postgres or SQLite?");
-  });
-
-  it("finds the request a tool result names", () => {
-    expect(askIdOf("asked the operator as [qk7m2x]; do not wait")).toBe("qk7m2x");
-    expect(askIdOf("done")).toBeNull();
-    expect(askIdOf(undefined)).toBeNull();
-  });
-
-  it("makes a card of every request a step opened, a folder as well as a question", () => {
-    const ask = (id: string, origin: Ask["origin"], kind: Ask["kind"]): Ask => ({
-      id: `ask-${id}`, short_id: id, project_id: "p1", origin, kind, staff_id: null, task_id: null, text: id, detail: {}, routed_to: "operator",
-      suggestion: "", created_at: "2026-09-25T10:47:00Z", resolved_at: null, resolved_by: null, resolution: {},
-    });
-    const asks = new Map([["qmrvj9", ask("qmrvj9", "orchestrator", "question")], ["qshpm9", ask("qshpm9", "orchestrator", "folder")], ["qstaff", ask("qstaff", "staff", "question")]]);
-    const items = [
-      { name: "AskOperator", result: "asked the operator as [qmrvj9]; do not wait" },
-      { name: "Folders", result: "a host folder needs the operator's confirmation; asked as [qshpm9]. The answer arrives as an event." },
-      { name: "Journal", result: "journal entry #16 written" },
-      // Named again, and a member's request the orchestrator answered: neither is a second card.
-      { name: "Folders", result: "asked as [qshpm9]" },
-      { name: "Answer", result: "answered [qstaff]" },
-      // Not a step of the orchestrator's own.
-      { name: "Read", result: "[qmrvj9]" },
-    ];
-    expect(requestsOf(items, asks).map((a) => a.short_id)).toEqual(["qmrvj9", "qshpm9"]);
+    expect(stepDetail("AskOperator", { title: "Database", text: "Postgres or SQLite?\nContext…" })).toBe("Database");
+    expect(stepDetail("AskOperator", { questions: [{ title: "Database", text: "?" }, { title: "Launch day", text: "?" }] })).toBe("Database · Launch day");
+    expect(stepDetail("WithdrawQuestions", { ids: ["qk7m2x", "qa1b2c"], reason: "the brief settles it" })).toBe("qk7m2x, qa1b2c · the brief settles it");
   });
 });
 

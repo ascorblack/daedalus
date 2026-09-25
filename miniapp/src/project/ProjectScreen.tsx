@@ -10,7 +10,7 @@ import { useProject } from "./data";
 import { focusView } from "./focus";
 import { BriefPage, EnableOrchestrator, FoldersPage, JournalPage, TerminalsPage, WakeupsPage } from "./pages";
 import { SetupLine } from "../main/cards";
-import { NeedsYouBanner, PhoneBoard, PhoneTeam, PhoneTerminals } from "./phone";
+import { PhoneBoard, PhoneTeam, PhoneTerminals } from "./phone";
 
 const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 const TeamPage = lazy(() => import("../team/TeamPage").then((m) => ({ default: m.TeamPage })));
@@ -36,15 +36,9 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
         focus={{ projectId, kind: "orchestrator" }}
         onBack={() => navigate(wide ? ORCHESTRATION : ORCHESTRATION_LIST)}
         toast={toast}
-        // On a phone the request waiting longest sits under the chat's header: the orchestrator's
-        // chat is the tab a project opens on, and a question there should not wait for a scroll. A
-        // project the main orchestrator is setting up says so, with the button that ends the setup.
-        banner={
-          <>
-            {project.setup_by === "dispatcher" && <SetupLine projectId={projectId} name={project.name} toast={toast} />}
-            {!wide && <NeedsYouBanner projectId={projectId} toast={toast} />}
-          </>
-        }
+        // A project the main orchestrator is setting up says so, with the button that ends the setup.
+        // What waits for the operator is in the Questions tab, which a phone opens from the header.
+        banner={project.setup_by === "dispatcher" ? <SetupLine projectId={projectId} name={project.name} toast={toast} /> : undefined}
       />
     ) : (
       <EnableOrchestrator project={project} toast={toast} />

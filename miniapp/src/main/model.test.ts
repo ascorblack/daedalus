@@ -9,7 +9,7 @@ import type { Dispatch, MainAsk, Preset } from "../api";
 import { setLang } from "../i18n";
 import { parse } from "../router";
 import { eventTone, parseEvents } from "../turns";
-import { answeredLine, dispatchState, goingDispatches, groupAsks, mainPreset, takesWords } from "./model";
+import { answeredLine, dispatchState, goingDispatches, mainPreset } from "./model";
 
 function ask(over: Partial<MainAsk> = {}): MainAsk {
   return {
@@ -30,21 +30,6 @@ function dispatch(over: Partial<Dispatch> = {}): Dispatch {
 afterEach(() => setLang("en"));
 
 describe("the questions of the main chat", () => {
-  it("groups the open ones by project, oldest first, and leaves the answered ones out", () => {
-    const groups = groupAsks([
-      ask({ id: "a3", project_id: "p2", project_name: "Garden", created_at: "2026-09-25T10:03:00Z" }),
-      ask({ id: "a2", created_at: "2026-09-25T10:02:00Z" }),
-      ask({ id: "a1", created_at: "2026-09-25T10:01:00Z" }),
-      ask({ id: "a0", resolved_at: "2026-09-25T10:05:00Z", resolved_by: "operator" }),
-      ask({ id: "new", project_id: null, project_name: "", origin: "dispatcher", kind: "project", created_at: "2026-09-25T10:04:00Z" }),
-    ]);
-    expect(groups.map((g) => [g.name, g.asks.map((a) => a.id)])).toEqual([
-      ["Bakery", ["a1", "a2"]],
-      ["Garden", ["a3"]],
-      ["New project", ["new"]],
-    ]);
-  });
-
   it("says where and how a request was answered, the same wherever it was shown", () => {
     expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { selected: ["Postgres"], via: "main" } }))).toBe("answered in the main chat: Postgres");
     expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { text: "SQLite, small data", via: "telegram" } }))).toBe("answered in Telegram: SQLite, small data");
@@ -53,11 +38,6 @@ describe("the questions of the main chat", () => {
     expect(answeredLine(ask({ resolved_at: "x", resolved_by: "system", resolution: { closed: "dispatch d1 was closed as done" } }))).toBe("withdrawn");
     setLang("ru");
     expect(answeredLine(ask({ resolved_at: "x", resolved_by: "operator", resolution: { selected: ["Postgres"], via: "project" } }))).toBe("ответ в чате проекта: Postgres");
-  });
-
-  it("takes words only for a question", () => {
-    expect(takesWords(ask())).toBe(true);
-    for (const kind of ["permission", "folder", "project"] as const) expect(takesWords(ask({ kind }))).toBe(false);
   });
 });
 

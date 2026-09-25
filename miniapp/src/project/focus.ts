@@ -2,7 +2,7 @@
 // each member of the team, why a launch waits, and what the orchestrator's steps are called. Pure, so
 // every decision here is tested without a browser; the components only draw what these return.
 
-import type { Ask, Project } from "../api";
+import type { Project } from "../api";
 import type { Queued, Staff, StaffStatus } from "../team/team";
 
 /** The pages of a project, each at /app/project/<id>/<page>. No page is the orchestrator's chat. */
@@ -83,7 +83,7 @@ export function splitTeam<T extends Pick<Staff, "one_off" | "archived_at">>(staf
  *  what it did to the project is what the operator reads the chat for. */
 export const ORCHESTRATOR_STEPS = [
   "Brief", "Folders", "Journal", "Team", "Hire", "StaffEdit", "Dismiss", "Assign", "Tell", "ReadStaff", "Answer",
-  "Interrupt", "Pause", "Release", "Peek", "Tasks", "WakeMe", "Watch", "Unwatch", "AskOperator", "ProjectReport",
+  "Interrupt", "Pause", "Release", "Peek", "Tasks", "WakeMe", "Watch", "Unwatch", "AskOperator", "WithdrawQuestions", "ProjectReport",
 ] as const;
 
 export function isOrchestratorStep(name: string): boolean {
@@ -116,7 +116,7 @@ export const STEP_KEYS = [
   "Folders.add", "Folders.update", "Folders.remove", "Folders.list", "Tasks.get", "Tasks.create", "Tasks.update", "Tasks.move", "Tasks.list",
   "Journal.read", "Journal.write", "Brief.write", "Brief.read", "Team.concurrency", "Team.read",
   "Hire", "StaffEdit", "Dismiss", "Assign", "Tell", "ReadStaff", "Answer", "Interrupt", "Pause", "Release", "Peek", "WakeMe", "Watch", "Unwatch",
-  "AskOperator", "ProjectReport", "other",
+  "AskOperator", "WithdrawQuestions", "ProjectReport", "other",
 ] as const;
 
 /** The detail beside a step's verb: the thing it acted on, in the arguments' own words. */
@@ -150,38 +150,17 @@ export function stepDetail(name: string, args: Record<string, unknown>): string 
     case "Unwatch":
       return s("id");
     case "AskOperator":
-      return s("question").split("\n")[0].slice(0, 80);
+      // A batch is named by its titles; the questions themselves wait in the Questions tab.
+      return Array.isArray(args.questions)
+        ? args.questions.map((q) => (q && typeof q === "object" && typeof (q as Record<string, unknown>).title === "string" ? (q as Record<string, string>).title : "")).filter(Boolean).join(" · ").slice(0, 120)
+        : s("title") || s("text").split("\n")[0].slice(0, 80);
+    case "WithdrawQuestions":
+      return [Array.isArray(args.ids) ? args.ids.join(", ") : "", s("reason").slice(0, 60)].filter(Boolean).join(" · ");
     case "ProjectReport":
       return s("title") || s("text").split("\n")[0].slice(0, 80);
     default:
       return s("staff");
   }
-}
-
-/** The short id a tool result names — "asked the operator as [q7k2m9]" — or null. */
-export function askIdOf(result: string | undefined): string | null {
-  return /\[(q[0-9a-z]{4,8})\]/i.exec(result ?? "")?.[1] ?? null;
-}
-
-/**
- * The requests to the operator that a turn's steps opened, each once, in the order they were asked:
- * any step of the orchestrator's whose result names one of its own requests, not only AskOperator.
- * A folder is asked for by `Folders(op=add)`; when only AskOperator was looked at, that request had
- * no card in the chat, and since a notification is not raised as a toast over the chat it concerns,
- * an operator watching the chat saw it nowhere but the Notifications screen.
- */
-export function requestsOf(items: { name: string; result?: string }[], asks: Map<string, Ask>): Ask[] {
-  const seen = new Set<string>();
-  const found: Ask[] = [];
-  for (const item of items) {
-    if (!isOrchestratorStep(item.name)) continue;
-    const short = askIdOf(item.result);
-    const ask = short ? asks.get(short) : undefined;
-    if (!ask || ask.origin !== "orchestrator" || seen.has(ask.id)) continue;
-    seen.add(ask.id);
-    found.push(ask);
-  }
-  return found;
 }
 
 // ── the header ───────────────────────────────────────────────────────────────────────────────

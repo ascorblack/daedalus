@@ -1,12 +1,14 @@
-"""Every request an orchestrator puts to the operator is a card in its own chat, a folder as well as a
-question, at 1440 and at 390 px, in both languages.
+"""Every request an orchestrator puts to the operator waits in its Questions tab, a folder as well as
+a question, at 1440 and at 390 px, in both languages.
 
-The case this guards: the orchestrator asked for a host folder with ``Folders(op=add)``. The chat drew
-cards only for ``AskOperator``, and a notification is not raised as a toast over the chat it
+The case this guards: the orchestrator asked for a host folder with ``Folders(op=add)``. The chat once
+drew cards only for ``AskOperator``, and a notification is not raised as a toast over the chat it
 concerns, so the operator watching that chat saw the request nowhere but the Notifications screen.
-Here a turn asks for two folders; each is a card with the request's own options and no field for
-words (a folder is added or it is not), the first option posts exactly the option, and an approval
-the host takes but cannot carry out says why on the card and in a toast. Nothing scrolls sideways.
+Now the tab lists every open request of the project whatever tool opened it, and the chat's one line
+counts them all. Here a turn asks for two folders; each is a card with the request's own options and
+no field for words (a folder is added or it is not), Send posts exactly the option for each, and an
+approval the host takes but cannot carry out says why on the card and in a toast. Nothing scrolls
+sideways.
 """
 
 from __future__ import annotations
@@ -28,8 +30,8 @@ CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 LABS, SHOP = "/home/operator/labs", "/home/operator/shop"
 REFUSED = f"Bakery 2.0 already has the folder {SHOP}"
 WORDS = {
-    "en": {"head": "The orchestrator wants a folder", "answered": "answered in the project's chat: Add", "failed": f"Approved, but it failed: {REFUSED}", "notdone": f"Not carried out: {REFUSED}"},
-    "ru": {"head": "Оркестратор просит папку", "answered": "ответ в чате проекта: Add", "failed": f"Одобрено, но не выполнено: {REFUSED}", "notdone": f"Не выполнено: {REFUSED}"},
+    "en": {"head": "The orchestrator wants a folder", "line": "3 questions waiting", "sent": "Sent", "failed": f"Approved, but it failed: {REFUSED}"},
+    "ru": {"head": "Оркестратор просит папку", "line": "3 вопроса ждут ответа", "sent": "Отправлено", "failed": f"Одобрено, но не выполнено: {REFUSED}"},
 }
 
 
@@ -69,36 +71,42 @@ def check(page: Page, lang: str, where: str) -> None:
     words = WORDS[lang]
     focus = with_folder_requests(lang)
     serve(page, focus)
-    page.goto(f"{BASE}/orchestration/project/{PID}?token=t&lang={lang}")
+    # A link may name the tab on a desktop; a phone reaches it through the header's button.
+    page.goto(f"{BASE}/orchestration/project/{PID}?token=t&lang={lang}" + ("&panel=questions" if where != "390" else ""))
     chat = page.locator(".chat.in-project.orchestrator")
     expect(chat).to_be_visible()
-    # The question the orchestrator asked earlier is still a card, and so is each folder.
-    expect(chat.locator(".ask-card[data-ask='q4r8tz']")).to_be_visible()
-    labs = chat.locator(".ask-card[data-ask='qf0ld3']")
-    shop = chat.locator(".ask-card[data-ask='qsh0p5']")
+    # The chat counts the question asked earlier and both folders, and draws none of them as a card.
+    expect(chat.locator(".timeline > .questions-line")).to_contain_text(words["line"])
+    expect(chat.locator(".timeline .q-card, .ask-card")).to_have_count(0)
+    if where == "390":
+        chat.locator(".questions-headbtn").tap()
+    panel = page.locator(".panel-sheet" if where == "390" else ".panel")
+    expect(panel.locator(".q-card[data-ask='q4r8tz']")).to_be_visible()
+    labs = panel.locator(".q-card[data-ask='qf0ld3']")
+    shop = panel.locator(".q-card[data-ask='qsh0p5']")
     expect(labs).to_be_visible()
     expect(shop).to_be_visible()
-    expect(chat.locator(".ask-card")).to_have_count(3)
-    expect(labs.locator(".ask-head")).to_contain_text(words["head"])
-    expect(labs.locator(".ask-text")).to_contain_text("It is also in the project Labs.")
-    expect(labs.locator(".ask-options .btn")).to_have_text(["Add", "Don't add"])
-    expect(labs.locator(".ask-own")).to_have_count(0)
+    expect(panel.locator(".q-card")).to_have_count(3)
+    expect(labs.locator(".q-meta")).to_contain_text(words["head"])
+    # A folder request has no title of its own: its one line is its heading, and not said twice.
+    expect(labs.locator(".q-title")).to_have_text(f"Add the host folder {LABS} to Bakery 2.0? It is also in the project Labs.")
+    expect(labs.locator(".q-text")).to_have_count(0)
+    expect(labs.locator(".q-chip")).to_have_text(["Add", "Don't add"])
+    expect(labs.locator(".q-field")).to_have_count(0)
     fits(page, f"{lang} {where} folder cards")
 
-    labs.get_by_role("button", name="Add", exact=True).click()
-    expect(labs.locator(".ask-answer")).to_have_text(words["answered"])
-    expect(labs.locator(".ask-failed")).to_have_count(0)
-    assert focus.answers == [("ask-qf0ld3", {"selected": ["Add"], "window": "project"})], focus.answers
-
-    shop.get_by_role("button", name="Add", exact=True).click()
-    expect(shop.locator(".ask-failed")).to_have_text(words["notdone"])
-    expect(page.get_by_text(words["failed"])).to_be_visible()
-    assert focus.answers[-1] == ("ask-qsh0p5", {"selected": ["Add"], "window": "project"}), focus.answers
+    labs.locator(".q-chip[data-option='Add']").click()
+    shop.locator(".q-chip[data-option='Add']").click()
+    panel.locator(".questions-send-btn").click()
+    assert focus.batches == [(f"/api/projects/{PID}/asks/answer", [{"ask_id": "ask-qf0ld3", "selected": ["Add"]}, {"ask_id": "ask-qsh0p5", "selected": ["Add"]}])], focus.batches
+    expect(labs.locator(".q-fate")).to_contain_text(words["sent"])
+    # The approval the host could not carry out says why, on the card and in a toast, before it leaves.
+    expect(shop.locator(".q-fate")).to_contain_text(words["failed"])
+    expect(page.get_by_text(words["failed"]).last).to_be_visible()
     fits(page, f"{lang} {where} after the answers")
-
-    # Read again from the host, the failed approval still says why.
-    page.reload()
-    expect(chat.locator(".ask-card[data-ask='qsh0p5'] .ask-failed")).to_have_text(words["notdone"])
+    expect(labs).to_have_count(0, timeout=10000)
+    expect(shop).to_have_count(0, timeout=10000)
+    expect(panel.locator(".q-card")).to_have_count(1)
 
 
 def main() -> int:

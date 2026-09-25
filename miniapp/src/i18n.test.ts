@@ -242,6 +242,10 @@ describe("the keys the code asks for", () => {
       ["harness.state.", ["current", "needsnode", "absent", "install", "signin", "update"]],
       ["harness.mark.", ["unsupported", "unverified", "verified"]],
       ["harness.op.", ["check", "update", "install", "signin"]],
+      ["questions.section.", ["requests", "questions"]],
+      ["questions.perm.", ["allow", "always", "deny", "because"]],
+      ["questions.field.", ["answer", "note", "reason"]],
+      ["panel.tab.", ["questions"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

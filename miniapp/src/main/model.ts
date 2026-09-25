@@ -1,26 +1,13 @@
-// What the main chat draws, decided without React: which cards are open and in what order, how an
-// answered request reads in one line, and what a dispatch's state is called. Kept pure so the rules
-// the operator relies on — one card per request, grouped by project, oldest first; "answered in
-// <where>" everywhere a request was shown — are tested without a browser.
+// What the main chat draws, decided without React: how an answered request reads in one line, which
+// dispatches are cards and in what order, and what a dispatch's state is called. Kept pure so the
+// rules the operator relies on — "answered in <where>" everywhere a request was shown — are tested
+// without a browser.
 
-import type { Ask, Dispatch, MainAsk, Preset } from "../api";
+import type { Ask, Dispatch, Preset } from "../api";
 import { t } from "../i18n";
 
 /** The main chat is orchestration mode's home. */
 export const MAIN_PATH = "/app/orchestration";
-
-/** The requests still waiting, one group per project, the groups and the cards oldest first. */
-export function groupAsks(asks: MainAsk[]): { key: string; name: string; asks: MainAsk[] }[] {
-  const groups = new Map<string, { key: string; name: string; asks: MainAsk[] }>();
-  const open = asks.filter((a) => !a.resolved_at).sort((a, b) => a.created_at.localeCompare(b.created_at));
-  for (const ask of open) {
-    const key = ask.project_id ?? `new:${ask.id}`;
-    const group = groups.get(key) ?? { key, name: ask.project_name || t("main.ask.newproject"), asks: [] };
-    group.asks.push(ask);
-    groups.set(key, group);
-  }
-  return [...groups.values()];
-}
 
 /** Where a request was answered, in the reader's words. */
 export function answeredWhere(via: string | undefined): string {
@@ -53,11 +40,6 @@ export function dispatchState(d: Dispatch): { word: string; tone: "ok" | "warn" 
  *  dispatch is not a card: the report that closed it is already a line in the chat's own flow. */
 export function goingDispatches(list: Dispatch[]): Dispatch[] {
   return list.filter((d) => d.status === "open" || d.status === "blocked").sort((a, b) => a.created_at.localeCompare(b.created_at));
-}
-
-/** Whether a request is answered in words as well as with its buttons. */
-export function takesWords(ask: Ask): boolean {
-  return ask.kind === "question";
 }
 
 /**

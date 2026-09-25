@@ -30,8 +30,9 @@ import { usePresenceScope } from "../presence";
 import { endsTerminals, TerminalButton, TerminalDock, TerminalFull, TerminalSheet, useSessionTerminals, useTerminalDock } from "../terminal/dock";
 import { insideTerminal } from "../terminal/keys";
 import { tabsFor } from "../panel";
-import { useAsks } from "../project/data";
-import { AskCards, EventCard, FocusChat, FocusChatContext, stepDescription, useFocusChat } from "../project/chat";
+import { EventCard, FocusChat, FocusChatContext, stepDescription, useFocusChat } from "../project/chat";
+import { QuestionsLine, QuestionsPanel } from "../questions/QuestionsPanel";
+import { useQuestions, type QuestionScope } from "../questions/data";
 import { StaffHeader, StaffMessages, useMember } from "../project/staff";
 import { BriefPage, FoldersPage, WakeupsPage } from "../project/pages";
 import { ProjectBoard } from "../board/ProjectBoard";
@@ -75,12 +76,14 @@ export type SessionScreenProps = {
   flow?: ReactNode;
   /** The composer's words while nothing runs, when the chat is not an ordinary agent's. */
   placeholder?: string;
+  /** The main chat: its panel leads with every orchestrated project's questions. */
+  main?: boolean;
   /** Opened by its plain address in Agents mode: a session that belongs to orchestration mode (the
    *  main chat, anything of a project with an orchestrator) moves there as soon as it is known to. */
   leaveForOrchestration?: boolean;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, flow, placeholder, leaveForOrchestration = false }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, flow, placeholder, main = false, leaveForOrchestration = false }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -96,7 +99,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
   // names; the second pane of a dual view keeps its panel to itself. Phones host it in a sheet.
   const route = useRoute();
   const phone = !useMedia("(min-width: 1024px)");
-  const panelContext = focus ? focus.kind : "session";
+  const panelContext = focus ? focus.kind : main ? "main" : "session";
   const panelTabs = tabsFor(panelContext);
   // In focus mode the panel's tab is written into the project's own address, so opening the board
   // beside the orchestrator does not leave the project for the agents list.
@@ -115,8 +118,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
     if (orchestrationPath) navigate(orchestrationPath + window.location.search, { replace: true });
   }, [orchestrationPath]);
   const staffName = useMember(focus && detail?.staff ? detail.staff.id : null).data?.name ?? "";
-  const asks = useAsks(orchestrating ? focus!.projectId : null);
-  const focusChat = useMemo<FocusChat | null>(() => (focus ? { projectId: focus.projectId, orchestrator: orchestrating, asks, toast } : null), [focus?.projectId, orchestrating, asks, toast]);
+  // What waits for the operator: the orchestrator's project's list, or every project's in the main
+  // chat. The cards live in the panel's Questions tab; the chat carries one line that opens it.
+  const questionScope = useMemo<QuestionScope | null>(() => (orchestrating ? { projectId: focus!.projectId } : main ? "all" : null), [orchestrating, focus?.projectId, main]);
+  const waiting = useQuestions(questionScope).questions?.length ?? 0;
+  const focusChat = useMemo<FocusChat | null>(() => (focus ? { projectId: focus.projectId, orchestrator: orchestrating, toast } : null), [focus?.projectId, orchestrating, toast]);
   const body = useRef<HTMLDivElement>(null);
   const [panelPct, dragPanel] = usePanelWidth(body);
   // The session's terminals: the dock under the conversation on a desktop, a sheet and a full-screen
@@ -1040,6 +1046,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
           {detail && ((detail.subagents?.length ?? 0) > 0 || detail.subagent_of) && (
             <SubagentsMenu detail={detail} onOpen={onOpen} />
           )}
+          {phone && questionScope && (
+            // A phone has no panel column: the questions open as a sheet from here, with how many wait.
+            <button className={`iconbtn questions-headbtn ${waiting ? "attn" : ""}`} onClick={() => panel.open("questions")} aria-label={plural("questions.line", waiting)} title={t("panel.tab.questions")}>
+              <Icon name="ask" />
+              {waiting > 0 && <span className="count">{waiting}</span>}
+            </button>
+          )}
           <TerminalButton dock={terminalDock} phone={phone} />
           {!phone && <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
@@ -1103,6 +1116,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
                 {busy && <LiveTurn base={tail} live={live} onTurnAction={turnAction} onRender={pinBottom} />}
               </SessionContext.Provider>
               {flow}
+              {questionScope && <QuestionsLine count={waiting} onOpen={() => panel.open("questions")} />}
             </div>
           </div>
           {!atBottom && (
@@ -1164,12 +1178,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
             sheet={phone}
             drag={dragPanel}
             tabs={panelTabs}
-            project={focus ? {
-              board: <ProjectBoard projectId={focus.projectId} toast={toast} embedded />,
-              brief: <BriefPage projectId={focus.projectId} compact toast={toast} />,
-              wakeups: <WakeupsPage projectId={focus.projectId} compact toast={toast} />,
-              folders: <FoldersPage projectId={focus.projectId} compact toast={toast} />,
-            } : undefined}
+            pages={{
+              ...(focus ? {
+                board: <ProjectBoard projectId={focus.projectId} toast={toast} embedded />,
+                brief: <BriefPage projectId={focus.projectId} compact toast={toast} />,
+                wakeups: <WakeupsPage projectId={focus.projectId} compact toast={toast} />,
+                folders: <FoldersPage projectId={focus.projectId} compact toast={toast} />,
+              } : {}),
+              ...(questionScope ? { questions: <QuestionsPanel scope={questionScope} toast={toast} /> } : {}),
+            }}
+            badges={questionScope && waiting ? { questions: waiting } : undefined}
             details={hasDetails ? (ids) =>
               <SessionDetails
                 ids={ids}
@@ -1491,7 +1509,6 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
-      {focusChat?.orchestrator && <AskCards items={turn.activity.filter((a): a is ToolItem => a.kind === "tool")} />}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && (turn.media?.length ? (
         <div className={`answer answer-with-media ${live ? "streaming" : ""}`}>

@@ -2,9 +2,8 @@
 // member hired in the sidebar shows on the team page and a task moved on the board moves in the panel
 // without a second request. One subscription to the event stream keeps all of it current.
 
-import type { Ask, Project, SessionList, TerminalList, Wakeup, WatchList } from "../api";
+import type { Project, SessionList, TerminalList, Wakeup, WatchList } from "../api";
 import type { ProjectBoardData } from "../board/board";
-import { useMemo } from "react";
 import { useEvent, useStreamUp } from "../events";
 import { useProjects } from "../projects";
 import { invalidate, useQuery } from "../store";
@@ -16,7 +15,6 @@ const enc = encodeURIComponent;
 export const staffKey = (projectId: string) => `/api/projects/${enc(projectId)}/staff?archived=0`;
 export const boardKey = (projectId: string) => `/api/projects/${enc(projectId)}/board?include_done=0`;
 export const terminalsKey = (projectId: string) => `/api/terminals?project_id=${enc(projectId)}`;
-export const asksKey = (projectId: string) => `/api/asks?project=${enc(projectId)}&open=0`;
 export const briefKey = (projectId: string) => `/api/projects/${enc(projectId)}/brief`;
 export const journalKey = (projectId: string) => `/api/projects/${enc(projectId)}/journal`;
 export const wakeupsKey = (projectId: string) => `/api/projects/${enc(projectId)}/wakeups`;
@@ -80,19 +78,6 @@ export function useProjectEvents(projectId: string): void {
       invalidate(watchesKey(projectId));
     }
   }, [projectId]);
-}
-
-/** The project's requests, by the short id a tool result or an event line names. The newest request
- *  with an id wins: a short id is unique among open requests, and a closed one may give it up. */
-export function useAsks(projectId: string | null): Map<string, Ask> {
-  const live = useStreamUp();
-  const { data } = useQuery<{ asks: Ask[] }>(projectId ? asksKey(projectId) : null, { pollMs: live ? 60000 : 10000, staleMs: 3000 });
-  // Built once per answer from the host, so the chat's turns see the same map until something changed.
-  return useMemo(() => {
-    const byShort = new Map<string, Ask>();
-    for (const ask of data?.asks ?? []) if (!byShort.has(ask.short_id)) byShort.set(ask.short_id, ask);
-    return byShort;
-  }, [data]);
 }
 
 /** What the project spends. Spend moves with every model call, so it is read again when a run of the

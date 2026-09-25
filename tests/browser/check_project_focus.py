@@ -38,7 +38,7 @@ WORDS = {
         "all": "All projects", "orchestrator": "Orchestrator", "team": "Team", "oneoff": "One-off", "terminals": "Terminals", "board": "Board", "brief": "Brief",
         "wakeups": "Wake-ups", "journal": "Journal", "folders": "Folders", "machine": "the machine's terminal limit is reached", "placeholder": "Write to the orchestrator…",
         "lev": "Write to Lev…", "folder": "Folder added", "created": "Task created", "assigned": "Assigned", "watch": "Watch set", "asked": "Asked you",
-        "answered": "answered in the project's chat: Before delivery", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
+        "waiting": "1 question waiting", "questions": "Questions", "events": "3 events since 09:51", "onlyyou": "only you", "byorch": "changed by the orchestrator", "older": "Older entries",
         "note": "Add a note", "enable": "Switch the orchestrator on", "on": "Switch on", "cost": "fifteen times", "pause": "Pause after the turn", "accepted": "accepted",
         "staff": "6 staff", "needs": "1 needs you", "autonomy": "autonomy: normal",
         "spent": "$2.05 today", "levspend": "$1.20 today · 412k tokens", "iraspend": "subscription · window 23 %", "totals": "Today $2.05 · 7 days $10.90 · All $33.80",
@@ -48,7 +48,7 @@ WORDS = {
         "all": "Все проекты", "orchestrator": "Оркестратор", "team": "Команда", "oneoff": "Разовые", "terminals": "Терминалы", "board": "Доска", "brief": "Бриф",
         "wakeups": "Будильники", "journal": "Журнал", "folders": "Папки", "machine": "достигнут предел терминалов машины", "placeholder": "Напишите оркестратору…",
         "lev": "Написать сотруднику Lev…", "folder": "Папка добавлена", "created": "Задача создана", "assigned": "Назначено", "watch": "Наблюдение поставлено", "asked": "Спросил вас",
-        "answered": "ответ в чате проекта: До доставки", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
+        "waiting": "1 вопрос ждёт ответа", "questions": "Вопросы", "events": "3 события с 09:51", "onlyyou": "только вы", "byorch": "изменено оркестратором", "older": "Более ранние записи",
         "note": "Добавить заметку", "enable": "Включить оркестратор", "on": "Включить", "cost": "в пятнадцать раз", "pause": "После хода — пауза", "accepted": "принято",
         "staff": "6 сотрудников", "needs": "1 ждёт вас", "autonomy": "самостоятельность: обычная",
         "spent": "$2.05 сегодня", "levspend": "$1.20 сегодня · токенов: 412k", "iraspend": "подписка · окно 23 %", "totals": "Сегодня $2.05 · 7 дней $10.90 · Всего $33.80",
@@ -153,21 +153,27 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(steps.filter(has_text=words["watch"])).to_have_count(1)
     expect(steps.filter(has_text=words["asked"])).to_have_count(1)
     assert chat.get_by_text(words["created"], exact=True).count() == 2, "a step is drawn once, inside its group"
-    expect(chat.locator("textarea")).to_have_attribute("placeholder", words["placeholder"])
-    ask = chat.locator(".ask-card[data-ask='q4r8tz']")
+    expect(chat.locator(".composer textarea")).to_have_attribute("placeholder", words["placeholder"])
+    # The question it asked is no card in the chat: one line stands for what waits, and opens the
+    # Questions tab, where it is answered (check_questions_panel.py follows it further).
+    expect(chat.locator(".ask-card, .timeline .q-card")).to_have_count(0)
+    line = chat.locator(".timeline > .questions-line")
+    expect(line).to_contain_text(words["waiting"])
+    line.click()
+    ask = page.locator(".panel .q-card[data-ask='q4r8tz']")
     expect(ask).to_be_visible()
-    expect(ask.locator(".ask-own input")).to_be_visible()
-    ask.get_by_role("button", name=invented["ask.before"]).click()
-    expect(ask.locator(".ask-answer")).to_have_text(words["answered"])
-    assert focus.answers == [("ask-spring", {"selected": [invented["ask.before"]], "window": "project"})], focus.answers
+    ask.locator(".q-chip", has_text=invented["ask.before"]).click()
+    page.locator(".panel .questions-send-btn").click()
+    expect(ask).to_have_count(0, timeout=10000)
+    assert focus.batches == [(f"/api/projects/{PID}/asks/answer", [{"ask_id": "ask-spring", "selected": [invented["ask.before"]]}])], focus.batches
+    expect(chat.locator(".questions-line")).to_have_count(0)
     fits(page, f"{lang} {width} orchestrator")
 
-    # The panel beside the orchestrator is the project's: four tabs, the board first.
+    # The panel beside the orchestrator is the project's: the questions first, then its four tabs.
     tabs = page.locator(".panel .panel-tab")
-    if tabs.count() == 0:
-        chat.locator(".head-actions button[aria-pressed]").last.click()
-    expect(tabs).to_have_count(4)
-    expect(tabs.nth(0)).to_have_text(words["board"])
+    expect(tabs).to_have_count(5)
+    expect(tabs.nth(0)).to_contain_text(words["questions"])
+    expect(tabs.nth(1)).to_have_text(words["board"])
     page.locator(".panel .panel-tab[data-tab='board']").click()
     expect(page.locator(".panel .pboard.embedded .pcard.need")).to_contain_text("q4r8tz")
     page.locator(".panel .panel-tab[data-tab='brief']").click()

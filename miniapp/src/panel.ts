@@ -3,7 +3,7 @@
 // should reproduce (`?panel=preview&path=reports/menu.md`), the browser remembers the width and the
 // last open tab, and the component in panel.tsx is the only thing that turns either into pixels.
 
-export type PanelTab = "details" | "files" | "preview" | "jobs" | "board" | "brief" | "wakeups" | "folders";
+export type PanelTab = "details" | "files" | "preview" | "jobs" | "board" | "brief" | "wakeups" | "folders" | "questions";
 
 /** A session's own tabs: what the agent is, the files it works on, one of them open, its jobs. */
 export const PANEL_TABS: PanelTab[] = ["details", "files", "preview", "jobs"];
@@ -11,18 +11,20 @@ export const PANEL_TABS: PanelTab[] = ["details", "files", "preview", "jobs"];
 /** A project's tabs, beside a session in the project's focus mode. */
 export const PROJECT_TABS: PanelTab[] = ["board", "brief", "wakeups", "folders"];
 
-/** What a panel is beside: an ordinary session, a project's orchestrator, or a session inside a
- *  project's focus mode (a staff member, or anyone else working in the project). */
-export type PanelContext = "session" | "orchestrator" | "member";
+/** What a panel is beside: an ordinary session, a project's orchestrator, a session inside a
+ *  project's focus mode (a staff member, or anyone else working in the project), or the main chat. */
+export type PanelContext = "session" | "orchestrator" | "member" | "main";
 
 /**
  * The tabs a panel offers, in order. The orchestrator writes no file and runs no job, so its panel
- * is the project's alone; a session inside a project keeps its own tabs and gains the project's,
- * so the board is one click away from whoever is working on it.
+ * is the project's alone, with what waits for the operator first; a session inside a project keeps
+ * its own tabs and gains the project's, so the board is one click away from whoever is working on
+ * it; the main chat keeps a session's tabs behind the questions of every project.
  */
 export function tabsFor(context: PanelContext): PanelTab[] {
-  if (context === "orchestrator") return PROJECT_TABS;
+  if (context === "orchestrator") return ["questions", ...PROJECT_TABS];
   if (context === "member") return [...PANEL_TABS, ...PROJECT_TABS];
+  if (context === "main") return ["questions", ...PANEL_TABS];
   return PANEL_TABS;
 }
 
@@ -41,7 +43,7 @@ export type PanelState = {
 
 export const PANEL_CLOSED: PanelState = { tab: null, stack: [], at: -1, expanded: false };
 
-export function isPanelTab(v: string | null | undefined, tabs: readonly PanelTab[] = [...PANEL_TABS, ...PROJECT_TABS]): v is PanelTab {
+export function isPanelTab(v: string | null | undefined, tabs: readonly PanelTab[] = [...PANEL_TABS, ...PROJECT_TABS, "questions"]): v is PanelTab {
   return !!v && (tabs as readonly string[]).includes(v);
 }
 
@@ -186,7 +188,7 @@ export function defaultPanelTab(stored: string | null, viewportWidth: number, ta
  *  beside the orchestrator is not a tab an ordinary session has, and Details is not the
  *  orchestrator's. */
 export function panelTabKey(context: PanelContext): string {
-  return context === "session" ? TAB_KEY : `${TAB_KEY}.project`;
+  return context === "session" ? TAB_KEY : context === "main" ? `${TAB_KEY}.main` : `${TAB_KEY}.project`;
 }
 
 export function readPanelTab(viewportWidth: number, storage: Pick<Storage, "getItem"> | null = safeStorage(), context: PanelContext = "session"): PanelTab | null {

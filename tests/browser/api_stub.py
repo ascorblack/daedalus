@@ -133,6 +133,8 @@ GATES: dict[str, object] = {
     # The main orchestrator's entry is pinned in every sidebar and reads its chat's summary: no session
     # yet, nothing handed out, no questions.
     "/api/main": {"session_id": "", "dispatches": [], "asks": [], "questions": 0, "setup": []},
+    # The Questions tab of a project or of the main chat: nothing waits.
+    "/api/questions": {"questions": []},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
     # The folder form asks where a folder may live before it offers the environment choice.
@@ -282,7 +284,7 @@ def expect_app(base: str) -> None:
 
 
 
-__all__ = ["CAPABILITIES", "CATALOG", "HarnessesStub", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
+__all__ = ["CAPABILITIES", "CATALOG", "HarnessesStub", "answer_batch", "question_view", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "FOCUS_WORDS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "FocusStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -591,6 +593,55 @@ def file_search(path: str, query: str, limit: int = 200) -> dict | None:
     return None
 
 
+def question_view(ask: dict, project_name: str, *, asker: str = "", always: bool = False) -> dict:
+    """One entry of GET /api/questions, as ``daedalus/extensions/questions.py`` draws a request."""
+    detail = ask.get("detail") or {}
+    options = [o for o in detail.get("options") or [] if isinstance(o, str)]
+    title = str(ask.get("title") or "")
+    heading = title or next((line.strip() for line in ask["text"].splitlines() if line.strip()), "")
+    origin = ask["origin"]
+    return {
+        **ask, "title": title, "heading": heading, "project_name": project_name,
+        "asker": asker or ("main" if origin == "dispatcher" else "orchestrator" if origin == "orchestrator" else "staff"),
+        "section": "requests" if origin == "staff" else "questions",
+        "options": options, "multi": bool(detail.get("multi")) and len(options) > 1,
+        "allow_free": ask["kind"] == "question" and (detail.get("allow_free", True) is not False or not options),
+        "host": bool(ask.get("host")), "always": always, "urgent": bool(detail.get("urgent")),
+    }
+
+
+def answer_batch(asks: list[dict], items: list[dict], *, via: str, project_id: str | None = None, refusals: dict[str, str] | None = None, late: dict[str, dict] | None = None) -> dict:
+    """POST …/asks/answer as the host answers it: each item its own outcome, the first answer winning.
+
+    ``late`` holds requests that were answered elsewhere a moment before the send (the phone,
+    Telegram), with that answer's resolution; ``refusals`` approvals the host takes and cannot carry out.
+    """
+    results: list[dict] = []
+    for item in items:
+        ask = next((a for a in asks if a["id"] == item.get("ask_id")), None)
+        if ask is None:
+            results.append({"ask_id": item.get("ask_id"), "state": "missing", "error": "no such request"})
+            continue
+        base = {"ask_id": ask["id"], "short_id": ask["short_id"]}
+        if project_id is not None and ask["project_id"] != project_id:
+            results.append({**base, "state": "refused", "error": "that request is not this project's"})
+            continue
+        if ask["id"] in (late or {}) and not ask["resolved_at"]:
+            ask.update(resolved_at="2026-09-25T09:59:00Z", resolved_by="operator", resolution=late[ask["id"]])  # type: ignore[index]
+        if ask["resolved_at"]:
+            results.append({**base, "state": "conflict", "answered_by": ask["resolved_by"], "withdrawn": ask["resolved_by"] == "system", "ask": ask})
+            continue
+        resolution = {"allow": item.get("allow"), "text": item.get("text") or "", "selected": item.get("selected") or [], "via": via, "batch": "b-stub"}
+        if item.get("note"):
+            resolution["note"] = item["note"]
+        refused = (refusals or {}).get(ask["id"], "")
+        if refused:
+            resolution.update(outcome=f"approved, but the folder could not be added: {refused}", error=refused)
+        ask.update(resolved_at="2026-09-25T10:00:00Z", resolved_by="operator", resolution=resolution)
+        results.append({**base, "state": "answered", "delivered": not refused, "error": refused, "ask": ask})
+    return {"batch_id": "b-stub", "results": results}
+
+
 class FocusStub:
     """A project with its orchestrator switched on, as focus mode reads it, kept between requests.
 
@@ -625,6 +676,10 @@ class FocusStub:
         self.terminals = terminals
         self.messages = messages
         self.answers: list[tuple[str, dict]] = []
+        self.batches: list[tuple[str, list[dict]]] = []
+        """Every batch the Questions tab sent: the path, and the items exactly as posted."""
+        self.late: dict[str, dict] = {}
+        """Requests answered elsewhere a moment before the next send, with that answer."""
         self.refusals: dict[str, str] = {}
         """Requests whose approval the host takes and then cannot carry out, by id, with the reason
         it answers: a folder the host refuses to add."""
@@ -660,6 +715,24 @@ class FocusStub:
             if params.get("routed_to"):
                 rows = [a for a in rows if a["routed_to"] == params["routed_to"]]
             return 200, {"asks": rows}
+        if path == "/api/questions" and method == "GET":
+            names = {m["id"]: m for m in self.team.staff}
+            orchestrated = {p["id"] for p in self.projects if (p.get("settings") or {}).get("orchestrator", {}).get("enabled")}
+            wanted = params.get("project")
+            rows = [a for a in self.asks if not a["resolved_at"] and a["routed_to"] == "operator" and (a["project_id"] == wanted if wanted else a["project_id"] in orchestrated)]
+            rows.sort(key=lambda a: a["created_at"])
+
+            def view(a: dict) -> dict:
+                member = names.get(a.get("staff_id") or "")
+                project = self.project(a["project_id"]) or {}
+                return question_view(a, project.get("name", ""), asker=member["name"] if member else "", always=bool(member) and a["kind"] == "permission" and member["harness"] != "daedalus")
+
+            return 200, {"questions": [view(a) for a in rows]}
+        if (path == "/api/asks/answer" or (path.startswith("/api/projects/") and path.endswith("/asks/answer"))) and method == "POST":
+            items = list(body or []) if isinstance(body, list) else []
+            self.batches.append((path, items))
+            pid = path.split("/")[3] if path.startswith("/api/projects/") else None
+            return 200, answer_batch(self.asks, items, via="project" if pid else "main", project_id=pid, refusals=self.refusals, late=self.late)
         if path.startswith("/api/asks/") and path.endswith("/answer") and method == "POST":
             ref = path.split("/")[3]
             ask = next((a for a in self.asks if ref in (a["id"], a["short_id"])), None)
@@ -880,6 +953,31 @@ class FocusStub:
         }
         return permission
 
+    def questions_of_bakery(self, lang: str = "en") -> list[dict]:
+        """What the Questions tab has to show beside the discount question: a batch the orchestrator
+        asked (several options at once, one long enough to fold, one that blocks the work), a folder it
+        wants, and what staff wait on — Ira's permission, which her CLI can grant always, and Lev's
+        question the orchestrator escalated with a suggestion."""
+        words = FOCUS_WORDS[lang]
+        pid = self.projects[0]["id"]
+
+        def ask(id_: str, short: str, at: str, **over: object) -> dict:
+            row = {"id": id_, "short_id": short, "project_id": pid, "origin": "orchestrator", "kind": "question", "staff_id": None, "staff_session_id": None, "task_id": None,
+                   "request_ref": "", "title": "", "text": "", "detail": {}, "routed_to": "operator", "suggestion": "", "created_at": at, "routed_at": at,
+                   "resolved_at": None, "resolved_by": None, "resolution": {}}
+            row.update(over)
+            return row
+
+        added = [
+            ask("ask-pay", "qp4y01", "2026-09-24T09:56:00Z", title=words["title.pay"], text=words["ask.pay"], detail={"options": ["Stripe", "PayPal", words["cash"]], "multi": True}),
+            ask("ask-open", "qo9d02", "2026-09-24T09:56:30Z", title=words["title.open"], text=words["ask.open"], detail={"urgent": True}),
+            ask("ask-labs", "qf0ld3", "2026-09-24T09:57:00Z", kind="folder", title="", text="Add the host folder /home/operator/work/labs to Bakery 2.0? It is also in the project Labs.", detail={"options": ["Add", "Don't add"], "path": "/home/operator/work/labs", "env": "host"}),
+            ask("ask-push", "qg1t04", "2026-09-24T09:52:00Z", origin="staff", kind="permission", staff_id="st-ira", staff_session_id="ss-ira", task_id="t-checkout", text="Exec: git push origin agent/ira/checkout"),
+            ask("ask-font", "qf9n05", "2026-09-24T09:50:00Z", origin="staff", staff_id="st-lev", staff_session_id="ss-lev", text=words["ask.font"], detail={"options": ["Inter", "Georgia"]}, suggestion="Georgia", routed_at="2026-09-24T10:00:00Z"),
+        ]
+        self.asks.extend(added)
+        return added
+
     def ask_from_ira(self, lang: str = "en") -> dict:
         """Ira's own question, escalated to the operator and older than the orchestrator's: the one a
         phone's banner shows first (M8). She works in a terminal of her own, which the phone opens."""
@@ -968,7 +1066,7 @@ class FocusStub:
         board = BoardStub({**bakery}, staff=[{k: m[k] for k in ("id", "name", "color", "harness")} for m in staff], tasks=tasks, needs_you=needs)
 
         asks = [
-            {"id": "ask-spring", "short_id": "q4r8tz", "project_id": pid, "origin": "orchestrator", "kind": "question", "staff_id": None, "staff_session_id": None, "task_id": "t-checkout", "request_ref": "", "text": words["ask.spring"], "detail": {"options": [words["ask.before"], words["ask.after"]]}, "routed_to": "operator", "suggestion": "", "created_at": "2026-09-24T09:55:00Z", "routed_at": "2026-09-24T09:55:00Z", "resolved_at": None, "resolved_by": None, "resolution": {}},
+            {"id": "ask-spring", "short_id": "q4r8tz", "project_id": pid, "origin": "orchestrator", "kind": "question", "staff_id": None, "staff_session_id": None, "task_id": "t-checkout", "request_ref": "", "title": words["title.spring"], "text": words["ask.spring"], "detail": {"options": [words["ask.before"], words["ask.after"]]}, "routed_to": "operator", "suggestion": "", "created_at": "2026-09-24T09:55:00Z", "routed_at": "2026-09-24T09:55:00Z", "resolved_at": None, "resolved_by": None, "resolution": {}},
             {"id": "ask-grammy", "short_id": "qk7m2x", "project_id": pid, "origin": "staff", "kind": "permission", "staff_id": "st-naya", "staff_session_id": "ss-naya", "task_id": "t-bot", "request_ref": "", "text": "Exec: npm install grammy", "detail": {}, "routed_to": "orchestrator", "suggestion": "", "created_at": "2026-09-24T09:53:00Z", "routed_at": "2026-09-24T09:53:00Z", "resolved_at": "2026-09-24T09:54:00Z", "resolved_by": "orchestrator", "resolution": {"allow": True, "text": "", "selected": [], "via": "orchestrator"}},
         ]
 
@@ -1001,7 +1099,7 @@ class FocusStub:
             {"role": "assistant", "seq": 15, "text": "", "thinking": "", "tool_calls": [
                 call("c6", "ReadStaff", staff="Max", what="last"),
                 call("c7", "Answer", request_id="qk7m2x", allow=True, basis="installing dependencies in the bot folder"),
-                call("c8", "AskOperator", question=words["ask.spring"], options=[words["ask.before"], words["ask.after"]], task_id="t-checkout"),
+                call("c8", "AskOperator", title=words["title.spring"], text=words["ask.spring"], options=[words["ask.before"], words["ask.after"]], task_id="t-checkout"),
             ], "tool_results": [], "created_at": "2026-09-24T09:54:20Z"},
             {"role": "tool", "seq": 16, "text": "", "thinking": "", "tool_calls": [], "tool_results": [
                 result("c6", "3 files changed, tests green"), result("c7", "answered qk7m2x: allowed"), result("c8", "asked the operator as [q4r8tz]; do not wait — the answer arrives as an event in a later wake-up"),
@@ -1194,6 +1292,12 @@ FOCUS_WORDS: dict[str, dict[str, str]] = {
         "orch.after": "Naya may install the bot's dependencies: the brief allows it. The discount question is yours — Ira's checkout waits on it.",
         "ask.spring": "SPRING10: is the discount taken before delivery or after?",
         "ask.before": "Before delivery", "ask.after": "After delivery",
+        "title.spring": "SPRING10 discount",
+        "title.pay": "Payment providers", "cash": "Cash on pickup",
+        "ask.pay": "Ira's checkout needs to know which providers to wire up at launch. Each one costs a day of work:\n\n- **Stripe** — cards, Apple Pay and Google Pay; the fees are 1.5 % + 20 p\n- **PayPal** — some regulars asked for it; a separate sandbox account is needed\n- **Cash on pickup** — no fees, but the order is only confirmed at the counter\n\nChoose any. The ones you leave out can be added later without touching the checkout's layout.\n\nThe brief says nothing about payments, so this is yours.",
+        "title.open": "Opening day",
+        "ask.open": "When does the new site go live? A date or a weekday is enough — the bot and the menu are planned backwards from it.",
+        "ask.font": "Which typeface for the menu headings?",
         "watch.note": "Max's turn finished → wake me",
         "task.checkout": "Checkout", "task.bot": "Notify: bot", "task.endpoint": "Notify: endpoint", "task.photos": "Menu photo captions", "task.hours": "Opening hours",
         "ira.role": "front end", "naya.role": "the baker's bot", "lev.role": "review", "olga.role": "copy", "link.name": "Menu link check",
@@ -1217,6 +1321,12 @@ FOCUS_WORDS: dict[str, dict[str, str]] = {
         "orch.after": "Нае можно ставить зависимости бота: это есть в брифе. Вопрос о скидке — ваш, от него зависит оформление заказа у Иры.",
         "ask.spring": "SPRING10: скидка до доставки или после?",
         "ask.before": "До доставки", "ask.after": "После доставки",
+        "title.spring": "Скидка SPRING10",
+        "title.pay": "Способы оплаты", "cash": "Наличными при получении",
+        "ask.pay": "Ире для оформления заказа нужно знать, какие способы оплаты подключить к запуску. Каждый — это день работы:\n\n- **Stripe** — карты, Apple Pay и Google Pay; комиссия 1,5 % + 20 ₽\n- **PayPal** — о нём просили постоянные клиенты; нужен отдельный тестовый аккаунт\n- **Наличными при получении** — без комиссии, но заказ подтверждается только на кассе\n\nМожно выбрать несколько. Остальные можно добавить позже, не трогая вёрстку оформления.\n\nВ брифе про оплату ничего нет, поэтому решать вам.",
+        "title.open": "День открытия",
+        "ask.open": "Когда запускаем новый сайт? Достаточно даты или дня недели — бот и меню планируются от этой даты.",
+        "ask.font": "Какой шрифт для заголовков меню?",
         "watch.note": "ход Макса завершён → разбудить меня",
         "task.checkout": "Оформление заказа", "task.bot": "Уведомление: бот", "task.endpoint": "Уведомление: эндпоинт", "task.photos": "Подписи к фото в меню", "task.hours": "Часы работы",
         "ira.role": "фронтенд", "naya.role": "бот пекаря", "lev.role": "ревью", "olga.role": "тексты", "link.name": "Проверка ссылок меню",
@@ -1307,6 +1417,15 @@ class MainStub:
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, object] | None:
         if path == "/api/main" and method == "GET":
             return 200, self.view()
+        if path == "/api/questions" and method == "GET":
+            rows = sorted((x for x in self.asks if not x["resolved_at"]), key=lambda x: x["created_at"])
+            return 200, {"questions": [question_view(x, x["project_name"], asker=x["asker"]) for x in rows]}
+        if path == "/api/asks/answer" and method == "POST":
+            items = list(body or []) if isinstance(body, list) else []
+            self.posts.append((path, {"items": items}))
+            # Answered on the phone a moment earlier: the first answer wins.
+            late = {"ask-late": {"selected": [self.words["yes"]], "via": "telegram"}}
+            return 200, answer_batch(self.asks, items, via="main", late=late)
         if path == "/api/main" and method == "POST":
             self.opened = True
             self.posts.append((path, {}))

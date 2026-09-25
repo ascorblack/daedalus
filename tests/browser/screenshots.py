@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
+    FOCUS_WORDS,
     BoardStub,
     FocusStub,
     HarnessesStub,
@@ -883,9 +884,9 @@ PHONE = {"width": 390, "height": 844}
 # picked by class or by data, which no translation moves.
 WORDS = {
     "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details", "role": "Writes the delivery page",
-           "permission": "waiting for permission · 1 min", "answer": "Answer", "checkout": "Checkout page"},
+           "permission": "waiting for permission · 1 min", "answer": "Answer", "checkout": "Checkout page", "q.note": "like last spring"},
     "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения", "role": "Пишет страницу доставки",
-           "permission": "ждёт разрешения · 1 мин", "answer": "Ответить", "checkout": "Оформление заказа"},
+           "permission": "ждёт разрешения · 1 мин", "answer": "Ответить", "checkout": "Оформление заказа", "q.note": "как прошлой весной"},
 }
 
 
@@ -1435,8 +1436,28 @@ def open_focus_brief(page: Page) -> None:
     page.wait_for_selector(".panel .pboard.embedded .pcard", timeout=5000)
 
 
+def draft_questions(page: Page) -> None:
+    """The Questions tab half answered: an option chosen with a note, two providers of three, and a
+    refusal whose reason is still to be written — two cards ready, one a draft."""
+    words = FOCUS_WORDS[LANG]
+    page.locator(f".q-card[data-ask='q4r8tz'] .q-chip[data-option=\"{words['ask.before']}\"]").click()
+    page.locator(".q-card[data-ask='q4r8tz'] .q-field").fill(word("q.note"))
+    page.locator(".q-card[data-ask='qp4y01'] .q-chip[data-option='Stripe']").click()
+    page.locator(f".q-card[data-ask='qp4y01'] .q-chip[data-option=\"{words['cash']}\"]").click()
+    page.locator(".q-card[data-ask='qg1t04'] .q-chip[data-option='because']").click()
+    page.locator(".questions-list").evaluate("(el) => el.closest('.panel-body').scrollTo(0, 0)")
+
+
+def open_phone_questions(page: Page) -> None:
+    """On a phone the header's button opens the tab as a sheet."""
+    page.locator(".chat-head .questions-headbtn").tap()
+    page.wait_for_selector(".panel-sheet .q-card", timeout=5000)
+    page.locator(".panel-sheet .q-card[data-ask='qg1t04'] .q-chip[data-option='allow']").tap()
+
+
 def run_focus() -> int:
-    """A project's focus mode: the orchestrator's chat with the board beside it, and the journal."""
+    """A project's focus mode: the orchestrator's chat with the board beside it, and the journal; its
+    Questions tab half answered, and the same tab as a phone's sheet."""
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=CHROMIUM)
@@ -1448,7 +1469,19 @@ def run_focus() -> int:
         shot(page, "project-focus", f"project/{pid}?panel=board", wait=".chat.in-project .event-card", before=open_focus_brief, settle=700)
         shot(page, "project-journal", f"project/{pid}/journal", wait=".journal-entry", settle=500)
         shot(page, "project-staff", f"project/{pid}/s/sess-lev?panel=brief", wait=".staff-head", settle=700)
+        asking = FocusStub.bakery(LANG)
+        asking.questions_of_bakery(LANG)
+        page = desk.new_page()
+        page.route("**/api/**", focus_stub(asking))
+        shot(page, "project-questions", f"project/{pid}?panel=questions", wait=".questions-panel .q-card", before=draft_questions, settle=700)
         desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        asking = FocusStub.bakery(LANG)
+        asking.questions_of_bakery(LANG)
+        page = phone.new_page()
+        page.route("**/api/**", focus_stub(asking))
+        shot(page, "phone-questions", f"project/{pid}", wait=".chat-head .questions-headbtn", before=open_phone_questions, settle=900)
+        phone.close()
         browser.close()
     return UNHANDLED.report()
 
@@ -1472,18 +1505,17 @@ def run_main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=CHROMIUM)
         desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
-        # The side panel closed: the picture is of the questions and the dispatches, not the session's details.
-        desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', '0'); } catch (e) {}")
+        # The panel beside the chat opens on every project's questions, grouped by project.
         page = desk.new_page()
         page.route("**/api/**", handle)
-        shot(page, "main", "orchestration", wait=".main-flow .ask-card", settle=900)
+        shot(page, "main", "orchestration", wait=".questions-panel .q-card", settle=900)
         desk.close()
         # On a phone the Orchestration tab lands on the list, Main first; the chat is a detail of it.
         phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
         page = phone.new_page()
         page.route("**/api/**", handle)
         shot(page, "phone-orchestration", "orchestration/projects", wait=".orch-list .main-entry", settle=900)
-        shot(page, "phone-main", "orchestration", wait=".main-flow .ask-card", settle=900)
+        shot(page, "phone-main", "orchestration", wait=".timeline > .questions-line", settle=900)
         phone.close()
         browser.close()
     return UNHANDLED.report()

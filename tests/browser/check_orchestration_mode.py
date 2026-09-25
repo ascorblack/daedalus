@@ -246,7 +246,7 @@ def phone(page: Page, lang: str) -> None:
     # Main opens the chat as a detail of the list: no tab bar, and its back returns to the list.
     listing.locator(".main-entry").click()
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
-    expect(page.locator(".main-flow .ask-card").first).to_be_visible()
+    expect(page.locator(".timeline > .questions-line")).to_be_visible()
     expect(page.locator("nav.tabbar")).to_have_count(0)
     fits(page, f"{lang} phone main chat")
     page.locator(".chat-head > button.iconbtn").first.click()

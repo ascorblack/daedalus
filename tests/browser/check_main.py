@@ -3,11 +3,11 @@
 What is checked is what the operator relies on. On a desktop its chat is orchestration mode's home,
 reached by the rail's Orchestration item; in that mode its entry comes first in the column, with a
 pill that counts the questions waiting. On a phone the Orchestration tab opens the list, Main its
-first row, and the chat is a detail of it with a back and no tab bar. The chat shows the questions
-the projects put to the operator as cards grouped by project, in the conversation's flow after its
-latest turn — there is no strip over the chat — with options as buttons, words of one's own, Allow
-and Deny; answering one posts exactly the answer with the window it came from, after which the card
-leaves the flow. A card that lost to an answer given elsewhere says so. The work under way is a card
+first row, and the chat is a detail of it with a back and no tab bar. The questions the projects put
+to the operator wait in the panel's Questions tab, grouped by project, and the chat's flow carries
+one line for them after its latest turn — there is no strip over the chat, and no card per question.
+Sending from the tab posts exactly the answers to the main chat's batch route, after which the cards
+leave; one that lost to an answer given elsewhere says so. The work under way is a card
 per dispatch with its state and the project's last word, and it can be cancelled; a finished
 dispatch is no card, only the line of the reports that closed it. A project being set up offers
 "Finish setup". Settings → Models has its own model choice with the mid-tier preset preselected.
@@ -34,11 +34,11 @@ BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 WORDS = {
-    "en": {"title": "Main orchestrator", "pill": "3 questions", "pill2": "2 questions", "conflict": "Already answered elsewhere",
-           "stalled": "stalled", "done": "done", "finish": "Finish setup", "confirm": "Create this project?", "host": "answered here only", "placeholder": "Say which project and what to do…",
+    "en": {"title": "Main orchestrator", "pill": "3 questions", "pill1": "1 question", "line": "3 questions waiting", "newproject": "New project", "conflict": "Already answered elsewhere",
+           "stalled": "stalled", "done": "done", "finish": "Finish setup", "confirm": "The main orchestrator asks", "placeholder": "Say which project and what to do…",
            "middle": "mid-tier", "cancel": "Cancel", "going": "under way"},
-    "ru": {"title": "Главный оркестратор", "pill": "3 вопроса", "pill2": "2 вопроса", "conflict": "Уже ответили в другом месте",
-           "stalled": "застряло", "done": "готово", "finish": "Завершить настройку", "confirm": "Создать этот проект?", "host": "ответить можно только здесь", "placeholder": "Какой проект и что сделать…",
+    "ru": {"title": "Главный оркестратор", "pill": "3 вопроса", "pill1": "1 вопрос", "line": "3 вопроса ждут ответа", "newproject": "Новый проект", "conflict": "Уже ответили в другом месте",
+           "stalled": "застряло", "done": "готово", "finish": "Завершить настройку", "confirm": "Спрашивает главный оркестратор", "placeholder": "Какой проект и что сделать…",
            "middle": "средняя", "cancel": "Отменить", "going": "в работе"},
 }
 
@@ -85,20 +85,29 @@ def desktop(page: Page, lang: str) -> None:
     expect(entry.locator(".main-pill")).to_have_text(words["pill"])
     expect(entry).to_have_class(re.compile(r"\bcurrent\b"))
 
-    # The cards are in the conversation's flow, after its latest turn; nothing stands over the chat.
+    # The dispatches are in the conversation's flow, after its latest turn, and after them the one
+    # line for what waits; nothing stands over the chat, and no question is a card in it.
     board = page.locator(".chat .timeline > .main-flow")
     expect(board).to_be_visible()
-    assert board.evaluate("el => el === el.parentElement.lastElementChild"), "the cards are not after the latest turn"
+    line = page.locator(".chat .timeline > .questions-line")
+    expect(line).to_contain_text(words["line"])
+    assert line.evaluate("el => el === el.parentElement.lastElementChild && el.previousElementSibling.classList.contains('main-flow')"), "the line is not after the flow"
     expect(page.locator(".main-board, .main-answered, .main-closed")).to_have_count(0)
-    groups = board.locator(".main-ask-group")
+    expect(page.locator(".timeline .q-card, .timeline .ask-card")).to_have_count(0)
+    # The panel leads with every project's questions, grouped by project, oldest first.
+    tab = page.locator(".panel .panel-tab[data-tab='questions']")
+    expect(tab).to_have_attribute("aria-selected", "true")
+    expect(tab.locator(".count")).to_have_text("3")
+    groups = page.locator(".panel .questions-group")
     expect(groups).to_have_count(2)
-    expect(groups.nth(0).locator(".main-group-head")).to_have_text("Bakery")
-    expect(groups.nth(0).locator(".ask-card")).to_have_count(2)
-    confirm = board.locator('.ask-card[data-ask="q3nw00"]')
+    expect(groups.nth(0).locator(".questions-group-head")).to_contain_text("Bakery")
+    expect(groups.nth(0).locator(".q-card")).to_have_count(2)
+    expect(groups.nth(1).locator(".questions-group-head")).to_contain_text(words["newproject"])
+    confirm = page.locator('.panel .q-card[data-ask="q3nw00"]')
     expect(confirm).to_have_class(re.compile(r"\bhost\b"))
-    expect(confirm.locator(".ask-head")).to_contain_text(words["confirm"])
-    expect(confirm.locator(".ask-host")).to_contain_text(words["host"])
-    expect(confirm.locator(".ask-own")).to_have_count(0)
+    expect(confirm.locator(".q-meta")).to_contain_text(words["confirm"])
+    expect(confirm.locator(".q-flag.host")).to_be_visible()
+    expect(confirm.locator(".q-field")).to_have_count(0)
     # A request answered earlier is nowhere: not a card, not a line.
     expect(page.locator('[data-ask="q4ol00"]')).to_have_count(0)
 
@@ -116,19 +125,18 @@ def desktop(page: Page, lang: str) -> None:
     expect(page.locator(".composer textarea, .composer [contenteditable]").first).to_have_attribute("placeholder", words["placeholder"])
     fits(page, f"{lang} main chat")
 
-    # Answer with an option: exactly that, from this window; the card then leaves the flow.
-    board.locator('.ask-card[data-ask="q1db00"] .ask-options button', has_text="Postgres").click()
-    expect(page.locator('[data-ask="q1db00"]')).to_have_count(0)
-    assert ("/api/asks/ask-db/answer", {"selected": ["Postgres"], "window": "main"}) in main.posts, main.posts
-    expect(entry.locator(".main-pill")).to_have_text(words["pill2"])
-
-    # A card that lost to the phone: told so, then gone, the answer given elsewhere standing.
-    late = board.locator('.ask-card[data-ask="q2lt00"]')
-    late.locator(".ask-own .field").fill("Only in summer")
-    late.locator(".ask-own button[type=submit]").click()
-    expect(page.get_by_text(words["conflict"]).first).to_be_visible()
+    # Answer one with an option and one in words, and send them together to the main chat's route: the
+    # first leaves, the second lost to the phone and says so, the answer given elsewhere standing.
+    page.locator('.panel .q-card[data-ask="q1db00"] .q-chip', has_text="Postgres").click()
+    late = page.locator('.panel .q-card[data-ask="q2lt00"]')
+    late.locator(".q-field").fill("Only in summer")
+    page.locator(".panel .questions-send-btn").click()
+    expect(page.locator('.panel [data-ask="q1db00"]')).to_have_count(0, timeout=10000)
+    assert ("/api/asks/answer", {"items": [{"ask_id": "ask-db", "selected": ["Postgres"]}, {"ask_id": "ask-late", "text": "Only in summer"}]}) in main.posts, main.posts
+    expect(late.locator(".q-fate")).to_contain_text(words["conflict"])
+    expect(entry.locator(".main-pill")).to_have_text(words["pill1"])
+    late.locator(".q-clear").click()
     expect(page.locator('[data-ask="q2lt00"]')).to_have_count(0)
-    assert ("/api/asks/ask-late/answer", {"text": "Only in summer", "window": "main"}) in main.posts, main.posts
 
     # Finish the setup by hand, and cancel a dispatch after confirming.
     board.locator(".main-setup button").click()
@@ -164,16 +172,22 @@ def phone(page: Page, lang: str) -> None:
     first = page.locator(".orch-list > :first-child .main-entry")
     expect(first).to_be_visible()
     expect(first.locator(".main-pill")).to_have_text(WORDS[lang]["pill"])
-    # The chat is a detail of the list: a back of its own, no tab bar, the cards in its flow.
+    # The chat is a detail of the list: a back of its own, no tab bar, the line in its flow and the
+    # questions a sheet away, behind the header's button.
     first.click()
     page.wait_for_url(re.compile(r"/app/orchestration(\?|$)"))
-    expect(page.locator(".timeline > .main-flow .ask-card").first).to_be_visible()
+    expect(page.locator(".timeline > .questions-line")).to_contain_text(WORDS[lang]["line"])
     expect(page.locator("nav.tabbar")).to_have_count(0)
     expect(page.locator(".main-board")).to_have_count(0)
     fits(page, f"{lang} phone main chat")
-    for button in page.locator(".main-flow .ask-options button").all()[:2]:
-        box = button.bounding_box()
-        assert box and box["height"] >= 32, f"{lang} phone: a card button is {box and box['height']}px tall"
+    page.locator(".chat-head .questions-headbtn").tap()
+    expect(page.locator(".panel-sheet .questions-group")).to_have_count(2)
+    for chip in page.locator(".panel-sheet .q-chip").all()[:2]:
+        box = chip.bounding_box()
+        assert box and box["height"] >= 39.5, f"{lang} phone: a chip is {box and box['height']}px tall"
+    fits(page, f"{lang} phone questions")
+    page.locator(".panel-sheet .sheet-backdrop, .panel-sheet").first.press("Escape")
+    expect(page.locator(".panel-sheet")).to_have_count(0)
     page.locator(".chat-head > button.iconbtn").first.click()
     page.wait_for_url("**/app/orchestration/projects**")
     expect(page.locator(".orch-list .main-entry")).to_be_visible()

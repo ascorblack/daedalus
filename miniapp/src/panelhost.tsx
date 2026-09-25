@@ -59,8 +59,9 @@ export type PanelHostProps = {
   details?: (ids: string) => ReactNode;
   files?: ReactNode;
   jobs?: ReactNode;
-  /** The project's tabs in its focus mode: the board, the brief, the wake-ups, the folders. */
-  project?: Partial<Record<PanelTab, ReactNode>>;
+  /** The tabs whose bodies are not a session's own: a project's board, brief, wake-ups and folders in
+   *  its focus mode, and the questions waiting for the operator. */
+  pages?: Partial<Record<PanelTab, ReactNode>>;
   /** A number on a tab: subagents working on Details, jobs on Jobs. */
   badges?: Partial<Record<PanelTab, number>>;
   /** Phones: the tabs in a full sheet instead of a column. */
@@ -133,7 +134,7 @@ function Column(props: HostProps) {
   );
 }
 
-const TAB_ICON: Record<PanelTab, IconName> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal", board: "board", brief: "pen", wakeups: "clock", folders: "folder" };
+const TAB_ICON: Record<PanelTab, IconName> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal", board: "board", brief: "pen", wakeups: "clock", folders: "folder", questions: "ask" };
 
 function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local, tabs = PANEL_TABS }: HostProps & { inSheet?: boolean }) {
   const strip = useRef<HTMLDivElement>(null);
@@ -155,7 +156,7 @@ function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local, tabs = 
             <button key={tab} role="tab" id={`${local.ids}-tab-${tab}`} aria-controls={`${local.ids}-body`} data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
               <Icon name={TAB_ICON[tab]} size={14} />
               <span>{t(`panel.tab.${tab}`)}</span>
-              {n > 0 && <span className="count">{n}</span>}
+              {n > 0 && <span className={`count ${tab === "questions" ? "attn" : ""}`}>{n}</span>}
             </button>
           );
         })}
@@ -233,7 +234,7 @@ function Body(props: HostProps) {
       {props.files !== undefined && <div ref={files} className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" drag={treeDrag} />}</div>}
       {state.tab === "preview" && (entry ? <Viewer key={`${entry.base}:${entry.path}:${entry.lines ?? ""}:${local.gen}`} src={entry as PreviewSource} onInfo={local.setInfo} onNavigation={local.setNav} className="panel-viewer" /> : <div className="empty">{t("panel.preview.empty")}</div>)}
       {state.tab === "jobs" && props.jobs}
-      {state.tab && props.project?.[state.tab]}
+      {state.tab && props.pages?.[state.tab]}
     </div>
   );
 }

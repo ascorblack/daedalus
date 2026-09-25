@@ -606,14 +606,18 @@ export type Ask = {
   staff_id: string | null;
   task_id: string | null;
   text: string;
-  detail: { options?: string[]; urgent?: boolean; [k: string]: unknown };
+  /** A few words naming the decision; empty on older requests and staff requests. */
+  title?: string;
+  /** The title, or the text's first line: what a list shows the request by. */
+  heading?: string;
+  detail: { options?: string[]; urgent?: boolean; multi?: boolean; allow_free?: boolean; [k: string]: unknown };
   routed_to: "orchestrator" | "operator";
   suggestion: string;
   created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
   /** ``outcome`` is what came of an approval, in the host's words; ``error`` the bare reason it failed. */
-  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string; closed?: string; outcome?: string; error?: string };
+  resolution: { allow?: boolean | null; text?: string; selected?: string[]; note?: string; via?: string; closed?: string; by?: string; outcome?: string; error?: string };
   /** The main orchestrator's dispatch this request is shown under, in its chat as well as the project's. */
   dispatch_id?: string | null;
 };
@@ -640,6 +644,36 @@ export type DispatchMessage = { id: number; dispatch_id: string; at: string; aut
 
 /** A request as the main chat shows it: the row, the project's name, who asked, and whether it acts on the host. */
 export type MainAsk = Ask & { project_name: string; asker: string; host: boolean };
+
+/** One entry of the operator's list (GET /api/questions): a request with what the list draws it by —
+ *  its heading, who asks, its options, whether several may be chosen or words given, whether it acts
+ *  on the host, whether "Always" exists for it — and the section it sits in. */
+export type WaitingQuestion = Ask & {
+  project_name: string;
+  asker: string;
+  section: "requests" | "questions";
+  options: string[];
+  multi: boolean;
+  allow_free: boolean;
+  host: boolean;
+  always: boolean;
+  urgent: boolean;
+};
+
+/** One answer of a batch sent from the list. */
+export type QuestionAnswer = { ask_id: string; selected?: string[]; text?: string; note?: string; allow?: boolean; always?: boolean };
+
+/** What the host did with one answer of a batch. */
+export type QuestionOutcome = {
+  ask_id: string;
+  short_id?: string;
+  state: "answered" | "conflict" | "refused" | "missing";
+  delivered?: boolean;
+  error?: string;
+  answered_by?: string;
+  withdrawn?: boolean;
+  ask?: Ask;
+};
 
 /** What GET /api/main answers: the main orchestrator's chat as the app draws it. */
 export type MainView = { session_id: string; dispatches: Dispatch[]; asks: MainAsk[]; questions: number; setup: { project_id: string; name: string }[] };
