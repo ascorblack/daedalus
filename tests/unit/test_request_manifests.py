@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 
+import pytest
+from protocore.conformance.request_manifest import RequestManifestSinkConformance
 from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
 from protocore.contracts.observability import build_request_manifest
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolDefinition, ToolParameterSchema
@@ -36,8 +39,8 @@ async def test_request_manifest_is_durable_and_large_values_are_by_reference(tmp
             inline_value_max_bytes=64,
         )
 
-        await store.record_request_manifest(manifest, bodies)
-        await store.record_request_manifest(manifest, bodies)
+        await store.record_request_manifest(manifest=manifest, manifest_id=manifest.manifest_id, bodies=bodies)
+        await store.record_request_manifest(manifest=manifest, manifest_id=manifest.manifest_id, bodies=bodies)
 
         rows = await db.fetchall("SELECT manifest FROM request_manifests")
         assert len(rows) == 1
@@ -68,3 +71,20 @@ async def test_request_manifest_cascades_with_session(tmp_path) -> None:
         assert plan is not None and "request_manifests_by_session" in str(plan["detail"])
     finally:
         await db.close()
+
+
+class TestTheStoreKeepsTheCoresSinkContract(RequestManifestSinkConformance):
+    """The core's own conformance suite, run against this store.
+
+    The store once took the manifest and bodies positionally while the core passed them by keyword
+    together with `manifest_id`, so every call raised inside the core and no manifest was kept.
+    """
+
+    @pytest.fixture
+    async def subject(self, tmp_path) -> AsyncIterator[RequestManifestStore]:
+        db = Database(tmp_path / "state.db")
+        await db.open()
+        try:
+            yield RequestManifestStore(db, FileBlobStore(tmp_path / "blobs"), tenant_id="tenant")
+        finally:
+            await db.close()

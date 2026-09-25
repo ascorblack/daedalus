@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,9 +23,14 @@ class RequestManifestStore:
 
     async def record_request_manifest(
         self,
+        *,
         manifest: RequestManifest,
-        bodies: dict[str, bytes],
+        manifest_id: str,
+        bodies: Mapping[str, bytes],
     ) -> None:
+        # The signature is the core's sink contract, keyword for keyword. A narrower one made every
+        # call raise a TypeError the core logs and swallows, so no manifest was recorded at all.
+        # `manifest_id` repeats `manifest.manifest_id`; the stored id is the manifest's own.
         refs: dict[str, str] = {}
         for slot, body in bodies.items():
             meta = await self.blobs.put(
