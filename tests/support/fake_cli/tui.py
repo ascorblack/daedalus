@@ -849,11 +849,14 @@ async def run_command_hook(command: str, payload: Any, timeout: float) -> tuple[
 class McpClient:
     """The client side of a stdio MCP server, as a CLI starts one from its MCP configuration."""
 
-    def __init__(self, name: str, command: str, args: list[str], env: Mapping[str, str]) -> None:
+    def __init__(self, name: str, command: str, args: list[str], env: Mapping[str, str], *, base_env: Mapping[str, str] | None = None) -> None:
         self.name = name
         self.command = command
         self.args = args
         self.env = dict(env)
+        self.base_env = dict(base_env) if base_env is not None else None
+        """What the server inherits besides ``env``: everything when ``None``, as most CLIs do; Codex
+        passes a filtered environment."""
         self.proc: asyncio.subprocess.Process | None = None
         self.tools: list[str] = []
         self.error = ""
@@ -865,7 +868,7 @@ class McpClient:
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 self.command, *self.args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, env={**os.environ, **self.env}, limit=1 << 22,
+                stderr=asyncio.subprocess.DEVNULL, env={**(os.environ if self.base_env is None else self.base_env), **self.env}, limit=1 << 22,
             )
         except OSError as exc:
             self.error = str(exc)

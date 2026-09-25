@@ -352,18 +352,26 @@ async def ask_operator(orch: Orchestrators, project: Project, session_id: str, *
         row = await orch.manager.db.fetchone("SELECT 1 FROM board_tasks WHERE id = ? AND project_id = ?", (task_id, project.id))
         if row is None:
             raise Refused(f"no task {task_id} on {project.name}'s board")
-    ask = await orch.open_request(project, session_id, kind="question", text=text[:8000], options=labels, detail={"urgent": bool(urgent)}, task_id=task_id)
-    if dispatch_id and await _has_column(orch, "asks", "dispatch_id"):
-        # The link that shows this question in the main orchestrator's chat. The column arrives with
-        # the dispatches; before it exists the argument is accepted and has nothing to link to.
-        await orch.manager.db.execute("UPDATE asks SET dispatch_id = ? WHERE id = ?", (dispatch_id.strip()[:64], ask.id))
-    return f"asked the operator as [{ask.short_id}]; do not wait — the answer arrives as an event in a later wake-up"
+    linked: str | None = None
+    if dispatch_id:
+        # The link that shows this question in the main orchestrator's chat as well as this one. It is
+        # checked here, so a question is never shown under another project's dispatch or a closed one.
+        dispatch = await orch.manager.dispatches.get(dispatch_id)
+        if dispatch is None or dispatch.project_id != project.id:
+            raise Refused(f"{project.name} has no dispatch {dispatch_id!r}; the state block lists its open dispatches")
+        if dispatch.status not in ("open", "blocked"):
+            raise Refused(f"dispatch {dispatch.id} is {dispatch.status}; ask without it")
+        linked = dispatch.id
+    ask = await orch.open_request(project, session_id, kind="question", text=text[:8000], options=labels, detail={"urgent": bool(urgent)}, task_id=task_id, dispatch_id=linked)
+    shown = " It is shown in the main orchestrator's chat too." if ask.dispatch_id else ""
+    return f"asked the operator as [{ask.short_id}]; do not wait — the answer arrives as an event in a later wake-up.{shown}"
 
 
 async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> str:
-    """``dispatch_id`` names the main orchestrator's hand-over this report answers. There is nothing to
-    record it in until the dispatches exist — they bring their own table, and closing a dispatch with a
-    done or blocked report is theirs to do — so until then it is accepted and not used."""
+    """``dispatch_id`` names the main orchestrator's hand-over this report answers: a done or blocked
+    report closes it, a progress or decision report is a message on it. Either reaches the main
+    orchestrator, which tells the operator in its chat; the project's own notification is then quiet,
+    so one report does not sound twice on the operator's phone."""
     body = text.strip()
     if not body:
         raise Refused("a report needs text")
@@ -372,9 +380,21 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
     if len(body) > REPORT_TEXT_MAX:
         raise Refused(f"a report is at most {REPORT_TEXT_MAX} characters; the journal holds the detail")
     headline = " ".join((title or "").split())[:120] or f"{project.name}: {kind}"
+    dispatches = orch.app.extensions.get("dispatches")
+    closed = ""
+    if dispatch_id:
+        if dispatches is None:
+            raise Refused("dispatches are not running on this installation; report without dispatch_id")
+        try:
+            dispatch = await dispatches.report(project, dispatch_id.strip(), kind=kind, text=body, title=(title or "").strip())
+        except ValueError as exc:
+            raise Refused(str(exc)) from exc
+        closed = f"; dispatch {dispatch.id} is {dispatch.status}" if dispatch.status != "open" else f"; added to dispatch {dispatch.id}"
     refs: dict[str, Any] = {"kind": kind}
     if task_id:
         refs["task_id"] = task_id
+    if dispatch_id:
+        refs["dispatch_id"] = dispatch_id.strip()
     entry = await orch.manager.projects.record(project.id, "orchestrator", "report", f"{headline}\n{body}", refs)
     notifications = orch.app.notifications
     if notifications is not None:
@@ -384,13 +404,14 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
             body,
             kind=f"project_report_{kind}",
             tone="warning" if kind == "blocked" else "ok" if kind == "done" else "info",
+            level="quiet" if dispatch_id else "normal",
             project_id=project.id,
             session_id=session_id,
             link=f"/app/project/{project.id}",
             source="project_report",
         ))
     await orch._changed(project.id, "journal", "orchestrator")
-    return f"reported (journal #{entry.id})"
+    return f"reported (journal #{entry.id}){closed}"
 
 
 # -- its own alarms -------------------------------------------------------------------------------
@@ -432,18 +453,6 @@ async def unwatch(orch: Orchestrators, project: Project, session_id: str, *, id:
         await orch._changed(project.id, "wakeups", "orchestrator")
         return f"wake-up {ref} cancelled"
     raise Refused(f"{project.name} has no wake-up or watch {ref!r}; the state block lists them with their ids")
-
-
-_COLUMNS: dict[tuple[int, str, str], bool] = {}
-
-
-async def _has_column(orch: Orchestrators, table: str, column: str) -> bool:
-    """Whether the schema has a column yet; asked once per process, since migrations run only at start."""
-    key = (id(orch.manager.db), table, column)
-    if key not in _COLUMNS:
-        rows = await orch.manager.db.fetchall(f"PRAGMA table_info({table})")  # noqa: S608 — the table name is this module's own
-        _COLUMNS[key] = any(r["name"] == column for r in rows)
-    return _COLUMNS[key]
 
 
 OPS: dict[str, Callable[..., Awaitable[str]]] = {

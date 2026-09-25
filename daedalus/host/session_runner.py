@@ -45,6 +45,7 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import (
+    DISPATCHER_TOOLS,
     ORCHESTRATOR_ONLY_TOOLS,
     ORCHESTRATOR_TOOLS,
     REASONING_EFFORTS,
@@ -79,6 +80,7 @@ from daedalus.providers.registry import ProviderRegistry
 from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
+from daedalus.stores.dispatches import DispatchStore
 from daedalus.stores.media import MediaStore
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
 from daedalus.stores.projects import Project, ProjectFolder, ProjectSettings, ProjectStore
@@ -93,6 +95,7 @@ from daedalus.stores.sqlite import (
 from daedalus.stores.staff import AsksStore, StaffStore
 from daedalus.terminals import endpoint as terminal_endpoint
 from daedalus.tools import discover_tools
+from daedalus.tools.dispatcher import build as build_dispatcher_tools
 
 logger = logging.getLogger(__name__)
 
@@ -444,6 +447,9 @@ class SessionManager:
             personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
         )
         self.asks = AsksStore(db)
+        self.dispatches = DispatchStore(db)
+        """The main orchestrator's hand-overs to projects: what a project orchestrator's state lists
+        and what its reports close."""
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -466,6 +472,8 @@ class SessionManager:
         self._background: set[asyncio.Task[Any]] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self.tools = InMemoryToolRegistry()
+        self.dispatcher_tools = InMemoryToolRegistry()
+        """The main orchestrator's tools and the few shared ones it may call, and nothing else."""
         self.providers = ProviderRegistry(
             settings, config, usage_sink=self.usage, image_loader=self._load_image
         )
@@ -546,6 +554,11 @@ class SessionManager:
         for tool in build_memory_tools(self.memory):
             self.tools.register(tool)
         self.tools.register(AskUserTool())
+        for tool in build_dispatcher_tools():
+            self.dispatcher_tools.register(tool)
+        for tool in self.tools.list_all():
+            if tool.name in DISPATCHER_TOOLS and tool.name not in {t.name for t in self.dispatcher_tools.list_all()}:
+                self.dispatcher_tools.register(tool)
         self.service_hooks.setdefault("mcp", self.mcp_service)
         locator.default = None
         self.index_rebuild = None
@@ -612,7 +625,14 @@ class SessionManager:
     # -- what the bus is told --------------------------------------------------------
 
     def _operator_facing(self, state: SessionState) -> bool:
+        if self._tells_news(state):
+            return True
         return state.run_origin in OPERATOR_ORIGINS and not any(state.metadata.get(key) for key in NOT_OPERATOR_FACING)
+
+    def _tells_news(self, state: SessionState) -> bool:
+        """A run of the main orchestrator woken by a project's report: it speaks to the operator, who is
+        usually not looking, so its answer is an unattended result like one they asked for."""
+        return state.run_origin == "events" and bool(state.metadata.get("dispatcher"))
 
     def _telegram_delivers(self, state: SessionState) -> bool:
         """Whether the Telegram front shows this session's answers, questions and approvals itself.
@@ -662,6 +682,10 @@ class SessionManager:
             "telegram": self._telegram_delivers(state),
             "title": state.session.title,
         }
+        if self._tells_news(state):
+            payload["news"] = True
+        if state.metadata.get("dispatcher"):
+            payload["link"] = "/app/main"
         summary = _last_answer(state.engine.history) if state.engine is not None else ""
         if summary:
             payload["summary"] = summary[:SUMMARY_CHARS]
@@ -1442,6 +1466,8 @@ class SessionManager:
             # Its brief, team and board come back in full every turn; a summary that spends its words
             # on them loses the promises and open questions that exist nowhere else.
             instructions = prompts.ORCHESTRATOR_COMPACTION
+        elif not instructions and self.is_dispatcher(state):
+            instructions = prompts.DISPATCHER_COMPACTION
         if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None and not own_task_ok:
             # The loop has settled; only bookkeeping remains.
             await asyncio.gather(asyncio.shield(state.task), return_exceptions=True)
@@ -2581,6 +2607,9 @@ class SessionManager:
             # without a mode the operator would have to remember to set.
             limits = self.config.orchestrator
             return ModeConfig(max_iterations=limits.max_iterations, usd_per_run=limits.usd_per_run, description="orchestrator")
+        if self.is_dispatcher(state):
+            bounds = self.config.dispatcher
+            return ModeConfig(max_iterations=bounds.max_iterations, usd_per_run=bounds.usd_per_run, description="main orchestrator")
         return None
 
     async def stop(self, session_id: str) -> bool:
@@ -2663,7 +2692,7 @@ class SessionManager:
             if paid_blocked:
                 rungs = [(provider, model) for provider, model in rungs if self.provider_costs_nothing(provider.endpoint.id)]
         deps = EngineDeps(
-            tool_registry=self.tools,
+            tool_registry=self.registry_for(state),
             event_stream=self.events,
             blob_store=self.blobs,
             skill_store=self.skills,
@@ -2719,7 +2748,7 @@ class SessionManager:
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state),
             tool_visibility_policy=self.tool_policy_for(state),
-            role="voice" if self.is_voice(state) else "orchestrator" if self.is_orchestrator(state) else "agent",
+            role="voice" if self.is_voice(state) else "orchestrator" if self.is_orchestrator(state) else "dispatcher" if self.is_dispatcher(state) else "agent",
         )
         self._attach_hooks(engine, state)
         if chain is not None:
@@ -3711,6 +3740,17 @@ class SessionManager:
         """Whether this session is a project's orchestrator (current or retired; a retired one's tools refuse)."""
         return bool(state.metadata.get("orchestrator_of") or state.metadata.get("orchestrator_retired_of"))
 
+    @staticmethod
+    def is_dispatcher(state: SessionState) -> bool:
+        """Whether this session is the main orchestrator (current or retired; a retired one's tools refuse).
+
+        Its tools come from a registry of their own (:attr:`dispatcher_tools`): they share names with
+        other roles' tools, and a session is shown one registry or the other, never a mix."""
+        return bool(state.metadata.get("dispatcher") or state.metadata.get("dispatcher_retired"))
+
+    def registry_for(self, state: SessionState) -> InMemoryToolRegistry:
+        return self.dispatcher_tools if self.is_dispatcher(state) else self.tools
+
     def _local_blocked_tools_for(self, state: SessionState) -> set[str]:
         """Restrictions selected directly for this session, before its parent narrows them."""
         known = {t.name for t in self.tools.list_all()}
@@ -3775,6 +3815,11 @@ class SessionManager:
 
     def tool_policy_for(self, state: SessionState) -> ToolVisibilityPolicy:
         """The one effective tool policy used for catalogue advertisement and dispatch admission."""
+        if self.is_dispatcher(state):
+            # Its own registry is its whole allowlist; the operator may still switch a tool off.
+            own = {t.name for t in self.dispatcher_tools.list_all()}
+            off = {str(n) for n in (state.metadata.get("tools_off") or ()) if str(n) in own}
+            return ToolVisibilityPolicy(pinned=own - off, blocked=off)
         known = {t.name for t in self.tools.list_all()}
         blocked = self.blocked_tools_for(state)
         return ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked)

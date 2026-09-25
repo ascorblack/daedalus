@@ -6,11 +6,12 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project" | "main";
 
 export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
-/** Screens reached from inside something else rather than from the navigation: a project's own pages. */
-const INNER: Screen[] = ["project"];
+/** Screens reached from inside something else rather than from the navigation: a project's own pages,
+ *  and the main orchestrator's chat, which is pinned above the list rather than a destination of the menu. */
+const INNER: Screen[] = ["project", "main"];
 
 export type Route = {
   screen: Screen;

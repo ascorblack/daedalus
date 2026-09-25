@@ -34,6 +34,7 @@ from typing import Any
 from daedalus.config import HarnessConfig
 from daedalus.harness import team as protocol
 from daedalus.harness.contract import (
+    DIAL_DIR,
     LAUNCH_DIR,
     Answer,
     EnvironmentUnavailable,
@@ -49,7 +50,7 @@ from daedalus.harness.contract import (
     StaffEvent,
     Turn,
 )
-from daedalus.harness.delivery import DeliveryWorker, Pending, normalised, pending_of
+from daedalus.harness.delivery import DeliveryWorker, Pending, normalised, pending_of, same_prompt
 from daedalus.harness.env import terminal_environment
 from daedalus.harness.state import OpenRequest, StaffState, StateContext, next_state
 from daedalus.staff_runtime import (
@@ -100,8 +101,13 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _substitute(value: str, directory: str) -> str:
-    return value.replace(LAUNCH_DIR, directory)
+def _substitute(value: str, directory: str, dial_dir: str = "") -> str:
+    return value.replace(LAUNCH_DIR, directory).replace(DIAL_DIR, dial_dir)
+
+
+def port_range(text: str) -> tuple[int, int]:
+    low, _, high = text.partition("-")
+    return int(low), int(high or low)
 
 
 def _seconds_since(stamp: str | None) -> float | None:
@@ -177,6 +183,9 @@ class RuntimeTerminal:
     async def put_file(self, name: str, data: bytes) -> str:
         return await self.terminals.put_launch_file(self._env, self.launch_id, name, data, actor=self.actor)
 
+    async def dial(self, target: str) -> Any:
+        return await self.terminals.net_dial(self._env, target, self.launch_id, actor=self.actor)
+
 
 class RuntimeEnvironment:
     """``EnvironmentPort`` over the terminals service's side channels of one environment: the one
@@ -248,6 +257,7 @@ class CliSession:
     """The plan it was launched with; ``None`` for a session taken up after a restart."""
     first_message_id: str = ""
     first_prompt_pending: bool = False
+    first_acknowledged: bool = False
     transcript_ref: str = ""
     open: dict[str, OpenRequest] = field(default_factory=dict)
     """Requests the CLI has open, by the reference the adapter gave them."""
@@ -403,6 +413,7 @@ class CliStaffRuntime:
             ask_hold_ms=cfg.ask_hold_s * 1000,
             report_hold_ms=cfg.report_hold_s * 1000,
             permission_hold_ms=cfg.permission_hold_s * 1000,
+            port_range=port_range(cfg.opencode_port_range),
         )
 
     async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
@@ -433,17 +444,17 @@ class CliStaffRuntime:
         try:
             daemon_launch = await self.terminals.register_launch(req.env, DaemonLaunch(launch_id=launch_id, files=dict(plan.files), ports=list(plan.ports), hold_max_ms=hold), actor=f"agent:{actor}")
             registered = True
-            directory = daemon_launch.dir
-            cwd = _substitute(plan.cwd, directory) or str(req.cwd)
+            directory, dials = daemon_launch.dir, daemon_launch.dial_dir
+            cwd = _substitute(plan.cwd, directory, dials) or str(req.cwd)
             title = f"{req.staff.name} · {req.task.title}" if req.task is not None else req.staff.name
             companions: dict[str, str] = {}
             for companion in plan.companions:
-                view = await self._create(req, actor, launch_id, [_substitute(a, directory) for a in companion.argv], {k: _substitute(v, directory) for k, v in companion.env.items()}, cwd, f"{title} · {companion.role}")
+                view = await self._create(req, actor, launch_id, [_substitute(a, directory, dials) for a in companion.argv], {k: _substitute(v, directory, dials) for k, v in companion.env.items()}, cwd, f"{title} · {companion.role}")
                 created.append(view["id"])
                 companions[view["id"]] = companion.role
                 if companion.ready_pattern and not (await self.terminals.wait_for(view["id"], regex=companion.ready_pattern, timeout=cfg.ready_timeout_s)).get("matched") == "regex":
                     raise RuntimeError(f"the {companion.role} of {self.adapter.capabilities.label} did not start within {cfg.ready_timeout_s:g} s")
-            view = await self._create(req, actor, launch_id, [_substitute(a, directory) for a in plan.argv], {k: _substitute(v, directory) for k, v in plan.env.items()}, cwd, title)
+            view = await self._create(req, actor, launch_id, [_substitute(a, directory, dials) for a in plan.argv], {k: _substitute(v, directory, dials) for k, v in plan.env.items()}, cwd, title)
             created.append(view["id"])
             launch = await self.store.update_launch(launch_id, terminal_id=view["id"], companion_terminal_id=next(iter(companions), None), launch_dir=directory)
         except BaseException:
@@ -719,10 +730,15 @@ class CliStaffRuntime:
         message_id = str(event.payload.get("message_id") or "")
         if session.worker is not None and session.worker.acknowledge(str(event.payload.get("prompt") or ""), message_id):
             return  # the worker reports the message it was delivering
-        if not message_id and session.first_prompt_pending and session.first_message_id:
-            # The first prompt went on the command line; the CLI taking a prompt before anything else
-            # was sent is that one.
+        prompt = str(event.payload.get("prompt") or "")
+        first = session.plan.first_prompt if session.plan is not None else None
+        if not message_id and session.first_message_id and not session.first_acknowledged and (session.first_prompt_pending or (first and same_prompt(first, prompt))):
+            # The first prompt went on the command line, or by a channel ahead of any message: the CLI
+            # taking a prompt before anything else was sent, or taking that very text, is that one. A
+            # channel's turn begins before its prompt is echoed, so "pending" alone is not enough.
             message_id = session.first_message_id
+        if message_id and message_id == session.first_message_id:
+            session.first_acknowledged = True
         if message_id:
             await self.ingress.message_state(message_id, "acknowledged")
 
