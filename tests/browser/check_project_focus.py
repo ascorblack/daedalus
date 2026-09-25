@@ -223,9 +223,11 @@ def phone(page: Page, lang: str) -> None:
         expect(page.locator(".pagehead .iconbtn[href]").first).to_be_visible()
         if where == "team":
             # Each member's spend where the member is: dollars and tokens, or the subscription window used.
-            expect(page.locator(".staff-row", has_text="Lev").locator(".staff-spend")).to_have_text(WORDS[lang]["levspend"])
-            expect(page.locator(".staff-row", has_text="Ira").locator(".staff-spend")).to_have_text(WORDS[lang]["iraspend"])
-            expect(page.locator(".staff-row", has_text="Max").locator(".staff-spend")).to_have_count(0)
+            # A phone draws the team as its own rows, not the desktop's, and the spend goes with them.
+            rows = page.locator(".phone-staff-item")
+            expect(rows.filter(has_text="Lev").locator(".staff-spend")).to_have_text(WORDS[lang]["levspend"])
+            expect(rows.filter(has_text="Ira").locator(".staff-spend")).to_have_text(WORDS[lang]["iraspend"])
+            expect(rows.filter(has_text="Max").locator(".staff-spend")).to_have_count(0)
         fits(page, f"{lang} phone {where}")
 
 
