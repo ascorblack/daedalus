@@ -90,11 +90,33 @@ HOLD_MARGIN_MS = 30_000
 READ_TRANSCRIPT_TURNS = 400
 DIFF_TIMEOUT = 30.0
 SCREEN_TAIL_CHARS = 1200
+"""How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
 CALLS_REMEMBERED = 256
 """Team call ids a session keeps for spotting a repeat; a replay is of the latest posts."""
-"""How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
+PORT_ATTEMPTS = 3
+"""Plans tried for a CLI that serves on a port of its own before its start fails: each chooses a port
+at random in the range, so a taken one is usually followed by a free one."""
 
 Lookup = Callable[[str], Awaitable[LiveSession | None]]
+
+
+class _PortTaken(Exception):
+    """The port a plan chose already has a listener; the launch is undone and planned again."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__(f"port {port} is taken")
+        self.port = port
+
+
+def _settled_reply(ask: Any) -> dict[str, Any]:
+    """What a replayed team question is told when the question it repeats was already settled: the
+    answer it got, in the words the first post was given, or why it was withdrawn."""
+    resolution = ask.resolution or {}
+    if resolution.get("closed"):
+        return {"text": f"This question was withdrawn: {resolution['closed']}", "error": True}
+    allow = resolution.get("allow")
+    words = str(resolution.get("text") or "").strip() or ", ".join(str(s) for s in resolution.get("selected") or [])
+    return {"text": words or ("yes" if allow else "no" if allow is False else "")}
 
 
 def _now() -> str:
@@ -277,6 +299,10 @@ class CliSession:
     worker: DeliveryWorker | None = None
     reported: bool = False
     """A Report arrived in the current turn; a turn that ends without one is reported for it."""
+    turn_ended_waiting: bool = False
+    """The turn ended while a request was still open, and nothing has started since: when that
+    request is answered the CLI is idle, and the answer waits for it as a message. Without this the
+    session went back to ``working`` and the message waited for a turn that had already ended."""
     resend_first: bool = False
     """After a restart during the start: the first message still has to go by channel once ready."""
     channel: dict[str, str] = field(default_factory=dict)
@@ -417,6 +443,30 @@ class CliStaffRuntime:
         )
 
     async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
+        """One launch, planned again while the port the plan chose is taken (``PORT_ATTEMPTS``)."""
+        last = _PortTaken(0)
+        for attempt in range(1, PORT_ATTEMPTS + 1):
+            try:
+                return await self._launch_once(req, resume_ref=resume_ref)
+            except _PortTaken as taken:
+                logger.info("%s: port %d is taken (attempt %d of %d); planning another", self.kind, taken.port, attempt, PORT_ATTEMPTS)
+                last = taken
+        raise RuntimeError(f"{self.adapter.capabilities.label} found its port taken {PORT_ATTEMPTS} times (last {last.port}); free ports in harness.opencode_port_range or widen it")
+
+    async def _taken_port(self, env: str, launch_id: str, ports: tuple[int, ...], actor: str) -> int | None:
+        """A port the plan means the CLI to listen on that something already answers on. The CLI
+        would fail to start on it after its whole launch; asking first costs one dial."""
+        for port in ports:
+            try:
+                stream = await self.terminals.net_dial(env, f"tcp:127.0.0.1:{port}", launch_id, actor=actor)
+            except Exception:  # noqa: BLE001 — refused, which is what a free port says
+                continue
+            with contextlib.suppress(Exception):
+                await stream.close()
+            return port
+        return None
+
+    async def _launch_once(self, req: StartRequest, *, resume_ref: str) -> Started:
         actor = self._actor(req.staff_session_id)
         launch_id = "l" + secrets.token_hex(8)
         spec = self._spec(req, launch_id, resume_ref)
@@ -433,6 +483,7 @@ class CliStaffRuntime:
             session_ref=plan.session_ref,
             harness_version=row.installed_version if row is not None else "",
             started_at=_now(),
+            adapter_state=plan.adapter_state,
         )
         # Written before the daemon hears of it: a launch the database does not know is one a
         # restarted host could never take up or end.
@@ -444,6 +495,8 @@ class CliStaffRuntime:
         try:
             daemon_launch = await self.terminals.register_launch(req.env, DaemonLaunch(launch_id=launch_id, files=dict(plan.files), ports=list(plan.ports), hold_max_ms=hold), actor=f"agent:{actor}")
             registered = True
+            if plan.ports and (taken := await self._taken_port(req.env, launch_id, plan.ports, f"agent:{actor}")) is not None:
+                raise _PortTaken(taken)
             directory, dials = daemon_launch.dir, daemon_launch.dial_dir
             cwd = _substitute(plan.cwd, directory, dials) or str(req.cwd)
             title = f"{req.staff.name} · {req.task.title}" if req.task is not None else req.staff.name
@@ -668,7 +721,11 @@ class CliStaffRuntime:
             current = StaffState(live.session.status)
         except ValueError:
             current = StaffState.WORKING
-        context = StateContext(first_prompt_pending=session.first_prompt_pending, open_requests=tuple(session.open.values()), waiting_for=live.session.waiting_for)
+        if kind is EventKind.TURN_COMPLETED and session.open:
+            session.turn_ended_waiting = True
+        elif kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
+            session.turn_ended_waiting = False
+        context = StateContext(first_prompt_pending=session.first_prompt_pending, open_requests=tuple(session.open.values()), waiting_for=live.session.waiting_for, turn_ended=session.turn_ended_waiting)
         step = next_state(current, event, context)
         if kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
             session.first_prompt_pending = False
@@ -681,7 +738,7 @@ class CliStaffRuntime:
             await self.ingress.permission(live, event.native_id, str(event.payload.get("tool") or ""), str(event.payload.get("summary") or ""))
         elif kind is EventKind.QUESTION_ASKED and event.native_id:
             options = [str(o) for o in event.payload.get("options") or []]
-            await self.ingress.question(live, event.native_id, str(event.payload.get("text") or event.payload.get("summary") or ""), options)
+            await self.ingress.question(live, event.native_id, str(event.payload.get("text") or event.payload.get("summary") or ""), options, call_id=str(event.payload.get("call_id") or "") or None)
             if step.state is StaffState.PERMISSION:
                 # The question is recorded, but the permission still holds the process.
                 await self.ingress.status(live, StaffState.PERMISSION.value, step.waiting_for)
@@ -920,12 +977,24 @@ class CliStaffRuntime:
                     session.held_for.setdefault(earlier, []).append(post.reply_id)
                 self._remember_call(session, call_id, ("ask", earlier))
                 return
+            before = await self.ingress.asked(live, call_id) if call_id else None
+            if before is not None:
+                # The same call again after its question was settled, or after a host restart forgot
+                # the calls it had seen: a replay, never a second question. An open one takes this
+                # post as the one to answer; a settled one is answered at once with what it got.
+                self._remember_call(session, call_id, ("ask", before.request_ref))
+                if before.open:
+                    if post.reply_id:
+                        session.held_for.setdefault(before.request_ref, []).append(post.reply_id)
+                elif post.reply_id:
+                    await session.term.reply(post.reply_id, _settled_reply(before))
+                return
             # The reference names the held post, so the answer finds its way back even after the
             # host restarted; an ask nobody holds gets a reference of its own and goes as a message.
             ref = f"team:{post.reply_id}" if post.reply_id else f"team-message:{uuid.uuid4().hex[:12]}"
             session.asked[normalised(question)] = ref
             self._remember_call(session, call_id, ("ask", ref))
-            await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []]}, native_id=ref, launch_id=session.launch.launch_id))
+            await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []], "call_id": call_id}, native_id=ref, launch_id=session.launch.launch_id))
         elif post.reply_id:
             await session.term.reply(post.reply_id, {"text": f"the team has no tool {tool!r}", "error": True})
 

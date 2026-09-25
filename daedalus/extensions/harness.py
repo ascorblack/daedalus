@@ -36,11 +36,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CATALOG_ROOTS = (".claude/agents", ".codex", ".pi/agent", ".grok/sessions")
+CATALOG_ROOTS = (".claude/agents", ".claude/projects", ".codex", ".pi/agent", ".grok/sessions")
 """What of each environment's home the host reads, besides the project folders: the user's own
-agent definitions, Codex's profiles, pi's settings (to learn its provider) and its sessions, Grok
-Build's sessions (its transcripts). The daemon's deny list keeps every credential file under them
-unreadable all the same."""
+agent definitions, Claude Code's transcripts, Codex's profiles and its rollouts, pi's settings (to
+learn its provider) and its sessions, Grok Build's sessions (its transcripts). OpenCode keeps its
+transcripts in its own store, read through ``opencode export``. The daemon's deny list keeps every
+credential file under them unreadable all the same.
+
+Claude's transcripts were missing here for a while, unnoticed, because the tests made the whole home
+readable; ``catalog_roots`` is what the tests now use, so a transcript directory left off this list
+fails them."""
+
+
+def catalog_roots(home: str) -> list[str]:
+    """The roots under ``home`` that the host asks the daemon to let it read."""
+    return [f"{home.rstrip('/')}/{path}" for path in CATALOG_ROOTS]
 
 
 def build(app: Application, store: HarnessStore) -> HarnessManager:
@@ -58,7 +68,7 @@ def build(app: Application, store: HarnessStore) -> HarnessManager:
         if status is None or not status.available:
             return None
         if status.home:
-            service.set_extra_roots(env, "harness-catalog", [f"{status.home.rstrip('/')}/{path}" for path in CATALOG_ROOTS])
+            service.set_extra_roots(env, "harness-catalog", catalog_roots(status.home))
         return RuntimeEnvironment(service, env, home=status.home, actor="harness")
 
     def environments() -> list[str]:

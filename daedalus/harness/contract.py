@@ -244,6 +244,10 @@ class LaunchPlan:
     first_prompt: str | None = None
     first_prompt_via: Literal["argv", "channel"] = "argv"
     hooks: HookSpec = field(default_factory=HookSpec)
+    adapter_state: str = field(default="", repr=False)
+    """What the adapter needs to take the launch up again after the host restarted, when that is
+    more than the launch row says (OpenCode's port and its server's password). Kept in the launch row
+    until the launch ends and blanked then; never logged and never shown, since it may hold a secret."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +265,8 @@ class Launch:
     harness_version: str
     started_at: str
     ended_at: str | None = None
+    adapter_state: str = field(default="", repr=False)
+    """The plan's ``adapter_state``, for the adapter's ``events`` after a host restart; empty once ended."""
 
 
 @dataclass(frozen=True, slots=True)

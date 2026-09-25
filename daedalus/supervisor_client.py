@@ -9,6 +9,10 @@ instead and the address is ``tcp://127.0.0.1:<port>``. Everything above this mod
 A port, unlike a file, has no owner: anything running on the machine can connect to it. So a command
 sent that way carries a secret the supervisor wrote into the state directory with the permissions the
 socket would have had, and a command sent to a socket carries nothing — the file is the answer there.
+
+A socket path longer than the kernel allows (a deep data folder) cannot be bound. The supervisor then
+listens on a loopback port and writes that port's address, as plain text, into a file at the path the
+socket would have had; ``resolve`` reads it, so the bot needs no second setting to follow it.
 """
 
 from __future__ import annotations
@@ -33,6 +37,22 @@ def tcp_endpoint(address: str) -> tuple[str, int] | None:
     if not host or not port.isdigit():
         raise SupervisorUnavailable(f"{address!r} is not a supervisor address: expected tcp://host:port")
     return host, int(port)
+
+
+def resolve(address: str) -> str:
+    """The address to connect to: ``address`` itself, or the ``tcp://`` address written in the plain
+    file at a socket path the supervisor could not bind."""
+    if tcp_endpoint(address) is not None:
+        return address
+    path = Path(address)
+    try:
+        if path.is_file():
+            written = path.read_text("utf-8", errors="replace").strip()
+            if written.startswith(TCP_PREFIX):
+                return written
+    except OSError:
+        pass
+    return address
 
 
 def present(address: str | Path) -> bool:
@@ -71,11 +91,12 @@ def loopback_token(token_path: str | Path | None) -> str:
 
 
 async def call(address: str | Path, op: str, *, token_path: str | Path | None = None, timeout: float = 120.0, **params: Any) -> Any:
+    address = resolve(str(address))
     try:
-        reader, writer = await _open(str(address))
+        reader, writer = await _open(address)
     except OSError as exc:
         raise SupervisorUnavailable(str(exc)) from exc
-    if tcp_endpoint(str(address)) is not None and (token := loopback_token(token_path)):
+    if tcp_endpoint(address) is not None and (token := loopback_token(token_path)):
         params["token"] = token
     writer.write((json.dumps({"op": op, **params}) + "\n").encode("utf-8"))
     await writer.drain()

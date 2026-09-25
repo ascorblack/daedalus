@@ -51,6 +51,9 @@ have been: one directory, one owner, one thing to delete when the installation g
 SUPERVISOR_TCP = os.environ.get("DAEDALUS_SUPERVISOR_TCP", "").strip()
 """``host:port`` to listen on instead of the socket, where the platform has no unix sockets (Windows).
 One or the other: the bot is told whichever this supervisor really opened, so the two cannot disagree."""
+UNIX_SOCKET_PATH_MAX = 104
+"""A unix socket's path must be shorter than this many bytes: sun_path holds 104 on macOS and 108 on
+Linux, the terminating NUL included, so the smaller of the two decides on every platform."""
 POSIX = os.name != "nt"
 """Whether the platform has process groups, signals and uids. Windows has none of the three, and each
 of them is used below for something that has a different answer there rather than no answer."""
@@ -1169,6 +1172,22 @@ class Supervisor:
             self.token = loopback_token()
             server = await asyncio.start_server(self.handle, host or "127.0.0.1", int(port))
             log(f"listening on {host or '127.0.0.1'}:{port}")
+        elif len(os.fsencode(str(SOCKET))) >= UNIX_SOCKET_PATH_MAX:
+            # A socket's path has to fit the kernel's sun_path, and a data folder deep in a home
+            # directory (common on a Mac) does not. Binding it fails, and the supervisor used to run
+            # with no command channel at all, so a restart or an Apply could not reach it. It listens
+            # on a free loopback port instead, with the secret a port needs, and writes the address
+            # into a plain file where the socket would be: the bot is told that path either way, and
+            # reading an address out of it is how the terminal daemon's endpoint file works too.
+            self.token = loopback_token()
+            server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            SOCKET.parent.mkdir(parents=True, exist_ok=True)
+            SOCKET.unlink(missing_ok=True)
+            fd = os.open(SOCKET, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(f"tcp://127.0.0.1:{port}\n")
+            log(f"the socket path is {len(os.fsencode(str(SOCKET)))} bytes, too long for a unix socket; listening on 127.0.0.1:{port}, written to {SOCKET}")
         else:
             SOCKET.parent.mkdir(parents=True, exist_ok=True)
             SOCKET.unlink(missing_ok=True)

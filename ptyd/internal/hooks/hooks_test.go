@@ -4,6 +4,7 @@ package hooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -341,6 +342,40 @@ func TestHeldPostTimesOutEmpty(t *testing.T) {
 	}
 	if f.reg.Held() != 0 {
 		t.Fatalf("%d still held", f.reg.Held())
+	}
+}
+
+// A CLI whose own timer on a tool call is shorter than the hold gives up on the post and closes the
+// connection. The answer that comes later must be refused, not swallowed: the host then sends it as
+// a message, and the question is still answered exactly once.
+func TestAHeldPostWhoseCallerGaveUpTakesNoReply(t *testing.T) {
+	f := start(t)
+	r, _ := f.reg.Register(Spec{ID: "L1"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.HookURL+"/team?wait_ms=60000", strings.NewReader(`{"tool":"ask"}`))
+		req.Header.Set("Authorization", "Bearer "+r.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	ev := f.rec.wait(t, "hook", 1)[0]
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("the cancelled post came back with an answer")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.reg.Held() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d still held after its caller left", f.reg.Held())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := f.reg.Reply("L1", ev["reply_id"].(string), Reply{Status: 200, Body: []byte(`{"text":"left"}`)}); err != ErrNoReply {
+		t.Fatalf("a reply to a post nobody waits on: %v", err)
 	}
 }
 

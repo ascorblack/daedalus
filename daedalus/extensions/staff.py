@@ -772,11 +772,17 @@ class Team:
     async def _after_answer(self, live: LiveSession) -> None:
         """The status once a request is answered: working again, unless another request of the
         session is still open — then it waits on that one, a permission before a question, since a
-        permission holds the process itself."""
+        permission holds the process itself.
+
+        A runtime that already moved the session out of waiting decided better than "working": a
+        command-line member whose turn ended on a question the hold gave up on is idle, and its
+        answer goes to it as a message that waits for exactly that. Forcing "working" here left the
+        message waiting for a turn that had already ended."""
         remaining = await self._open_asks(live.id)
         current = await self.live(live.id) or live
         if not remaining:
-            await self.ingress.status(current, "working")
+            if current.session.status in ("question", "permission"):
+                await self.ingress.status(current, "working")
             return
         ask = next((a for a in remaining if a.kind == "permission"), remaining[0])
         if ask.kind == "permission":
@@ -1177,10 +1183,19 @@ class Ingress:
         await self.status(live, "permission", f"permission [{ask.short_id}]: {tool or summary}")
         return ask.id
 
-    async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str], *, event_ref: str | None = None) -> str:
-        ask = await self._open(live, "question", request_ref, text, {"options": list(options)}, event_ref)
+    async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str], *, event_ref: str | None = None, call_id: str | None = None) -> str:
+        detail: dict[str, Any] = {"options": list(options)}
+        if call_id:
+            detail["call_id"] = call_id
+        ask = await self._open(live, "question", request_ref, text, detail, event_ref)
         await self.status(live, "question", f"question [{ask.short_id}]: {text}")
         return ask.id
+
+    async def asked(self, live: LiveSession, call_id: str) -> Ask | None:
+        row = await self.manager.db.fetchone(
+            "SELECT id FROM asks WHERE staff_session_id = ? AND json_extract(detail_json, '$.call_id') = ? ORDER BY created_at DESC LIMIT 1", (live.id, call_id)
+        )
+        return await self.manager.asks.get(row["id"]) if row is not None else None
 
     async def message_state(self, message_id: str, state: str, error: str = "") -> None:
         before = await self.manager.staff.message(message_id)

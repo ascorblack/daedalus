@@ -111,6 +111,17 @@ def test_what_it_waits_for_travels_with_the_state() -> None:
     assert len(_step(W, EventKind.PERMISSION_REQUESTED, {"summary": "x" * 500}).waiting_for) == 200
 
 
+def test_an_answer_after_the_turn_ended_leaves_the_session_done_not_working() -> None:
+    # The hold on a team question ran out, the CLI heard "pending" and ended its turn; the answer
+    # that comes later goes to it as a message, which waits for a session that is not working.
+    step = _step(Q, EventKind.REQUEST_RESOLVED, {}, StateContext(turn_ended=True))
+    assert (step.state, step.changed) == (D, True)
+    # Answered while the turn still waits on its call: back to work, as before.
+    assert _step(Q, EventKind.REQUEST_RESOLVED, {}, NOTHING_OPEN).state is W
+    # Another request still open outranks the ended turn.
+    assert _step(Q, EventKind.REQUEST_RESOLVED, {}, StateContext(open_requests=PERMISSION_OPEN.open_requests, turn_ended=True)).state is P
+
+
 def test_silence_is_checked_on_screen_and_shown_grey() -> None:
     quiet = _step(W, EventKind.QUIET)
     assert (quiet.state, quiet.reconcile, quiet.signal, quiet.changed) == (W, True, False, False)

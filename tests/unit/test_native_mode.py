@@ -12,6 +12,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 import socket
 import sys
 import time
@@ -253,6 +254,45 @@ async def test_the_supervisor_listens_on_a_port_where_there_are_no_unix_sockets(
         # same file to open the same channel.
         result = await supervisor_client.call(f"tcp://127.0.0.1:{port}", "status", token_path=token_path, timeout=SETTLE)
         assert "child_running" in result
+    finally:
+        server.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_socket_path_too_long_for_the_kernel_becomes_a_loopback_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A data folder deep in a home directory makes a socket path the kernel cannot bind (108 bytes
+    on Linux, 104 on macOS). The supervisor then listens on a loopback port, writes its address where
+    the socket would be, and the client follows it there with the secret — the path the bot is told
+    stays the same."""
+    deep = tmp_path.joinpath(*["a-folder-deep-in-a-home"] * 4) / "state"
+    socket_path = deep / "supervisor.sock"
+    assert len(os.fsencode(str(socket_path))) >= 104
+    monkeypatch.setenv("DAEDALUS_SUPERVISOR_SOCKET", str(socket_path))
+    monkeypatch.delenv("DAEDALUS_SUPERVISOR_TCP", raising=False)
+    monkeypatch.setenv("DAEDALUS_STATE", str(deep))
+    monkeypatch.setenv("DAEDALUS_BOT_REPO", str(tmp_path / "daedalus"))
+    monkeypatch.setenv("DAEDALUS_CORE_REPO", str(tmp_path / "protocore-exp"))
+    supervisor = load_supervisor()
+    if not supervisor.POSIX:
+        pytest.skip("a platform without unix sockets always listens on a port")
+    instance = supervisor.Supervisor()
+    server = asyncio.create_task(instance.serve_socket())
+    try:
+        deadline = time.monotonic() + SETTLE
+        while not socket_path.is_file():
+            if time.monotonic() > deadline:
+                pytest.fail("the supervisor never wrote its address")
+            await asyncio.sleep(0.02)
+        address = socket_path.read_text("utf-8").strip()
+        assert address.startswith("tcp://127.0.0.1:") and socket_path.stat().st_mode & 0o077 == 0
+        assert supervisor_client.present(str(socket_path))
+        assert supervisor_client.resolve(str(socket_path)) == address
+        token_path = deep / "supervisor.token"
+        result = await supervisor_client.call(str(socket_path), "status", token_path=token_path, timeout=SETTLE)
+        assert "child_running" in result
+        # Without the secret the port refuses, as any loopback channel of the supervisor does.
+        with pytest.raises(RuntimeError, match="secret"):
+            await supervisor_client.call(str(socket_path), "status", token_path=None, timeout=SETTLE)
     finally:
         server.cancel()
 

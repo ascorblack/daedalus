@@ -1247,6 +1247,15 @@ ALTER TABLE projects ADD COLUMN setup_by TEXT NOT NULL DEFAULT '';
 """)
 
 
+# What a command-line adapter needs to take a launch up again after the host restarted, beyond the
+# launch row's own columns: OpenCode's port and the password of the server inside its TUI, which
+# lived only in the adapter's memory, so a restarted host could not reach a member still running.
+# Opaque to everything but the adapter; blanked when the launch ends.
+MIGRATIONS.append("""
+ALTER TABLE harness_launches ADD COLUMN adapter_state TEXT NOT NULL DEFAULT '';
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

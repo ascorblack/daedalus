@@ -99,7 +99,11 @@ type DebugHook = {
   /** Hand xterm.js a chunk as a phone's keyboard would, so it reaches the input filters. */
   feed(id: string, data: string): void;
   fontSize(id: string): number;
+  /** Line feeds xterm.js has parsed since the first call for this terminal: output parsed twice shows here. */
+  lineFeeds(id: string): number;
 };
+
+const lineFeedCounts = new Map<string, { count: number }>();
 
 try {
   if (typeof window !== "undefined" && localStorage.getItem("daedalus.debug.terminals") === "1") {
@@ -123,6 +127,18 @@ try {
       webglContexts: () => [...live].filter((i) => i.rendererKind === "webgl").length,
       feed: (id, data) => instanceFor(id)?.terminal?.input(data, true),
       fontSize: (id) => instanceFor(id)?.terminal?.options.fontSize ?? 0,
+      lineFeeds: (id) => {
+        let counter = lineFeedCounts.get(id);
+        if (!counter) {
+          const term = instanceFor(id)?.terminal;
+          if (!term) return 0;
+          const fresh = { count: 0 };
+          term.onLineFeed(() => fresh.count++);
+          lineFeedCounts.set(id, fresh);
+          counter = fresh;
+        }
+        return counter.count;
+      },
     };
     (window as unknown as { __terminals: DebugHook }).__terminals = hook;
   }

@@ -139,6 +139,7 @@ def _launch(row: Any) -> Launch:
         harness_version=row["harness_version"],
         started_at=row["started_at"],
         ended_at=row["ended_at"],
+        adapter_state=row["adapter_state"],
     )
 
 
@@ -232,11 +233,11 @@ class HarnessStore:
         second, so two starts racing for one session cannot both register hooks."""
         try:
             await self._db.execute(
-                "INSERT INTO harness_launches(launch_id, staff_session_id, harness, env, terminal_id, companion_terminal_id, launch_dir, session_ref, harness_version, started_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO harness_launches(launch_id, staff_session_id, harness, env, terminal_id, companion_terminal_id, launch_dir, session_ref, harness_version, started_at, adapter_state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     launch.launch_id, launch.staff_session_id, launch.harness, launch.env, launch.terminal_id, launch.companion_terminal_id,
-                    launch.launch_dir, launch.session_ref, launch.harness_version, launch.started_at,
+                    launch.launch_dir, launch.session_ref, launch.harness_version, launch.started_at, launch.adapter_state,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -259,7 +260,9 @@ class HarnessStore:
     async def end_launch(self, launch_id: str) -> bool:
         """End a launch once; true for the call that ended it."""
         async with self._db.transaction() as conn:
-            cursor = await conn.execute("UPDATE harness_launches SET ended_at = ? WHERE launch_id = ? AND ended_at IS NULL", (_now(), launch_id))
+            # The adapter's state goes with the launch: a password for a server that no longer runs
+            # has no business staying in the database, or in its backups.
+            cursor = await conn.execute("UPDATE harness_launches SET ended_at = ?, adapter_state = '' WHERE launch_id = ? AND ended_at IS NULL", (_now(), launch_id))
             ended = cursor.rowcount == 1
             await cursor.close()
         return ended

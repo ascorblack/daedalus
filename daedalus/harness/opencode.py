@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 import random
@@ -127,6 +128,15 @@ class _Launch:
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
+def _server_from(stored: str) -> _Server | None:
+    """The server a launch row remembers, or ``None`` when it remembers none (or something else)."""
+    try:
+        values = json.loads(stored) if stored else None
+        return _Server(**values) if isinstance(values, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def split_model(model: str) -> tuple[str, str]:
     """``provider/model`` as OpenCode's two parts; the model's own name may hold slashes."""
     provider, _, name = model.partition("/")
@@ -212,6 +222,7 @@ class OpenCodeAdapter:
             argv += ["-s", resume]
         env = {"OPENCODE_SERVER_PASSWORD": server.password, "OPENCODE_CONFIG_CONTENT": json.dumps(config, ensure_ascii=False)}
         return LaunchPlan(
+            adapter_state=json.dumps(dataclasses.asdict(server)),
             argv=tuple(argv),
             env=env,
             cwd=spec.cwd,
@@ -250,7 +261,12 @@ class OpenCodeAdapter:
 
     async def events(self, term: TerminalPort, launch: Launch) -> AsyncIterator[StaffEvent]:
         state = self._state(term)
+        # A launch this host planned is in memory; one an earlier host started is read back from the
+        # launch row, so a member still running is taken up rather than failed.
         state.server = self._planned.pop(launch.launch_id, None)
+        if state.server is None and (stored := _server_from(launch.adapter_state)) is not None:
+            # The session the TUI already shows is taken up, not a new one made beside it.
+            state.server = dataclasses.replace(stored, resume=launch.session_ref or stored.resume)
 
         async def until_launch_ends() -> None:
             async for _ in term.hooks():
@@ -283,8 +299,7 @@ class OpenCodeAdapter:
 
     async def _run(self, term: TerminalPort, state: _Launch, launch: Launch) -> None:
         if state.server is None:
-            # The port and the password were this host's, in memory; a restarted host has neither.
-            raise ConnectionError("this launch was started by an earlier host, and its server's password went with it")
+            raise ConnectionError("this launch does not say which port its server listens on or how to sign in to it")
         server = state.server
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CONNECT_S
