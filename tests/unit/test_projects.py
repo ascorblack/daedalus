@@ -79,8 +79,9 @@ async def test_a_folder_that_is_not_one_and_a_folder_already_spoken_for_are_refu
         await store.create("Inner", [str(outer / "inner")])
     with pytest.raises(ProjectError, match="contains the project"):
         await store.create("Parent", [str(tmp_path)])
-    with pytest.raises(ProjectError, match="already that folder"):
-        await store.create("Again", [str(outer)])
+    # The same folder is a place two projects may both work on: equal is not nesting.
+    again = await store.create("Again", [str(outer)])
+    assert [str(f.path) for f in again.folders] == [str(outer)]
 
 
 def test_a_root_is_normalised_without_touching_the_filesystem() -> None:
@@ -790,8 +791,9 @@ async def test_a_service_started_in_a_project_cannot_choose_a_directory_outside_
 # -- folders, the brief, the journal and the orchestrator's compare-and-set -------------------
 
 
-async def test_no_two_folders_anywhere_nest_or_repeat(db: Database, tmp_path: Path) -> None:
-    """The overlap rule is over every folder of every project, the same project's included."""
+async def test_no_two_folders_anywhere_nest_and_none_repeats_in_one_project(db: Database, tmp_path: Path) -> None:
+    """The nesting rule is over every folder of every project, the same project's included; the same
+    folder may be in several projects, once in each."""
     store = ProjectStore(db, reserved=[tmp_path / "state"])
     (tmp_path / "site" / "assets").mkdir(parents=True)
     (tmp_path / "docs").mkdir()
@@ -801,7 +803,9 @@ async def test_no_two_folders_anywhere_nest_or_repeat(db: Database, tmp_path: Pa
         await store.add_folder(site.id, str(tmp_path / "site" / "assets"))
     with pytest.raises(ProjectError, match="inside the project Site"):
         await store.add_folder(other.id, str(tmp_path / "site" / "assets"))
-    with pytest.raises(ProjectError, match="Other is already that folder"):
+    shared = await store.add_folder(site.id, str(tmp_path / "docs"))
+    assert shared.project_id == site.id and await store.holders(tmp_path / "docs", besides=site.id) == ["Other"]
+    with pytest.raises(ProjectError, match="Site already has the folder"):
         await store.add_folder(site.id, str(tmp_path / "docs"))
     grouped = await store.create("Grouped", [str(tmp_path / "group" / "inner")])
     with pytest.raises(ProjectError, match="contains the project Grouped"):
@@ -813,7 +817,7 @@ async def test_no_two_folders_anywhere_nest_or_repeat(db: Database, tmp_path: Pa
     with pytest.raises(TypeError):
         await store.create("One path", str(tmp_path / "c"))  # type: ignore[arg-type]
     # Nothing half-made was left behind by the refusals.
-    assert sorted(f.path for p in await store.list() for f in p.folders) == [tmp_path / "docs", tmp_path / "group" / "inner", tmp_path / "site"]
+    assert sorted(f.path for p in await store.list() for f in p.folders) == [tmp_path / "docs", tmp_path / "docs", tmp_path / "group" / "inner", tmp_path / "site"]
     assert grouped.primary.reachable is False, "a folder that is not there yet is kept, and says so"
 
 

@@ -921,6 +921,10 @@ class Orchestrators:
         if ask.kind == "permission":
             return "granted" if r.get("allow") else "refused"
         if ask.kind == "folder":
+            if r.get("outcome") and str(r["outcome"]) != "added":
+                # Said in full, with the advice after the dash: "approved" alone once sent the
+                # orchestrator to ask again for a folder the host had refused.
+                return f"{r['outcome']} — nothing was added; do not ask for it again unless that reason is gone"
             return "approved" if r.get("allow") or (r.get("selected") and r["selected"][0] == (ask.detail.get("options") or ["Add"])[0]) else "declined"
         parts = [", ".join(str(s) for s in r.get("selected") or []), str(r.get("text") or "")]
         return _one_line(" — ".join(p for p in parts if p), 400) or "(no text)"
@@ -1170,12 +1174,51 @@ class Orchestrators:
         try:
             await self.manager.projects.add_folder(ask.project_id, str(ask.detail.get("path") or ""), label=str(ask.detail.get("label") or ""), env=str(ask.detail.get("env") or "") or None, readonly=bool(ask.detail.get("readonly")))
         except (ProjectError, KeyError) as exc:
-            await self.manager.projects.record(ask.project_id, "system", "folder", f"The folder {ask.detail.get('path')} was approved but could not be added: {exc}", {"ask_id": ask.id})
-            return False, str(exc)
+            reason = str(exc) if isinstance(exc, ProjectError) else "the project is gone"
+            await self._approval_failed(ask, f"the folder {ask.detail.get('path')}", reason)
+            return False, reason
+        await self._outcome(ask, "added")
         await self.manager.projects.record(ask.project_id, "system", "folder", f"The operator approved the folder {ask.detail.get('path')}; it was added.", {"ask_id": ask.id})
         await self.manager.reload_project(await self.manager.projects.get(ask.project_id), ask.project_id)
         await self._changed(ask.project_id, "folders", "operator")
         return True, ""
+
+    async def _outcome(self, ask: Ask, outcome: str, error: str = "") -> None:
+        """What came of an approved request, kept on its resolution: the wake-up line the orchestrator
+        reads is written from it, after this, so the orchestrator learns what happened, not only
+        what the operator pressed. ``error`` is the bare reason, which the card shows."""
+        await self.manager.db.execute(
+            "UPDATE asks SET resolution_json = json_set(resolution_json, '$.outcome', ?, '$.error', ?) WHERE id = ?", (outcome, error, ask.id)
+        )
+
+    async def _approval_failed(self, ask: Ask, what: str, reason: str) -> None:
+        """The operator approved a request and carrying it out failed. They are told where they look —
+        a notification and a line in the orchestrator's chat — and the orchestrator is told the exact
+        reason in the wake-up the answer brings. The failure once went only into the journal: the
+        orchestrator saw "approved", found nothing added, and asked again, and the operator approved
+        twice without ever learning why nothing happened."""
+        assert ask.project_id is not None
+        await self._outcome(ask, f"approved, but {what} could not be added: {reason}", reason)
+        await self.manager.projects.record(ask.project_id, "system", "folder", f"{what[0].upper()}{what[1:]} was approved but could not be added: {reason}", {"ask_id": ask.id})
+        project = await self.manager.projects.get(ask.project_id)
+        if project is None:
+            return
+        session_id = self.session_of(project)
+        clock = self._clock(_now())
+        await self._note(session_id, f"[events · {project.name} · 1 since {clock}]\n- {clock} you approved request [{ask.short_id}], but {what} could not be added: {reason}")
+        notifications = self.app.notifications
+        if notifications is not None:
+            await notifications.post(Draft(
+                "orchestrator_report",
+                f"{project.name}: {what} could not be added",
+                f"You approved request {ask.short_id}, and it failed: {reason}.",
+                kind="orchestrator_request_failed",
+                tone="error",
+                project_id=project.id,
+                link=f"/app/project/{project.id}",
+                dedupe_key=f"orchestrator-request-failed:{ask.id}",
+                source="orchestrator",
+            ))
 
     # -- the tools' hook ------------------------------------------------------------------------------
 

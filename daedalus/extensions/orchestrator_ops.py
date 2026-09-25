@@ -113,9 +113,18 @@ async def folders(
             raise Refused("env is container or host")
         if wanted != local:
             # A folder on the other side of the container is reachable only through the operator's own
-            # machine; that is theirs to open.
-            detail = {"path": path, "label": label or "", "env": wanted, "readonly": bool(readonly)}
-            ask = await orch.open_request(project, session_id, kind="folder", text=f"Add the {wanted} folder {path} to {project.name}?" + (" (read-only)" if readonly else ""), options=["Add", "Don't add"], detail=detail)
+            # machine; that is theirs to open. What the store would refuse is refused here, before the
+            # operator is asked: an approval spent on a folder that could never be added told nobody why.
+            try:
+                target = await manager.projects.check_folder(project.id, path)
+            except ProjectError as exc:
+                raise Refused(str(exc)) from exc
+            also = await manager.projects.holders(target, besides=project.id)
+            detail = {"path": str(target), "label": label or "", "env": wanted, "readonly": bool(readonly), "also_in": also}
+            text = f"Add the {wanted} folder {target} to {project.name}?" + (" (read-only)" if readonly else "")
+            if also:
+                text += f" It is also in the project{'s' if len(also) > 1 else ''} {', '.join(also)}."
+            ask = await orch.open_request(project, session_id, kind="folder", text=text, options=["Add", "Don't add"], detail=detail)
             return f"a {wanted} folder needs the operator's confirmation; asked as [{ask.short_id}]. The answer arrives as an event."
         try:
             added = await manager.projects.add_folder(project.id, path, label=label or "", env=wanted, readonly=bool(readonly))

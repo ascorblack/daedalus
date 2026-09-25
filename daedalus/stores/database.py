@@ -1256,6 +1256,45 @@ ALTER TABLE harness_launches ADD COLUMN adapter_state TEXT NOT NULL DEFAULT '';
 """)
 
 
+# A folder may belong to more than one project, once to each: the uniqueness of a folder's path moves
+# from the whole table to the project. SQLite cannot drop a column's UNIQUE, so the table is rebuilt.
+# Three columns refer to a folder by id with ON DELETE SET NULL, and a migration runs inside a
+# transaction, where foreign keys cannot be switched off: dropping the old table would quietly blank
+# every member's default folder, every task's folder and every staff session's folder. They are kept
+# aside first and written back once the rebuilt table holds the same ids.
+MIGRATIONS.append("""
+CREATE TEMP TABLE folder_references AS
+    SELECT 'staff' AS holder, id, default_folder_id AS folder_id FROM staff WHERE default_folder_id IS NOT NULL
+    UNION ALL SELECT 'board_tasks', id, folder_id FROM board_tasks WHERE folder_id IS NOT NULL
+    UNION ALL SELECT 'staff_sessions', id, folder_id FROM staff_sessions WHERE folder_id IS NOT NULL;
+CREATE TABLE project_folders_rebuilt (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    env TEXT NOT NULL CHECK (env IN ('container', 'host')),
+    is_git INTEGER NOT NULL DEFAULT 0,
+    readonly INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, path)
+);
+INSERT INTO project_folders_rebuilt(id, project_id, path, label, env, is_git, readonly, position, created_at)
+    SELECT id, project_id, path, label, env, is_git, readonly, position, created_at FROM project_folders;
+DROP TABLE project_folders;
+ALTER TABLE project_folders_rebuilt RENAME TO project_folders;
+CREATE INDEX project_folders_by_project ON project_folders(project_id, position);
+CREATE INDEX project_folders_by_path ON project_folders(path);
+UPDATE staff SET default_folder_id = (SELECT r.folder_id FROM folder_references r WHERE r.holder = 'staff' AND r.id = staff.id)
+    WHERE id IN (SELECT id FROM folder_references WHERE holder = 'staff');
+UPDATE board_tasks SET folder_id = (SELECT r.folder_id FROM folder_references r WHERE r.holder = 'board_tasks' AND r.id = board_tasks.id)
+    WHERE id IN (SELECT id FROM folder_references WHERE holder = 'board_tasks');
+UPDATE staff_sessions SET folder_id = (SELECT r.folder_id FROM folder_references r WHERE r.holder = 'staff_sessions' AND r.id = staff_sessions.id)
+    WHERE id IN (SELECT id FROM folder_references WHERE holder = 'staff_sessions');
+DROP TABLE folder_references;
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

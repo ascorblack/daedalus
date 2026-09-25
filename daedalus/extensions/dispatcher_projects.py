@@ -141,9 +141,10 @@ class ProjectMaker:
             if not isinstance(raw, dict) or not str(raw.get("path") or "").strip():
                 raise ValueError('each folder is {"path", "env": "container" or "host", "readonly"?, "label"?}')
             found = await self.check_folder(str(raw["path"]), str(raw.get("env") or ""), create_missing=create_missing, create=False)
-            if await self.manager.projects.for_path(Path(found["path"])) is not None:
-                raise ValueError(f"{found['path']} is already a project's folder")
-            checked.append({**found, "readonly": bool(raw.get("readonly")), "label": unescaped(str(raw.get("label") or ""))[:60]})
+            # A folder another project has is not refused: one place on disk may be part of several
+            # projects. The card says so, and the store still refuses one that nests in another's.
+            also = await self.manager.projects.holders(found["path"])
+            checked.append({**found, "readonly": bool(raw.get("readonly")), "label": unescaped(str(raw.get("label") or ""))[:60], "also_in": also})
         return await self._card(session_id, name=label, folders=checked, goal=" ".join(unescaped(goal or "").split())[:1000], create_missing=create_missing, start_orchestrator=start_orchestrator)
 
     async def _card(self, session_id: str, *, name: str, folders: list[dict[str, Any]], goal: str, create_missing: bool, start_orchestrator: bool) -> Ask:
@@ -151,6 +152,8 @@ class ProjectMaker:
         for folder in folders:
             what = "make" if folder.get("missing") else "use"
             text += f"\n· {what} the {folder['env']} folder {folder['path']}" + (" (read-only)" if folder.get("readonly") else "")
+            if folder.get("also_in"):
+                text += f", also in the project{'s' if len(folder['also_in']) > 1 else ''} {', '.join(folder['also_in'])}"
         if not folders:
             text += "\n· a new folder of the installation's own"
         if goal:

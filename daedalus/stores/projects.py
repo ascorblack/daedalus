@@ -423,10 +423,33 @@ class ProjectStore:
         return self._folder(row) if row is not None else None
 
     async def for_path(self, path: Path) -> Project | None:
-        """The project one of whose folders is exactly this path."""
+        """The project that first took this exact path as a folder. A folder may belong to several
+        projects; the one that had it first is the one an internal working directory is adopted into,
+        so the answer does not change when another project adds it later."""
         target = Path(os.path.normpath(path.expanduser()))
-        row = await self._db.fetchone("SELECT project_id FROM project_folders WHERE path = ?", (str(target),))
+        row = await self._db.fetchone("SELECT project_id FROM project_folders WHERE path = ? ORDER BY created_at, id LIMIT 1", (str(target),))
         return await self.get(row["project_id"]) if row is not None else None
+
+    async def holders(self, path: Path | str, *, besides: str | None = None) -> list[str]:
+        """The names of the projects that have exactly this folder, but for ``besides``: what a
+        confirmation says when the folder asked for is already part of other work."""
+        target = normalise_root(str(path))
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT p.name FROM project_folders f JOIN projects p ON p.id = f.project_id WHERE f.path = ? AND p.id != ? ORDER BY p.name COLLATE NOCASE",
+            (str(target), besides or ""),
+        )
+        return [str(r["name"]) for r in rows]
+
+    async def check_folder(self, project_id: str, path: str) -> Path:
+        """Whether ``path`` could be added to the project, by the same rules :meth:`add_folder` holds,
+        without adding it; the normalised path. A request that the operator is asked to confirm is
+        checked with this first, so an approval is never spent on a folder that was bound to fail."""
+        target = normalise_root(path)
+        self._refuse_reserved(target)
+        if await self.get(project_id) is None:
+            raise KeyError(project_id)
+        await self._refuse_overlap(target, project_id)
+        return target
 
     # -- making projects -------------------------------------------------------------
 
@@ -827,7 +850,7 @@ class ProjectStore:
             project = await self.get(project_id)
             if project is None:
                 raise KeyError(project_id)
-            await self._refuse_overlap(target)
+            await self._refuse_overlap(target, project_id)
             folder = ProjectFolder(
                 id=f"f-{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
@@ -935,20 +958,26 @@ class ProjectStore:
                     raise ProjectError(f"{path} and {other} nest; a project's folders are side by side")
             seen.append(path)
 
-    async def _refuse_overlap(self, path: Path) -> None:
-        """No two folders anywhere may be equal or nest, because containment would then mean two
-        different things at once.
+    async def _refuse_overlap(self, path: Path, project_id: str | None = None) -> None:
+        """No two folders anywhere may nest, because containment would then mean two different
+        things at once; the same folder may belong to several projects, but only once to each.
 
         A session in the outer folder may write anywhere in the inner one while the inner folder's
         own sessions may not see out — a boundary that holds in one direction is not a boundary. The
-        rule holds across environments too: a path is compared as written, and the same absolute
-        path is how both environments name a folder mounted into the container.
+        same folder in two projects has no such asymmetry: it is a reference to one place on disk,
+        each project's staff work in worktrees of their own, and each project's rules (read-only
+        included) bind that project's sessions. Refusing it once left an operator unable to give a
+        second project a repository it plainly worked on, with the refusal reaching nobody. The rule
+        holds across environments too: a path is compared as written, and the same absolute path is
+        how both environments name a folder mounted into the container.
         """
-        rows = await self._db.fetchall("SELECT f.path, p.name FROM project_folders f JOIN projects p ON p.id = f.project_id")
+        rows = await self._db.fetchall("SELECT f.path, f.project_id, p.name FROM project_folders f JOIN projects p ON p.id = f.project_id")
         for row in rows:
             other = Path(row["path"])
             if other == path:
-                raise ProjectError(f"{row['name']} is already that folder")
+                if row["project_id"] == project_id:
+                    raise ProjectError(f"{row['name']} already has the folder {path}")
+                continue
             if path in other.parents:
                 raise ProjectError(f"that folder contains the project {row['name']} ({other})")
             if other in path.parents:

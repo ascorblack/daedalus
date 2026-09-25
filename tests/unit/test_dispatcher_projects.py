@@ -66,6 +66,25 @@ async def test_a_container_folder_must_lie_under_the_allowed_roots(settings: Set
         await m.r.manager.close()
 
 
+async def test_a_folder_another_project_has_is_offered_with_that_said_and_shared_on_create(settings: Settings, db: Database, tmp_path: Path) -> None:
+    m, _maker, sid = await maker_rig(settings, db, tmp_path)
+    try:
+        roots = tmp_path / "projects"
+        (roots / "shed").mkdir(parents=True)
+        m.r.manager.config.dispatcher.container_roots = [str(roots)]
+        shed = await m.r.manager.projects.create("Shed", [str(roots / "shed")])
+        await m.call(sid, "create_project", name="Tools", folders=[{"path": str(roots / "shed"), "env": "container"}], start_orchestrator=False)
+        [card] = await m.r.manager.asks.of_origin("dispatcher")
+        assert f"use the container folder {roots / 'shed'}, also in the project Shed" in card.text
+        assert (await m.r.team.answer(card.id, selected=["Create"], by="operator", via="app"))["delivered"]
+        [tools] = [p for p in await m.r.manager.projects.list() if p.name == "Tools"]
+        assert [str(f.path) for f in tools.folders] == [str(roots / "shed")]
+        kept = await m.r.manager.projects.get(shed.id)
+        assert kept is not None and [str(f.path) for f in kept.folders] == [str(roots / "shed")]
+    finally:
+        await m.r.manager.close()
+
+
 async def test_nothing_is_created_until_the_operator_confirms_and_then_the_setup_starts(settings: Settings, db: Database, tmp_path: Path) -> None:
     m, _maker, sid = await maker_rig(settings, db, tmp_path)
     try:
