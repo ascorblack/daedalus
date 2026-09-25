@@ -205,8 +205,8 @@ describe("a real Codex session's history", () => {
     const live = await play(true);
     for (const cp of recording.checkpoints) {
       const restore = await restored(cp.snapshot, cp.cols, cp.rows);
-      // A resize reflows xterm.js's history by its own policy, and the daemon's by Ghostty's; the
-      // bake-off documents that difference. Before any resize the two must agree line for line.
+      // A resize reflows xterm.js's history by its own policy and the daemon's by Ghostty's, and the
+      // two policies differ in where they rewrap. Before any resize the two must agree line for line.
       if (cp.cp === "idle" || cp.cp.startsWith("turn-1") || cp.cp.startsWith("turn-2")) {
         expect(live.get(cp.cp), cp.cp).toEqual(restore);
       }

@@ -32,7 +32,7 @@ function lines(term: Headless | Browser): string[] {
 }
 
 const shell = (n: number) => Array.from({ length: n }, (_, i) => `shell line ${i}\r\n`).join("");
-// The bake-off's reproduction: ten lines of shell, then a region over the top three rows scrolled up
+// The reproduction: ten lines of shell, then a region over the top three rows scrolled up
 // by three, the region reset and the screen cleared for the live area.
 const PROBE = `${shell(10)}${CSI}1;3r${CSI}3S${CSI}r${CSI}1;1H${CSI}Jviewport`;
 
