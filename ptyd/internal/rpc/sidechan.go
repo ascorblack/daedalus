@@ -39,6 +39,7 @@ func (d *Daemon) registerSide(srv *server.Server) {
 	srv.Handle("fs.tail", d.fsTail)
 	srv.Handle("fs.set_roots", d.fsSetRoots)
 	srv.Handle("fs.mkdir", d.fsMkdir)
+	srv.Handle("fs.write", d.fsWrite)
 	srv.Handle("net.dial", d.netDial)
 	srv.Handle("net.allow", d.netAllow)
 	srv.Handle("hooks.register_launch", d.registerLaunch)
@@ -204,6 +205,26 @@ func (d *Daemon) fsMkdir(ctx context.Context, c *server.Conn, params json.RawMes
 		sidechan.Stat
 		Created bool `json:"created"`
 	}{st, created}, nil
+}
+
+// fsWrite is a file handed to a staff member, written into its inbox under a root: logged, as
+// every write the side channels make is.
+func (d *Daemon) fsWrite(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {
+	var p struct {
+		Path   string `json:"path"`
+		Offset int64  `json:"offset"`
+		Data   []byte `json:"data_b64"`
+	}
+	if err := decode(params, &p); err != nil {
+		return nil, err
+	}
+	w, err := d.Side.FS.Write(p.Path, p.Offset, p.Data)
+	if err != nil {
+		d.logRefusal("fs.write", p.Path, err)
+		return nil, sideError(err)
+	}
+	d.Log.Info("fs.write", "path", p.Path, "offset", p.Offset, "bytes", len(p.Data), "size", w.Size)
+	return w, nil
 }
 
 func (d *Daemon) fsSetRoots(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {

@@ -399,3 +399,99 @@ func TestMkdirRootMakesAFolderWithItsParentsOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteGoesIntoAStaffInboxAndNowhereElse(t *testing.T) {
+	tr := newTree(t)
+	inbox := filepath.Join(tr.project, ".agents", "inbox", "t1")
+	target := filepath.Join(inbox, "spec.md")
+	w, err := tr.fs.Write(target, 0, []byte("first "))
+	if err != nil || !w.Created || w.Size != 6 {
+		t.Fatalf("%+v %v", w, err)
+	}
+	// A file larger than one frame continues by offset; a wrong offset is refused, not padded.
+	if w, err = tr.fs.Write(target, 6, []byte("second")); err != nil || w.Created || w.Size != 12 {
+		t.Fatalf("%+v %v", w, err)
+	}
+	if _, err := tr.fs.Write(target, 3, []byte("x")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a gap or an overlap: %v", err)
+	}
+	if body, _ := os.ReadFile(target); string(body) != "first second" {
+		t.Fatalf("%q", body)
+	}
+	// What a member was given never changes under it.
+	if _, err := tr.fs.Write(target, 0, []byte("other")); !errors.Is(err, ErrExists) {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(tr.project, ".agents", "inbox", ".gitignore"), 0, []byte("*\n")); err != nil {
+		t.Fatalf("the inbox's ignore file: %v", err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(tr.project, ".agents", ".gitignore"), 0, []byte("*\n")); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("an ignore file for all of .agents, which may hold the operator's own files: %v", err)
+	}
+	// A worktree's own inbox is an inbox too: the last .agents of the path counts.
+	nested := filepath.Join(tr.project, ".agents", "worktrees", "ira", ".agents", "inbox", "t2", "a.bin")
+	if _, err := tr.fs.Write(nested, 0, []byte{0, 1, 2}); err != nil {
+		t.Fatalf("a worktree's inbox: %v", err)
+	}
+	for _, p := range []string{
+		filepath.Join(tr.project, "README.md"),                          // any other file of a root
+		filepath.Join(tr.project, "new.txt"),                            // a new file outside an inbox
+		filepath.Join(tr.project, ".agents", "inbox"),                   // the inbox itself, not a file in it
+		filepath.Join(tr.project, ".agents", "worktrees", "x", "a.txt"), // elsewhere under .agents
+		filepath.Join(tr.project, ".agents", "inbox", "t1", "..", "..", "..", "README.md"),
+		filepath.Join(tr.outside, ".agents", "inbox", "t1", "a.txt"),  // an inbox outside every root
+		filepath.Join(tr.home, ".ssh", ".agents", "inbox", "t1", "a"), // an inbox in a denied place
+	} {
+		if _, err := tr.fs.Write(p, 0, []byte("x")); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("%s: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tr.outside, ".agents")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write made directories: %v", err)
+	}
+	if _, err := tr.fs.Write("relative/.agents/inbox/t/a", 0, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("relative: %v", err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(inbox, "big"), 0, make([]byte, 512<<10+1)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a chunk over a frame: %v", err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(inbox, "big"), 50<<20, []byte("x")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a file over the limit: %v", err)
+	}
+}
+
+func TestWriteRefusesAnInboxThatIsALinkToElsewhere(t *testing.T) {
+	tr := newTree(t)
+	// .agents replaced by a link out of the root: the write must not follow it.
+	if err := os.Symlink(tr.outside, filepath.Join(tr.project, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(tr.project, ".agents", "inbox", "t1", "a.txt"), 0, []byte("x")); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("through a link out of the root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tr.outside, "inbox")); !os.IsNotExist(err) {
+		t.Fatalf("something was made through the link: %v", err)
+	}
+	// The file itself a link: O_NOFOLLOW refuses it even inside the inbox.
+	os.Remove(filepath.Join(tr.project, ".agents"))
+	inbox := filepath.Join(tr.project, ".agents", "inbox", "t1")
+	if err := os.MkdirAll(inbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(tr.project, "README.md"), filepath.Join(inbox, "readme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(inbox, "readme"), 5, []byte("!")); err == nil {
+		t.Fatal("wrote through a link in the inbox")
+	}
+	if body, _ := os.ReadFile(filepath.Join(tr.project, "README.md")); string(body) != "hello" {
+		t.Fatalf("the linked file changed: %q", body)
+	}
+	// A FIFO is refused, not waited on.
+	if err := syscall.Mkfifo(filepath.Join(inbox, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.fs.Write(filepath.Join(inbox, "pipe"), 1, []byte("x")); err == nil {
+		t.Fatal("wrote into a FIFO")
+	}
+}

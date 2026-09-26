@@ -454,6 +454,8 @@ class FakePtyd:
             real.mkdir(parents=True, exist_ok=True)
             self.made.append(str(real))
             return {"exists": True, "type": "dir", "size": 0, "mtime": stamp(), "mode": "0755", "writable": True, "created": created}
+        if method == "fs.write":
+            return write_inbox(self._under_root, params)
         if method == "fs.stat":
             real = self._under_root(params["path"])
             if not real.exists():
@@ -536,6 +538,53 @@ class _RpcFail(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def inbox_target(path: str) -> bool:
+    """The daemon's rule for ``fs.write``: below the last ``.agents`` of the path, a file of ``inbox/<…>/``."""
+    parts = path.split("/")
+    last = max((i for i, part in enumerate(parts) if part == ".agents"), default=-1)
+    if last < 1:
+        return False
+    rest = parts[last + 1 :]
+    return len(rest) >= 2 and rest[0] == "inbox" and bool(rest[-1])
+
+
+def write_inbox(real_root_check: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """``fs.write`` as the daemon does it, over this machine's files: the inbox rule, the roots
+    (``real_root_check`` raises for a path outside them), exclusive creation, continuation by offset."""
+    path = str(params["path"])
+    if not path.startswith("/"):
+        raise _RpcFail(-32602, "the path must be absolute")
+    clean = os.path.normpath(path)
+    if not inbox_target(clean):
+        raise _RpcFail(1004, f"{clean} is not in a staff inbox (<folder>/.agents/inbox/...)")
+    data = base64.b64decode(params.get("data_b64") or "")
+    offset = int(params.get("offset") or 0)
+    if len(data) > 512 << 10 or offset < 0 or offset + len(data) > 50 << 20:
+        raise _RpcFail(-32602, "too much for one write or one file")
+    parent = Path(clean).parent
+    real_root_check(str(parent))
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent.resolve() / Path(clean).name
+    real_root_check(str(target.parent))
+    if not inbox_target(str(target)):
+        raise _RpcFail(1004, f"{clean} resolves outside a staff inbox")
+    if offset == 0:
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        except FileExistsError:
+            raise _RpcFail(1004, f"forbidden: the file exists: {clean}") from None
+    else:
+        fd = os.open(target, os.O_WRONLY | os.O_NOFOLLOW)
+        if os.fstat(fd).st_size != offset:
+            os.close(fd)
+            raise _RpcFail(-32602, f"{clean} does not hold {offset} bytes")
+    try:
+        os.pwrite(fd, data, offset)
+    finally:
+        os.close(fd)
+    return {"size": offset + len(data), "created": offset == 0}
 
 
 __all__ = ["FakeChannel", "FakePtyd", "FakeTerminal"]

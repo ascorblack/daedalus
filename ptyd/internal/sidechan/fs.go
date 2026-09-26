@@ -19,7 +19,7 @@ import (
 )
 
 // FS reads files under the allowed roots for the host: transcripts, session stores, a CLI's own
-// agent definitions. It never writes.
+// agent definitions. It writes in one place only: a staff member's inbox (see Write).
 //
 // A path is allowed when, both as written and as the filesystem resolves it, it lies under a root
 // and matches no deny pattern. The check is made again on the file actually opened (its path as the
@@ -646,4 +646,113 @@ func (f *FS) tailOnce(p string, from int64, n int, fileIDWas string) (Tail, bool
 		t.Data, t.NextOffset = data, from+int64(len(data))
 	}
 	return t, len(t.Data) > 0 || t.Rotated, nil
+}
+
+// Written is fs.write's answer: the file's size after the write, and whether this call made it.
+type Written struct {
+	Size    int64 `json:"size"`
+	Created bool  `json:"created"`
+}
+
+// ErrExists is a file fs.write was asked to create that is there already. The host looks before it
+// writes and picks another name; a file is never overwritten, because what a member was given must
+// not change under it.
+var ErrExists = fmt.Errorf("%w: the file exists", ErrForbidden)
+
+// inboxTarget reports whether a path is one fs.write may write: below the last `.agents` of the
+// path, `inbox/<...>/<name>` — a file handed to a staff member, or the inbox's own `.gitignore`,
+// which keeps it out of a repository whose exclude file the host cannot reach.
+func inboxTarget(p string) bool {
+	segs := strings.Split(filepath.ToSlash(p), "/")
+	last := -1
+	for i, s := range segs {
+		if s == ".agents" || (foldPaths && strings.EqualFold(s, ".agents")) {
+			last = i
+		}
+	}
+	if last < 1 {
+		return false
+	}
+	rest := segs[last+1:]
+	return len(rest) >= 2 && rest[0] == "inbox" && rest[len(rest)-1] != ""
+}
+
+// Write writes data at offset into a file of a staff member's inbox: the side channels' only file
+// write, because a member working on the host can open nothing the agent's container holds.
+//
+// The path is held to every rule a read is — under a root as written and as resolved, nothing
+// denied, nothing of the daemon's own — and must also be an inbox target (see inboxTarget), so a
+// root is not thereby writable anywhere else. Offset 0 creates the file and refuses one that is
+// there (ErrExists); a later offset continues a regular file that holds exactly offset bytes, which
+// is how the host sends a file larger than one frame. The missing directories are made, and the
+// directory and the opened file are checked again afterwards: an `.agents` swapped for a symbolic
+// link to elsewhere is refused, not written through.
+func (f *FS) Write(p string, offset int64, data []byte) (Written, error) {
+	if len(data) > config.MaxFSWrite {
+		return Written{}, fmt.Errorf("%w: one write carries at most %d bytes", ErrInvalid, config.MaxFSWrite)
+	}
+	if offset < 0 || offset+int64(len(data)) > config.MaxFSWriteFile {
+		return Written{}, fmt.Errorf("%w: a file written here is at most %d bytes", ErrInvalid, config.MaxFSWriteFile)
+	}
+	if !filepath.IsAbs(p) {
+		return Written{}, fmt.Errorf("%w: the path must be absolute", ErrInvalid)
+	}
+	clean := filepath.Clean(p)
+	if !inboxTarget(clean) {
+		return Written{}, fmt.Errorf("%w: %s is not in a staff inbox (<folder>/.agents/inbox/...)", ErrForbidden, clean)
+	}
+	dir, name := filepath.Dir(clean), filepath.Base(clean)
+	if _, _, _, err := f.resolve(dir); err != nil {
+		return Written{}, err
+	}
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		return Written{}, err
+	}
+	dirClean, dirReal, exists, err := f.resolve(dir)
+	if err != nil {
+		return Written{}, err
+	}
+	if !exists {
+		return Written{}, fmt.Errorf("%w: %s", ErrNotFound, dirClean)
+	}
+	target := filepath.Join(dirReal, name)
+	if !inboxTarget(target) {
+		return Written{}, fmt.Errorf("%w: %s resolves outside a staff inbox", ErrForbidden, clean)
+	}
+	if err := f.allowed(clean, target); err != nil {
+		return Written{}, err
+	}
+	file, err := openForWrite(target, offset == 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return Written{}, fmt.Errorf("%w: %s", ErrExists, clean)
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return Written{}, fmt.Errorf("%w: %s", ErrNotFound, clean)
+		}
+		return Written{}, err
+	}
+	defer file.Close()
+	if opened, ok := openedPath(file); ok {
+		if err := f.allowed(clean, opened); err != nil {
+			return Written{}, err
+		}
+		if !inboxTarget(opened) {
+			return Written{}, fmt.Errorf("%w: %s resolves outside a staff inbox", ErrForbidden, clean)
+		}
+	}
+	st, err := file.Stat()
+	if err != nil {
+		return Written{}, err
+	}
+	if !st.Mode().IsRegular() {
+		return Written{}, fmt.Errorf("%w: %s is not a regular file", ErrInvalid, clean)
+	}
+	if offset > 0 && st.Size() != offset {
+		return Written{}, fmt.Errorf("%w: %s holds %d bytes, not %d", ErrInvalid, clean, st.Size(), offset)
+	}
+	if _, err := file.WriteAt(data, offset); err != nil {
+		return Written{}, err
+	}
+	return Written{Size: offset + int64(len(data)), Created: offset == 0}, nil
 }

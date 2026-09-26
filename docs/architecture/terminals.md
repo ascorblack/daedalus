@@ -694,7 +694,8 @@ FIFOs and devices are refused.
 | Method | Params → result |
 |---|---|
 | `fs.stat` | `{path, as_root?}` → `{exists, type, size, mtime, mode, file_id}`; a missing path under a root is `{exists: false}`. With `as_root`, the path need not be under a root: it is held to the rules a root is (not `/`, not holding the home directory, nothing denied or the daemon's own) and the answer adds `writable` |
-| `fs.mkdir` | `{path}` → `fs.stat {as_root}`'s answer plus `created`: makes a folder that is to become a root (a project folder), with its parents, under the same rules; an existing folder is left as it is. The side channels' only write |
+| `fs.mkdir` | `{path}` → `fs.stat {as_root}`'s answer plus `created`: makes a folder that is to become a root (a project folder), with its parents, under the same rules; an existing folder is left as it is |
+| `fs.write` | `{path, offset, data_b64}` → `{size, created}`: a file handed to a staff member. Only inside an inbox — below the last `.agents` of the path, `inbox/<…>/<name>` — under a root, by the read rules (resolved, not denied, not the daemon's own); the directories are made and checked again, the file is opened without following a link. Offset 0 creates and refuses an existing file; a later offset continues one that holds exactly that many bytes. At most 512 KiB a call and 50 MiB a file. With `fs.mkdir`, the side channels' only writes |
 | `fs.list` | `{path, glob?, sort? "name"\|"mtime", limit? ≤ 5000}` → `{entries[{name, type, size, mtime}], truncated}`; denied entries are left out, symlinks listed as such |
 | `fs.read` | `{path, offset?, max? ≤ 4 MiB}` → `{data_b64, offset, size, eof, file_id}` |
 | `fs.tail` | `{path, from_offset, max?, follow_ms? ≤ 60 000, file_id?}` → `{data_b64, next_offset, size, rotated, file_id}` |
@@ -880,7 +881,9 @@ because the token in them is a shell.
   file (a killed daemon leaves that behind); `check_folder(path, create_missing=)` checks or makes a
   project folder through `fs.stat {as_root}` / `fs.mkdir` and says whether it is a git work tree;
   `exec_run` runs git for the staff worktrees of host folders, and a call that cannot reach the
-  daemon is an `OSError` there, so "the bridge is down" is never mistaken for git failing. Project
+  daemon is an `OSError` there, so "the bridge is down" is never mistaken for git failing;
+  `write(path, offset, data)` puts a file handed to a staff member on the host into its inbox
+  through `fs.write` (a daemon older than that call answers "update the host terminal"). Project
   folders accept a host folder only while it answers.
 
 | Route | |

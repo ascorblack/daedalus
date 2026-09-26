@@ -31,6 +31,11 @@ const (
 	// one reply carries is MaxReplyData.
 	MaxFSRead = 4 << 20
 
+	// MaxFSWrite is the most one fs.write carries (base64 in one frame), and MaxFSWriteFile the
+	// largest file it builds by offset: a file handed to a staff member, never a disk image.
+	MaxFSWrite     = 512 << 10
+	MaxFSWriteFile = 50 << 20
+
 	// MaxFSList and DefaultFSList bound the entries of one fs.list.
 	MaxFSList     = 5000
 	DefaultFSList = 1000

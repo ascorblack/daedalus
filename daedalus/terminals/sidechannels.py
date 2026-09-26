@@ -232,6 +232,21 @@ class SideChannels:
         await self.audit("", env, actor, "mkdir", {"path": path, "created": bool(result.get("created"))})
         return result
 
+    async def fs_write(self, env: str, path: str, data: bytes, *, offset: int = 0, actor: str = "system") -> dict[str, Any]:
+        """Write ``data`` at ``offset`` into a file of a staff member's inbox (``<folder>/.agents/inbox/…``);
+        ``{size, created}``. Offset 0 creates the file and is refused when it
+        exists; a later offset continues it. Nothing outside an inbox can be written, whatever the roots,
+        and every call is audited with the bytes' hash."""
+        detail: dict[str, Any] = {"path": path, "offset": offset, "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        params = {"path": path, "offset": offset, "data_b64": base64.b64encode(data).decode()}
+        try:
+            result: dict[str, Any] = await self._side_call(env, "fs.write", params, what=f"writing {path}", timeout=30.0)
+        except TerminalError as exc:
+            await self.audit("", env, actor, "write", {**detail, "error": exc.message})
+            raise
+        await self.audit("", env, actor, "write", {**detail, "size": int(result.get("size") or 0)})
+        return result
+
     async def fs_list(self, env: str, path: str, *, glob: str | None = None, sort: str = "name", limit: int = 1000) -> dict[str, Any]:
         """``{entries: [{name, type, size, mtime}], truncated}``; files on the deny list are left out."""
         params: dict[str, Any] = {"path": path, "sort": sort, "limit": limit}

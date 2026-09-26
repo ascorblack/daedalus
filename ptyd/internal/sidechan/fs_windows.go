@@ -40,6 +40,33 @@ func openNoFollow(p string, dir bool) (*os.File, error) {
 	return os.NewFile(uintptr(h), p), nil
 }
 
+// openForWrite opens a file of an inbox for writing without following a link or a junction in its
+// last component: create makes it and refuses one that exists; otherwise it must exist.
+func openForWrite(p string, create bool) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	disposition := uint32(windows.OPEN_EXISTING)
+	if create {
+		disposition = windows.CREATE_NEW
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, nil, disposition, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		windows.CloseHandle(h)
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		windows.CloseHandle(h)
+		return nil, &os.PathError{Op: "open", Path: p, Err: syscall.ELOOP}
+	}
+	return os.NewFile(uintptr(h), p), nil
+}
+
 // volumeNameDOS asks GetFinalPathNameByHandle for a drive-letter path (VOLUME_NAME_DOS, with
 // FILE_NAME_NORMALIZED; both are zero).
 const volumeNameDOS = 0

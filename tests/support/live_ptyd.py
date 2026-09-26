@@ -55,7 +55,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tests.support.fake_ptyd import FakePtyd, FakeTerminal, _RpcFail, stamp
+from tests.support.fake_ptyd import FakePtyd, FakeTerminal, _RpcFail, stamp, write_inbox
 from tests.support.fake_screen import FakeScreen
 
 RING_BYTES = 8 << 20
@@ -771,6 +771,9 @@ class LivePtyd(FakePtyd):
         path.mkdir(parents=True, exist_ok=True)
         st = path.stat()
         return {"exists": True, "type": "dir", "size": st.st_size, "mtime": stamp_of(st.st_mtime), "writable": True, "created": created}
+
+    async def _m_fs_write(self, params: dict[str, Any]) -> dict[str, Any]:
+        return write_inbox(self._allowed_path, params)
 
     async def _m_fs_list(self, params: dict[str, Any]) -> dict[str, Any]:
         real = self._allowed_path(str(params["path"]))

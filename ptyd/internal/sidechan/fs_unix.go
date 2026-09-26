@@ -24,6 +24,22 @@ func openNoFollow(p string, dir bool) (*os.File, error) {
 	return os.NewFile(uintptr(fd), p), nil
 }
 
+// openForWrite opens a file of an inbox for writing without following a symlink in its last
+// component: create makes it and refuses one that exists; otherwise it must exist. O_NONBLOCK makes
+// the open of a FIFO with no reader fail rather than wait.
+func openForWrite(p string, create bool) (*os.File, error) {
+	flags := syscall.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+	if create {
+		flags |= syscall.O_CREAT | syscall.O_EXCL
+	}
+	fd, err := syscall.Open(p, flags, 0o666)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	_ = syscall.SetNonblock(fd, false)
+	return os.NewFile(uintptr(fd), p), nil
+}
+
 // fileID tells one file from another at the same path: its device and inode.
 func fileID(st os.FileInfo) string {
 	if s, ok := st.Sys().(*syscall.Stat_t); ok {

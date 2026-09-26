@@ -96,6 +96,20 @@ class HostBridge:
         """Up to ``max_bytes`` of a file under the host's roots, from ``offset``."""
         return await self._side(lambda service: service.fs_read(HOST, path, offset=offset, max_bytes=max_bytes))
 
+    async def write(self, path: str, data: bytes, *, offset: int = 0, actor: str = "system") -> dict[str, Any]:
+        """Write into a file of a staff member's inbox on the host (``<folder>/.agents/inbox/…``); see
+        ``fs_write``. An existing file at offset 0 is a ``FileExistsError``; a daemon older than the call
+        is an ``OSError`` that says to update the host terminal."""
+        try:
+            return await self._side(lambda service: service.fs_write(HOST, path, data, offset=offset, actor=actor))
+        except OSError as exc:
+            text = str(exc)
+            if "not available in this terminal service" in text:
+                raise OSError("the host terminal daemon is older than this version and cannot receive files; update it (bash deploy/host-terminal.sh install, which ends the open host terminals)") from None
+            if "the file exists" in text:
+                raise FileExistsError(text) from None
+            raise
+
     async def _side(self, call: Callable[[Terminals], Awaitable[_T]]) -> _T:
         """A file read on the host, with the errors the readers tell apart: the bridge being down is a
         ``ConnectionError``, a path that is not there a ``FileNotFoundError``, and any other refusal

@@ -240,6 +240,38 @@ func TestAFolderIsCheckedAndMadeOverTheSocket(t *testing.T) {
 	}
 }
 
+func TestAFileIsWrittenIntoAnInboxOverTheSocket(t *testing.T) {
+	f, _ := startSide(t)
+	project := filepath.Join(f.dir, "project")
+	var roots map[string]any
+	f.call(t, "fs.set_roots", map[string]any{"roots": []string{project}}, &roots)
+	target := filepath.Join(project, ".agents", "inbox", "t1", "spec.md")
+	var w struct {
+		Size    int64 `json:"size"`
+		Created bool  `json:"created"`
+	}
+	f.call(t, "fs.write", map[string]any{"path": target, "offset": 0, "data_b64": []byte("hello ")}, &w)
+	if !w.Created || w.Size != 6 {
+		t.Fatalf("%+v", w)
+	}
+	f.call(t, "fs.write", map[string]any{"path": target, "offset": 6, "data_b64": []byte("world")}, &w)
+	if w.Created || w.Size != 11 {
+		t.Fatalf("%+v", w)
+	}
+	if body, _ := os.ReadFile(target); string(body) != "hello world" {
+		t.Fatalf("%q", body)
+	}
+	if we := f.callErr("fs.write", map[string]any{"path": target, "offset": 0, "data_b64": []byte("x")}); we == nil || we.Code != wire.CodeForbidden {
+		t.Fatalf("overwrite: %v", we)
+	}
+	if we := f.callErr("fs.write", map[string]any{"path": filepath.Join(project, "README.md"), "offset": 0, "data_b64": []byte("x")}); we == nil || we.Code != wire.CodeForbidden {
+		t.Fatalf("outside an inbox: %v", we)
+	}
+	if we := f.callErr("fs.write", map[string]any{"path": filepath.Join(f.dir, "home", ".agents", "inbox", "t", "a"), "offset": 0, "data_b64": []byte("x")}); we == nil || we.Code != wire.CodeForbidden {
+		t.Fatalf("outside the roots: %v", we)
+	}
+}
+
 // echoServer answers every connection by echoing what it reads, until the listener closes.
 func echoServer(t *testing.T, ln net.Listener) {
 	t.Helper()
