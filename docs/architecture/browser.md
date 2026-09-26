@@ -151,10 +151,12 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
   closes a browser to make room: that is the host's decision (the cap queue).
 - Groups per browser are capped at `max_groups_per_browser` (8), tabs per group at
   `max_tabs_per_group` (8).
-- `viewport` is the page's size in CSS pixels, default 1280×800, each side 320–3840. It is set on every
-  page of the group with `Emulation.setDeviceMetricsOverride`, because `--window-size` in
-  `--headless=new` leaves room for a window frame the page never shows (a 1280×800 window gave a
-  1280×657 page).
+- `viewport` is the page's size in CSS pixels, default 1280×800, each side 320–3840. The daemon sizes
+  each page's window so that the page inside it is exactly that (`Browser.setWindowBounds`, with the
+  window's own frame measured on the browser's first page: a 1280×800 window in `--headless=new`
+  holds a 1280×657 page). It does not emulate a size: the pinned Chromium's screencast shows the
+  window whatever `Emulation.setDeviceMetricsOverride` says, so an emulated viewport would put every
+  click beside what the frame shows.
 - No Chromium is `1007 {reason}`; a Chromium that cannot start its sandbox is `1007` with the reason
   `capabilities.sandbox` gives.
 
@@ -309,7 +311,7 @@ are in `data`. The daemon keeps the last 20 000, no more than 64 MiB. `events.su
 | `browser.exited` | `{browser_id, profile, code, crashed, reason: "closed" \| "idle" \| "crashed" \| "memory" \| "shutdown", groups[]}` |
 | `group.opened`, `group.closed` | `{group_id, browser_id, profile, labels}` |
 | `tab.created` | `{group_id, tab: Tab}` |
-| `tab.updated` | `{group_id, tab_id, url, title, favicon_url, loading}` — at most one per 250 ms per tab, the latest wins |
+| `tab.updated` | `{group_id, tab_id, url, title, favicon_url, loading}` — at most one per 250 ms per tab, the latest wins. A title a script sets raises no event in Chromium: it is read when the tabs are listed, and once a second while the browser is watched |
 | `tab.closed` | `{group_id, tab_id}` |
 | `tab.refused` | `{group_id, url, reason: "tab_cap"}` |
 | `action` | `{action_id, group_id, tab_id, actor, kind, point{x, y}, box{x, y, w, h}, name, element, text_len?, keys?, at}` |
