@@ -151,10 +151,12 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
   closes a browser to make room: that is the host's decision (the cap queue).
 - Groups per browser are capped at `max_groups_per_browser` (8), tabs per group at
   `max_tabs_per_group` (8).
-- `viewport` is the page's size in CSS pixels, default 1280×800, each side 320–3840. It is set on every
-  page of the group with `Emulation.setDeviceMetricsOverride`, because `--window-size` in
-  `--headless=new` leaves room for a window frame the page never shows (a 1280×800 window gave a
-  1280×657 page).
+- `viewport` is the page's size in CSS pixels, default 1280×800, each side 320–3840. The daemon sizes
+  each page's window so that the page inside it is exactly that (`Browser.setWindowBounds`, with the
+  window's own frame measured on the browser's first page: a 1280×800 window in `--headless=new`
+  holds a 1280×657 page). It does not emulate a size: the pinned Chromium's screencast shows the
+  window whatever `Emulation.setDeviceMetricsOverride` says, so an emulated viewport would put every
+  click beside what the frame shows.
 - No Chromium is `1007 {reason}`; a Chromium that cannot start its sandbox is `1007` with the reason
   `capabilities.sandbox` gives.
 
@@ -201,17 +203,27 @@ upload_ids?, dry_run?, origin?}`
   offset derived from the action id, never outside) with `Input.dispatchMouseEvent`; text goes in
   with `Input.insertText` and keys with `Input.dispatchKeyEvent`. Pages see trusted events
   (`isTrusted` is true, measured).
-- **Secret fields.** `type`, `press` into, and `select` on a password field, a field whose
-  `autocomplete` is `current-password`, `new-password`, `one-time-code` or any `cc-*`, or a field the
-  operator typed into while driving, fail `1105` and publish `needs_you {reason: "field_forbidden"}`.
-  Clicking such a field is allowed; typing into it is the operator's.
-- **Dry run.** With `dry_run: true` nothing is done. The reply is `{element{role, name, tag, type?,
-  autocomplete?, href?, form_action?}, point, box, sensitive{kinds[], evidence{}}}` — the host's
-  preflight for the sensitive-action policy (Sensitive actions, below). The same `sensitive` is in
-  the reply of the real action.
-- **The reply** is `{action_id, ok, effects{navigated?, url?, new_tab?, dialog?, download?}, point,
-  box, diff?}`. `point` and `box` are in CSS pixels of the viewport, as dispatched. `diff` is a short
-  snapshot (at most 2 KB) of what changed around the element, in the snapshot's format.
+- **Secret fields.** `type`, `select`, and a `press` that would type a character into a password
+  field, a field whose `autocomplete` is `current-password`, `new-password`, `one-time-code` or any
+  `cc-*`, or a field the operator typed into while driving, fail `1105` and publish `needs_you
+  {reason: "field_forbidden"}`. Clicking such a field is allowed, and so is pressing Enter or Tab in
+  it (Enter submits, which the sensitive preflight calls `credentials`); typing into it is the
+  operator's.
+- **Covered elements.** A click whose point lands on another element than the ref (an overlay, a
+  cookie banner, something a page put there to catch clicks) is refused with `1004 {ref,
+  covered_by}` rather than dispatched: the click would act on something the snapshot did not name.
+- **Dry run.** With `dry_run: true` nothing is done. The reply is `{action_id, ok, effects: {},
+  element{role, name, tag, type?, autocomplete?, href?, form_action?, secret, secret_kind, disabled,
+  checked, file, select}, point, box, sensitive{kinds[], evidence{}}}` — the host's preflight for the
+  sensitive-action policy (Sensitive actions, below). The same `element` and `sensitive` are in the
+  reply of the real action.
+- **The reply** is `{action_id, ok, effects{navigated?, url?, new_tab?, dialog?, download?,
+  unchanged?}, point, box, element, sensitive, diff?}`. `point` and `box` are in CSS pixels of the
+  viewport, as dispatched. `diff` is what the action changed in the page's outline, lines that
+  appeared as `+ …` and lines that went as `- …`, at most 2 KB; it is left out after a navigation.
+  `unchanged` says a `check` or `uncheck` found the box already so. An action that starts a
+  navigation returns once the new page has loaded (at most 10 s); one that opens a dialog returns
+  with the dialog in `effects`.
 - Before the input is dispatched the daemon publishes `action`, and after it `action_done` (Events).
 - An open dialog makes every page method except `dialog.answer` fail `1107`.
 
@@ -219,10 +231,12 @@ upload_ids?, dry_run?, origin?}`
 
 - `upload.put` streams a file into `<state>/uploads/<group>/<upload_id>/<name>` in chunks of at most
   512 KiB: the first call without `upload_id` and at offset 0 creates it, later calls continue it at
-  exactly its size. At most `max_upload_bytes` (100 MiB) a file. `page.act {action: "upload"}` sets the
-  files on the input (`DOM.setFileInputFiles`) and removes them from the state directory once the page
-  has them. The daemon never sees a workspace path: the host reads the file through its walls.
-- Downloads land in `<state>/downloads/<group>/` (`Browser.setDownloadBehavior allowAndName`).
+  exactly its size. `name` is one plain file name. At most `max_upload_bytes` (100 MiB) a file.
+  `page.act {action: "upload"}` sets the files on the input (`DOM.setFileInputFiles`). The files stay
+  until the group closes: Chromium reads a chosen file when the form is sent, not when it is chosen.
+  The daemon never sees a workspace path: the host reads the file through its walls.
+- Downloads are saved by Chromium under the state directory (`Browser.setDownloadBehavior
+  allowAndName`) and kept there per group until the group closes or `download.delete`.
   `Download {id, group_id, tab_id, name, url, mime?, size, state: "in_progress" | "completed" |
   "canceled" | "failed" | "too_large", sha256?, started_at, finished_at?}`. One past
   `max_download_bytes` (500 MiB) is cancelled as `too_large`; a profile's downloads are capped at 2
@@ -258,12 +272,17 @@ world** (`Page.createIsolatedWorld`), so the page's scripts can neither see nor 
   snapshot, in `page.text`, or in a `diff`: the node carries `[secret]` instead.
 - `scope_ref` returns only that element's subtree. `max_chars` cuts the outline; `truncated` says so,
   and the cut keeps the focused element's region and ends with a line naming the refs to scope to.
-- `refs` is the number of refs; `frames` lists `{ref, url, cross_origin}` for the frames included.
+- `refs` is the number of refs; `frames` lists `{ref, url, cross_origin}` for the frames met.
+  Same-origin frames are read into the outline under their `iframe` line. **A frame of another
+  site is listed but not read** (*not yet*): its line says so, and nothing in it has refs. Payment
+  forms usually live in such frames, and their fields are the operator's anyway.
+- Shadow DOM is read where it is open; a closed shadow root is as opaque to the daemon as to any
+  script. An unlabelled file input is `button "Choose file"`, as Chromium draws it.
 - The text is the page's own words. The host frames it as untrusted before any model reads it; the
   daemon adds nothing.
 
-`page.text` returns the page's readable text (the main content, as a reader view extracts it), or one
-element's, with the same masking. `page.screenshot` masks secret fields before the capture (their
+`page.text` returns the page's readable text (the `main` landmark or the article, else the body
+without its navigation, header and footer), or one element's, with the same masking. `page.screenshot` masks secret fields before the capture (their
 text is hidden and a blank box drawn over them, then both removed), and `masked` lists their refs.
 
 ## Sensitive actions
@@ -291,7 +310,8 @@ tap. The daemon only classifies; asking is the host's policy.
   `dialog.closed` follows.
 - `page.wait`: `load` (the load event), `idle` (no network request for 500 ms), `text` (the text
   appears in the page), `gone` (a ref, or a text, disappears), `url` (the URL contains `value`).
-- **`needs_you {group_id, tab_id, reason, what, url}`** asks for the operator. The daemon raises it on
+- **`needs_you {group_id, tab_id, reason, what, url, by}`** asks for the operator; `by` is `daemon`
+  for the ones below. The daemon raises it on
   its own for `field_forbidden` (above), `captcha` (a reCAPTCHA, hCaptcha or Turnstile frame
   appears) and `basic_auth` (an HTTP authentication challenge, which the daemon cancels: the agent
   never answers one). The host raises the others (`login`, `two_factor`, `payment`, `confirm`,
@@ -309,7 +329,7 @@ are in `data`. The daemon keeps the last 20 000, no more than 64 MiB. `events.su
 | `browser.exited` | `{browser_id, profile, code, crashed, reason: "closed" \| "idle" \| "crashed" \| "memory" \| "shutdown", groups[]}` |
 | `group.opened`, `group.closed` | `{group_id, browser_id, profile, labels}` |
 | `tab.created` | `{group_id, tab: Tab}` |
-| `tab.updated` | `{group_id, tab_id, url, title, favicon_url, loading}` — at most one per 250 ms per tab, the latest wins |
+| `tab.updated` | `{group_id, tab_id, url, title, favicon_url, loading}` — at most one per 250 ms per tab, the latest wins. A title a script sets raises no event in Chromium: it is read when the tabs are listed, and once a second while the browser is watched |
 | `tab.closed` | `{group_id, tab_id}` |
 | `tab.refused` | `{group_id, url, reason: "tab_cap"}` |
 | `action` | `{action_id, group_id, tab_id, actor, kind, point{x, y}, box{x, y, w, h}, name, element, text_len?, keys?, at}` |

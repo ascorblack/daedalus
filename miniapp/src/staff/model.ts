@@ -97,6 +97,16 @@ export function nowChoice(caps: Pick<HarnessCapabilities, "steer"> | null | unde
   return { enabled: true, hint: caps.steer === "native" ? "staff.now.native" : "staff.now.tui" };
 }
 
+/**
+ * The timing the staff composer sends: what the operator picked, else "now" as for the orchestrator's
+ * Tell — except where "now" would stop the member's turn, which only a deliberate choice may do — and
+ * "after the turn" wherever the CLI cannot take a message into a running turn at all.
+ */
+export function composerWhen(now: NowChoice, picked: "now" | "after_turn" | null): "now" | "after_turn" {
+  if (!now.enabled) return "after_turn";
+  return picked ?? (now.hint === "staff.now.interrupts" ? "after_turn" : "now");
+}
+
 /** Whether a permission can be answered "always": a CLI that asks for permissions has some form of
  *  "don't ask again" (the adapter falls back to a plain allow where it cannot deliver one). Never for
  *  a question, a folder, or a Daedalus member, whose gate has no such answer. */

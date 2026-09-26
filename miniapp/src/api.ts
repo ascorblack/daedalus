@@ -763,7 +763,9 @@ export type JournalEntry = { id: number; at: string; author: "operator" | "orche
 export type BriefSection = { section: string; body: string; updated_at: string | null; updated_by: string | null };
 
 /** A message sent to a staff member, and how far it got. */
-export type StaffMessage = { id: string; staff_id: string; staff_session_id?: string | null; origin: "orchestrator" | "operator"; text: string; mode: string; state: MessageState; attempts: number; created_at: string; updated_at: string; error: string; delivery?: StaffDelivery };
+export type StaffMessage = { id: string; staff_id: string; staff_session_id?: string | null; origin: "orchestrator" | "operator"; text: string; mode: MessageTiming; state: MessageState; attempts: number; created_at: string; updated_at: string; error: string; delivery?: StaffDelivery };
+/** When a message to staff goes in: into the running turn, after it, or stopping it first. */
+export type MessageTiming = "now" | "after_turn" | "interrupt";
 export type MessageState = "queued" | "written" | "submitted" | "acknowledged" | "failed";
 
 /** How a message reached a command-line member: pasted or by pointer, the Enters it took, when each state was reached. */
@@ -930,7 +932,7 @@ export type WatchWhen = {
   conclusion?: string;
 };
 
-export type WatchThen = { action: "wake" | "tell" | "notify"; note?: string; staff?: string; text?: string; mode?: string; title?: string; level?: string };
+export type WatchThen = { action: "wake" | "tell" | "notify"; note?: string; staff?: string; text?: string; when?: MessageTiming; title?: string; level?: string };
 
 /** A project's watch (``/api/projects/{id}/watches``): "when X, do Y", bounded by a cooldown. */
 export type ProjectWatch = {

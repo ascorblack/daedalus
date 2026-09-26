@@ -1,0 +1,11 @@
+- banner
+  - link "Fixture shop" [ref=e1] url="http://SITE/site/shop/index.html"
+  - text "Cart (0)"
+- navigation "Categories"
+  - link "Shoes" [ref=e2] url="http://SITE/site/shop/results.html?q=shoes"
+  - link "Hats" [ref=e3] url="http://SITE/site/shop/results.html?q=hats"
+- main
+  - heading "Find something" [level=1]
+  - search
+    - searchbox "Search products" [ref=e4]
+    - button "Search" [ref=e5]

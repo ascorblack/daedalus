@@ -2,7 +2,7 @@
 // the form's draft as the request the host takes — only the fields that kind of watch has, and null
 // until the required ones are there.
 
-import type { WatchThen, WatchWhen } from "../api";
+import type { MessageTiming, WatchThen, WatchWhen } from "../api";
 import { t } from "../i18n";
 
 export const WATCH_KINDS = ["staff_finished", "staff_question", "staff_permission", "staff_crashed", "staff_silent", "task_moved", "terminal_output", "git_commit", "pr", "ci", "webhook"] as const;
@@ -11,7 +11,8 @@ export const WATCH_ACTIONS = ["wake", "notify", "tell"] as const;
 export type WatchAction = (typeof WATCH_ACTIONS)[number];
 export const TASK_STATUSES = ["todo", "doing", "review", "done", "blocked", "dropped"] as const;
 export const NOTIFY_LEVELS = ["quiet", "normal", "urgent"] as const;
-export const TELL_MODES = ["queue", "steer", "interrupt"] as const;
+/** When a watch's message goes in, as Tell names it: into the running turn, after it, or stopping it. */
+export const TELL_TIMINGS = ["now", "after_turn", "interrupt"] as const;
 
 /** Every field the form has; each kind reads the ones it needs. */
 export type WatchDraft = {
@@ -31,7 +32,7 @@ export type WatchDraft = {
   wakeNote: string;
   tellStaff: string;
   tellText: string;
-  tellMode: string;
+  tellWhen: MessageTiming;
   title: string;
   text: string;
   level: string;
@@ -43,7 +44,7 @@ export type WatchDraft = {
 export function emptyWatch(): WatchDraft {
   return {
     kind: "staff_finished", staff: "", minutes: "15", task: "", to: "", terminal: "", regex: "", folder: "", branch: "", provider: "", repo: "", conclusion: "",
-    action: "wake", wakeNote: "", tellStaff: "", tellText: "", tellMode: "queue", title: "", text: "", level: "normal", cooldown: "10", once: false, note: "",
+    action: "wake", wakeNote: "", tellStaff: "", tellText: "", tellWhen: "now", title: "", text: "", level: "normal", cooldown: "10", once: false, note: "",
   };
 }
 
@@ -89,7 +90,7 @@ export function watchBody(d: WatchDraft): WatchBody | null {
   if (d.action === "wake") then = d.wakeNote.trim() ? { action: "wake", note: d.wakeNote.trim() } : { action: "wake" };
   else if (d.action === "tell") {
     if (!d.tellStaff.trim() || !d.tellText.trim()) return null;
-    then = { action: "tell", staff: d.tellStaff.trim(), text: d.tellText.trim(), mode: d.tellMode };
+    then = { action: "tell", staff: d.tellStaff.trim(), text: d.tellText.trim(), when: d.tellWhen };
   } else {
     if (!d.title.trim()) return null;
     then = { action: "notify", title: d.title.trim(), text: d.text.trim(), level: d.level };

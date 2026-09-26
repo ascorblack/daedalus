@@ -263,19 +263,21 @@ async def test_a_question_of_codexs_own_is_answered_with_its_option(settings: Se
         assert "You chose: Coffee" in "\n".join((await s.terminals.read_screen(row.terminal_id, scrollback=100))["lines"])
 
 
-async def test_a_steer_goes_into_the_running_turn_and_a_queued_message_waits(settings: Settings, db: Database) -> None:
+async def test_a_message_for_now_goes_into_the_running_turn_by_turn_steer_and_one_for_after_waits(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **codex()) as s:
         ada = await started(s, "slow:1000")
         await s.status_event(ada, "working")
-        queued = await s.team.tell(ada, "echo:after the turn", mode="queue", by="orchestrator")
-        steered = await s.team.tell(ada, "echo:steered in", mode="steer", by="orchestrator")
+        queued = await s.team.tell(ada, "echo:after the turn", when="after_turn", by="orchestrator")
+        steered = await s.team.tell(ada, "echo:steered in", when="now", by="orchestrator")
         assert steered["degraded_to"] is None
         await message(s, steered["message_id"], "acknowledged")
+        assert (await HarnessStore(db).delivery(steered["message_id"])).via == "turn/steer"  # type: ignore[union-attr]
         await asyncio.sleep(0.5)
         assert (await s.manager.staff.message(queued["message_id"])).state == "queued"  # type: ignore[union-attr]
         await s.team.interrupt(ada)
         await s.status_event(ada, "idle")
         await message(s, queued["message_id"], "acknowledged")
+        assert (await HarnessStore(db).delivery(queued["message_id"])).via == "turn/start"  # type: ignore[union-attr]
         live = await s.team.live((await s.session_row(ada)).id)
         texts = [t.text for t in await s.runtime.turns(live) if t.role == "orchestrator"]  # type: ignore[arg-type]
         assert texts.count("[orchestrator] echo:steered in") == 1 and texts.count("[orchestrator] echo:after the turn") == 1
@@ -290,7 +292,7 @@ async def test_after_a_host_restart_the_thread_is_taken_up_again(settings: Setti
         await s.status_event(ada, "turn_done_unseen")
         # The host went away after Codex took the message and before it heard so; another waits.
         await db.execute("UPDATE staff_messages SET state = 'submitted' WHERE id = ?", (told["message_id"],))
-        pending = await s.manager.staff.add_message(ada.id, "echo:still to go", origin="operator", staff_session_id=(await s.session_row(ada)).id)
+        pending = await s.manager.staff.add_message(ada.id, "echo:still to go", origin="operator", mode="after_turn", staff_session_id=(await s.session_row(ada)).id)
         # A new adapter knows nothing of the launch but its thread: it resumes it on the same server.
         runtime = s.restart_runtime(CodexAdapter())
         assert await runtime.reconcile(wait=5) == 1

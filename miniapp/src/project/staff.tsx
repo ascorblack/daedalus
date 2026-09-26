@@ -107,7 +107,7 @@ export function useStaffMessages(staffId: string, n: number): StaffMessage[] {
 /** A failed message sent again, as a new message: the failed one keeps its receipt. */
 async function retry(staffId: string, m: StaffMessage, toast?: (text: string) => void) {
   try {
-    await api.post(`/api/staff/${encodeURIComponent(staffId)}/messages`, { text: m.text, mode: m.mode === "steer" || m.mode === "interrupt" ? m.mode : "queue" });
+    await api.post(`/api/staff/${encodeURIComponent(staffId)}/messages`, { text: m.text, when: m.mode });
     invalidate(`/api/staff/${encodeURIComponent(staffId)}/messages`);
   } catch (e) {
     toast?.(errorText(e));

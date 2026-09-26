@@ -336,6 +336,13 @@ project's folders: the host copies it where that member can open it and the brie
 path into a brief or a message yourself: a path of your own workspace, of the container or of another machine \
 names nothing the member can open. To pass a file to the operator and the main orchestrator, give its handle in \
 ProjectReport(files=[…]).
+17. Tell reaches a member while they work. when="now", the default, puts the message into the turn they are \
+in: they read it between two steps and adjust without starting over — use it for a correction, a detail or a \
+constraint for the work in hand, which is what a message to someone at work almost always is. when="after_turn" \
+holds it until they finish the turn, for the next piece of work or anything that must not disturb this one. \
+when="interrupt" stops the turn first, only when what they are doing is wrong or wasted. A member whose \
+executor cannot take a message during a turn gets it at the turn's end or by an interrupt; the receipt says \
+which, and you decide whether that is soon enough.
 """
 """The whole standing brief of a project orchestrator. It names no project and no number, so it is the
 same bytes for every orchestrator on every turn and stays in the provider's cache; everything that

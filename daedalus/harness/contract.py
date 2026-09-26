@@ -22,7 +22,10 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from daedalus.harness.capabilities import Capabilities
 
 Environment = Literal["container", "host"]
-SendMode = Literal["queue", "steer", "interrupt"]
+SendMode = Literal["now", "after_turn", "interrupt"]
+"""When a message goes in: ``now`` into the running turn (a steer), ``after_turn`` once the turn has
+ended, ``interrupt`` after stopping the turn. Named by timing because that is the one thing a sender
+chooses; how a CLI manages each is its capability's ``steer``."""
 DeliveryState = Literal["queued", "written", "submitted", "acknowledged", "failed"]
 
 ANSWER_CHOICES = ("allow_once", "allow_always", "deny", "deny_with_note")
@@ -318,7 +321,7 @@ class Delivery:
     state: DeliveryState
     via: str = ""
     """``paste``, ``pointer`` or the structured channel's name."""
-    degraded_to: Literal["", "queue", "interrupt"] = ""
+    degraded_to: Literal["", "after_turn", "interrupt"] = ""
     client_ref: str = ""
     """The id the CLI echoes back for this message, where it takes one, so a restarted host can find it."""
     error: str = ""

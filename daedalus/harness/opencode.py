@@ -240,7 +240,7 @@ class OpenCodeAdapter:
 
     async def after_spawn(self, term: TerminalPort, launch: Launch, plan: LaunchPlan) -> None:
         if plan.first_prompt:
-            await self.send(term, "", plan.first_prompt, "queue")
+            await self.send(term, "", plan.first_prompt, "after_turn")
 
     async def attach(self, term: TerminalPort, launch: Launch) -> None:
         self._launches.setdefault(term.id, _Launch())

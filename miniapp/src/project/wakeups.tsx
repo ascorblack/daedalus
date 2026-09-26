@@ -14,7 +14,7 @@ import { PageHeader } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { errorText } from "../ui";
 import { useFocus, useProject, wakeupsKey, watchesKey } from "./data";
-import { NOTIFY_LEVELS, TASK_STATUSES, TELL_MODES, WATCH_ACTIONS, WATCH_KINDS, emptyWatch, watchBody, watchThenText, watchWhenText, type WatchDraft, type WatchKind } from "./watchmodel";
+import { NOTIFY_LEVELS, TASK_STATUSES, TELL_TIMINGS, WATCH_ACTIONS, WATCH_KINDS, emptyWatch, watchBody, watchThenText, watchWhenText, type WatchDraft, type WatchKind } from "./watchmodel";
 import { WAKEUP_WHENS, wakeupBody, wakeupWhen, type WakeupDraft, type WakeupWhen } from "./wakeupmodel";
 
 const enc = encodeURIComponent;
@@ -355,7 +355,7 @@ function WatchSheet({ projectId, providers, minCooldown, onClose, toast }: { pro
           <label className="field" htmlFor="watch-tell-text">{t("focus.watches.message")}</label>
           <textarea id="watch-tell-text" className="field" rows={2} maxLength={2000} value={draft.tellText} onChange={(e) => set({ tellText: e.target.value })} />
           <div className="chips">
-            {TELL_MODES.map((mode) => <button key={mode} className="chip select" aria-pressed={draft.tellMode === mode} onClick={() => set({ tellMode: mode })}>{t(`focus.watches.mode.${mode}`)}</button>)}
+            {TELL_TIMINGS.map((when) => <button key={when} className="chip select" aria-pressed={draft.tellWhen === when} onClick={() => set({ tellWhen: when })}>{t(`focus.watches.when.${when}`)}</button>)}
           </div>
         </>
       )}

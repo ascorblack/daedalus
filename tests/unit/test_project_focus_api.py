@@ -74,18 +74,18 @@ async def test_what_was_sent_to_a_member_newest_first_with_its_delivery_state(se
         async with _client(settings, config, db, manager) as client:
             pid = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery"})).json()["id"]
             ada = (await client.post(f"/api/projects/{pid}/staff", headers=HEADERS, json={"name": "Ada"})).json()
-            first = await manager.staff.add_message(ada["id"], "Start with the menu", origin="orchestrator")
+            first = await manager.staff.add_message(ada["id"], "Start with the menu", origin="orchestrator", mode="after_turn")
             await manager.staff.set_message_state(first.id, "submitted")
             await manager.staff.set_message_state(first.id, "acknowledged")
-            second = await manager.staff.add_message(ada["id"], "Use the owner's sheet", origin="operator", mode="steer")
+            second = await manager.staff.add_message(ada["id"], "Use the owner's sheet", origin="operator", mode="now")
             await manager.staff.set_message_state(second.id, "failed", "the session ended")
 
             answer = await client.get(f"/api/staff/{ada['id']}/messages?limit=5", headers=HEADERS)
             assert answer.status_code == 200
             rows: list[dict[str, Any]] = answer.json()
             assert [(m["text"], m["origin"], m["mode"], m["state"], m["error"]) for m in rows] == [
-                ("Use the owner's sheet", "operator", "steer", "failed", "the session ended"),
-                ("Start with the menu", "orchestrator", "queue", "acknowledged", ""),
+                ("Use the owner's sheet", "operator", "now", "failed", "the session ended"),
+                ("Start with the menu", "orchestrator", "after_turn", "acknowledged", ""),
             ]
             assert (await client.get(f"/api/staff/{ada['id']}/messages", headers={})).status_code == 401
             assert (await client.get("/api/staff/st-nope/messages", headers=HEADERS)).status_code == 404

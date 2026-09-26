@@ -259,7 +259,7 @@ class Review:
         if live is not None and live.session.task_id == task["id"]:
             updated = await self.board.update(task["id"], status="doing", note=f"{SENT_BACK}{by}: {line}")
             try:
-                await self.team.tell(member, f"The operator sent task {task['id']} (\"{task['title']}\") back from review:\n{note}\n\nChange it on {task['branch']}, commit, and report done again.", mode="queue", by=by)  # type: ignore[arg-type]
+                await self.team.tell(member, f"The operator sent task {task['id']} (\"{task['title']}\") back from review:\n{note}\n\nChange it on {task['branch']}, commit, and report done again.", when="after_turn", by=by)  # type: ignore[arg-type]
                 told = True
             except (StaffError, KeyError, RuntimeError) as exc:
                 logger.warning("could not tell %s about the rejection of %s: %s", member.name if member else "?", task["id"], exc)
