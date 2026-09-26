@@ -72,7 +72,7 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
 | 1005 | `timeout` | |
 | 1007 | `unsupported` | not in this build or on this platform, or no usable Chromium; `{reason}` |
 | 1101 | `human_driving` | a human holds control of the group and the call waited `wait_ms` in vain; `{owner, holder, until}` |
-| 1102 | `blocked` | the network wall refused (*not yet*: the wall answers it); `{host, reason}` |
+| 1102 | `blocked` | the network wall refused; `{host, port, decision: "deny" \| "ask", reason}` (The network wall) |
 | 1103 | `stale_ref` | the ref is not on the page any more; `{ref}`. Take a new snapshot |
 | 1104 | `no_such_tab` | the tab closed, or never belonged to this group; `{tab_id}` |
 | 1105 | `field_forbidden` | a password, one-time-code or payment field; `{ref, field: "password" \| "one_time_code" \| "payment"}` |
@@ -139,7 +139,9 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
 | `events.subscribe` | `{after_seq}` → `{instance, from_seq, resync}`, then `event` notifications |
 | `events.unsubscribe` | |
 | `browser.stats` | → `{at, supported, browsers: [{id, pid, processes, rss_bytes, cpu_percent, tabs}], daemon{pid, rss_bytes, cpu_percent}, machine}` |
-| `net.configure` | *not yet*: the network wall's rules, below |
+| `net.configure` | the network wall's rules → `{}`; see The network wall |
+| `net.grant` | `{group_id, host, port, ttl_ms? ≤ 86 400 000 = 3 600 000}` → `{}`: the operator's answer to an ask |
+| `net.revoke` | `{group_id, host, port}` → `{}` |
 | `record.set` | *not yet*: `{group_id, frames}`, recording keyframes |
 
 ### `browser.open`
@@ -319,7 +321,7 @@ are in `data`. The daemon keeps the last 20 000, no more than 64 MiB. `events.su
 | `download.started` | `{group_id, download: Download}` |
 | `download.done` | `{group_id, download: Download}` |
 | `needs_you` | as above |
-| `egress` | *not yet*: `{group_id, host, decision}`, at most one per host per group per minute |
+| `egress` | `{browser_id, group_id?, host, port, decision, reason?, at}`, at most one per browser, host, port and decision a minute |
 | `browser.stats` | a `browser.stats` result, every 10 s while a browser runs |
 
 `action.text_len` is the length of the typed text; the text itself is never in an event, a log or the
@@ -492,25 +494,93 @@ browser's processes of `RssAnon` and `RssShmem`. The sum of RSS counts Chromium'
 per process and read 1.1–2.6 GB for a browser whose cgroup held 0.2–0.56 GB (measured), so a limit
 against it would kill healthy browsers. Inside a container, the cgroup's own figure is in `machine`.
 
-## The network wall (*not yet*)
+## The network wall
 
-The wall is an HTTP proxy inside the daemon, which Chromium is started against
-(`--proxy-server=http://127.0.0.1:<port>` and `--proxy-bypass-list=<-loopback>`, so loopback goes
-through it too). Its rules come from the host:
+Every connection a browser makes goes through an HTTP proxy inside the daemon
+(`browserd/internal/netwall`), one listener per browser on `127.0.0.1`, which Chromium is started
+against with these switches added to the ones above:
 
-`net.configure {deny_ports[{host, port}], services_ports[[lo, hi]], loopback_rewrite?, lan_allow[],
-egress_allow? []}` → `{}`
+```
+--proxy-server=http://127.0.0.1:<port> --proxy-bypass-list=<-loopback>
+--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" --disable-quic
+--webrtc-ip-handling-policy=disable_non_proxied_udp
+```
 
-Measured with the flags above and a logging proxy: page loads, subresources, `fetch`, WebSockets,
-service workers, DNS prefetch and preconnect all went through the proxy, and Chromium made no DNS
-lookup of its own for any page host. What left it without the proxy was WebRTC's STUN (closed by the
-switch above) and multicast DNS (gone with it), and connected-but-silent UDP sockets to public
-resolvers that Chromium opens to learn its own address, over which nothing is sent. Chromium's own
-services (sign-in, push messaging, updates) still ask the proxy for `accounts.google.com`,
-`android.clients.google.com`, `mtalk.google.com:5228` and `www.google.com`, which the wall may refuse.
+- `<-loopback>` removes Chromium's built-in exception for loopback **and link-local** addresses,
+  which otherwise go direct (measured: without it a page reached a sealed port, and asked the
+  system resolver for `169.254.169.254`).
+- The resolver rule makes any lookup Chromium would still do itself fail. Nothing proxied does one;
+  it is the floor under what is not. It applies to address literals too, so the proxy's own
+  address is excluded (measured: with a bare `MAP * ~NOTFOUND` no page loads).
+- The WebRTC switch is repeated from the base list on purpose: it is part of the wall. Measured with
+  a STUN server on loopback: 0 packets with it, 5 and a `udp … typ host` candidate without it.
 
-A refused top-level navigation is `1102 {host, reason}` for the agent's call, and `egress` for the
-host's log.
+The proxy speaks `CONNECT` (https, and WebSockets, which Chromium tunnels) and absolute-form http,
+and nothing else: a request without a full destination is `400`. **It resolves the name itself,
+judges every address in the answer, and dials only an address it judged** — the socket checks the
+address it connects to — so a name that answers public at the check and private at the connect
+(DNS rebinding) cannot pass. An answer with several addresses is judged by the strictest. The
+proxy adds no `X-Forwarded-For`. A refusal is `403` with the header `X-Browserd-Blocked: <reason>`
+and a one-line page; for a `CONNECT` Chromium shows its own tunnel error.
+
+The rules, in the order they are applied to one address and port:
+
+| Destination | Decision | `reason` |
+|---|---|---|
+| a sealed port on any address of this machine (loopback, and its own LAN or public addresses), and the proxy's own port | deny | `sealed_port` |
+| a cloud metadata address (`169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254`) | deny | `metadata` |
+| multicast, broadcast | deny | `multicast` |
+| unspecified, reserved, benchmarking, Teredo, documentation | deny | `reserved` |
+| this machine, a port in `services_ports`, natively | allow | |
+| this machine, any other port | ask natively (`ask_loopback`), deny in a container | `loopback` |
+| the Docker host (`loopback_rewrite`), a port in `services_ports` | allow | |
+| the Docker host, any other port | deny | `gateway` |
+| a private or link-local address in `lan_allow` | ask | `lan_allow` |
+| any other private (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`, `fec0::/10`) or link-local address | deny | `private`, `link_local` |
+| a name with no address | deny | `unresolvable` |
+| anything else: the internet | allow | |
+
+An IPv4 address carried inside IPv6 (mapped, NAT64, 6to4) is judged as the IPv4 address. `localhost`
+and `*.localhost` are this machine without a lookup. **Until the host configures it the wall is at
+its strictest**: public addresses only.
+
+`net.configure {sealed_ports: [port], services_ports: [[lo, hi]], loopback_rewrite?, ask_loopback,
+lan_allow: [address or prefix], egress_allow?: [host]}` → `{}`, strictly decoded. The host sends:
+
+- **natively**: `sealed_ports` = its API, the key proxy, the terminal daemons' hook listeners, the
+  launcher's page (the policy's own sealed ports); `services_ports` = the agent's and the
+  terminals' ranges; `ask_loopback: true`;
+- **in a container**: `sealed_ports` = the API; `services_ports` the same;
+  `loopback_rewrite: "host.docker.internal"`, so `http://127.0.0.1:8103` — the address the agent
+  prints — opens the service published on the Docker host; `ask_loopback: false`;
+- `lan_allow` from the browser settings (empty by default), and `egress_allow` when the operator has
+  an allowlist (absent means none; an empty list allows no host).
+
+**Top-level navigations** — the agent's `page.navigate`, the operator's address bar, and a page's
+own link, redirect or form, which the daemon pauses (`Fetch.requestPaused`, `resourceType:
+Document`, the main frame) — are judged before they happen by the same rules, plus two more:
+
+- the scheme: only `http` and `https` (and `about:blank`). `file:`, `data:`, `blob:`,
+  `javascript:`, `chrome:`, `chrome-extension:`, `devtools:`, `view-source:`, `filesystem:` and
+  the rest are `deny`, `scheme`. A page's own `file:` and `data:` navigations are refused by
+  Chromium as well (measured);
+- `egress_allow`: a host outside it is `ask`, `egress_allow`, unless it is the installation's own
+  services range or already granted. Subresources to other hosts are logged, not blocked.
+
+A refused navigation is `1102 {host, port, decision, reason}`. An `ask` is a refusal the operator
+can lift: the host asks, and on a yes sends `net.grant {group_id, host, port}`, which opens exactly
+that host and port for the group's browser (every group on it) for `ttl_ms`, at most a day; the
+agent then retries. A grant never lifts a `deny`.
+
+`egress` is published for every destination the proxy or a navigation check judged, allowed or not,
+at most once a minute per browser, host, port and decision; the host writes it to `egress_log`
+with the tool `Browser`. Chromium's own services (sign-in, push messaging, component updates) ask
+the proxy for `accounts.google.com`, `android.clients.google.com`, `clients2.google.com` and
+`www.google.com` even with the quiet switches; they appear in the log like any other host.
+
+**What the wall is.** Natively it is the only wall between a page and this machine's ports and the
+LAN. In a container it is the second: the `browser` service's network has no route to the key
+proxy, SearXNG, the agent or the terminals, whatever the proxy says (`deploy/compose.yaml`).
 
 ## Measured
 
