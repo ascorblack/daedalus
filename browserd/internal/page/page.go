@@ -39,6 +39,10 @@ type Model struct {
 	byGUID    map[string]*Download
 	uploads   map[string]*upload
 	asked     map[string]string // tab -> the document a needs_you was raised for, so it is raised once
+
+	// AfterAction is told of every action that was done, once its page settled (the recording's
+	// keyframe). It must not block.
+	AfterAction func(t *browser.Tab, actionID string)
 }
 
 // New returns the page model.

@@ -52,3 +52,57 @@ func RendererSandboxed(pids []int) (sandboxed, known bool) {
 	}
 	return false, false
 }
+
+// Cgroup is the memory cgroup the daemon runs in, as the kernel charges it: its anonymous and shared
+// memory (the page cache it could drop is left out, as it is from the private figure), and the
+// processes in it.
+type Cgroup struct {
+	Path      string
+	AnonShmem int64
+	Procs     []int
+}
+
+// OwnCgroup reads the daemon's own cgroup (v2). It is false where there is none to read: a cgroup v1
+// machine, or the root cgroup, which has no memory.stat and holds the whole machine anyway.
+func OwnCgroup() (Cgroup, bool) { return readCgroup("/proc/self/cgroup", "/sys/fs/cgroup") }
+
+func readCgroup(selfCgroup, mount string) (Cgroup, bool) {
+	data, err := os.ReadFile(selfCgroup)
+	if err != nil {
+		return Cgroup{}, false
+	}
+	rel := ""
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "0::") {
+			rel, found = strings.TrimPrefix(line, "0::"), true
+			break
+		}
+	}
+	if !found {
+		return Cgroup{}, false
+	}
+	dir := mount + rel
+	stat, err := os.ReadFile(dir + "/memory.stat")
+	if err != nil {
+		return Cgroup{}, false
+	}
+	cg := Cgroup{Path: rel}
+	for _, line := range strings.Split(string(stat), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && (f[0] == "anon" || f[0] == "shmem") {
+			n, _ := strconv.ParseInt(f[1], 10, 64)
+			cg.AnonShmem += n
+		}
+	}
+	procs, err := os.ReadFile(dir + "/cgroup.procs")
+	if err != nil {
+		return Cgroup{}, false
+	}
+	for _, f := range strings.Fields(string(procs)) {
+		if pid, err := strconv.Atoi(f); err == nil {
+			cg.Procs = append(cg.Procs, pid)
+		}
+	}
+	return cg, true
+}

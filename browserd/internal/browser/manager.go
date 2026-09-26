@@ -62,6 +62,9 @@ type Wall interface {
 	Open(browserID string) (addr string, err error)
 	Close(browserID string)
 	Navigation(ctx context.Context, browserID, url string) error
+	// Allowlist reports whether the operator has an allowlist, which a page's own navigations are
+	// then judged by too (guard.go).
+	Allowlist() bool
 }
 
 // Manager holds every browser, group and tab of the daemon.
@@ -77,12 +80,14 @@ type Manager struct {
 	groups    map[string]*Group
 	tabs      map[string]*Tab
 	bySession map[string]*Tab
+	settingUp map[string]*Tab // pages being set up, by session: their first navigation may pause already
 	byTarget  map[string]*Tab
 	gone      map[string]goneGroup // groups whose browser went away, for an hour, to answer 1108
 	listeners []Listener
 	tabSeq    int
 	found     chrome.Found
 	foundOK   bool
+	probed    string // the version the found Chromium printed, before any browser ran
 	sandbox   string
 	closing   bool
 }
@@ -96,20 +101,92 @@ type goneGroup struct {
 func New(deps Deps) *Manager {
 	m := &Manager{deps: deps, lim: deps.Config.Limits, log: deps.Log,
 		browsers: map[string]*Browser{}, byProfile: map[string]*Browser{}, starting: map[string]chan struct{}{},
-		groups: map[string]*Group{}, tabs: map[string]*Tab{}, bySession: map[string]*Tab{}, byTarget: map[string]*Tab{},
+		groups: map[string]*Group{}, tabs: map[string]*Tab{}, bySession: map[string]*Tab{}, settingUp: map[string]*Tab{}, byTarget: map[string]*Tab{},
 		gone: map[string]goneGroup{}, sandbox: "unknown"}
 	if deps.Config.Chromium.NoSandbox {
 		m.sandbox = "off by configuration"
 	}
 	m.found, m.foundOK = chrome.Find(deps.Config.Chromium.Path)
+	if m.foundOK {
+		go m.probeVersion(m.found.Path)
+	}
 	return m
+}
+
+// probeVersion learns the found Chromium's version before any browser runs.
+func (m *Manager) probeVersion(path string) {
+	v := chrome.ProbeVersion(path, 10*time.Second)
+	m.mu.Lock()
+	if m.found.Path == path {
+		m.probed = v
+	}
+	m.mu.Unlock()
+}
+
+// ChromiumVersion is the version of the Chromium the daemon runs: a running browser's own word, else
+// what the executable printed, else "".
+func (m *Manager) ChromiumVersion() string {
+	for _, b := range m.Browsers() {
+		if b.Version != "" {
+			return b.Version
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.probed
 }
 
 // Listen adds a listener. It is called before the daemon serves anyone.
 func (m *Manager) Listen(l Listener) { m.listeners = append(m.listeners, l) }
 
 // Limits are the limits the manager enforces.
-func (m *Manager) Limits() config.Limits { return m.lim }
+func (m *Manager) Limits() config.Limits {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lim
+}
+
+// LimitsUpdate is what limits.set may change while the daemon runs: the host's settings, sent on
+// every connection, so the operator's cap and idle time are the daemon's without a restart. Nil
+// leaves a limit as it is.
+type LimitsUpdate struct {
+	MaxBrowsers       *int   `json:"max_browsers,omitempty"`
+	IdleCloseMs       *int64 `json:"idle_close_ms,omitempty"`
+	RecordMaxBytes    *int64 `json:"record_max_bytes,omitempty"`
+	RecordRetentionMs *int64 `json:"record_retention_ms,omitempty"`
+}
+
+// SetLimits applies u. A lower cap closes no running browser: it only refuses the next one.
+func (m *Manager) SetLimits(u LimitsUpdate) (config.Limits, error) {
+	if u.MaxBrowsers != nil && (*u.MaxBrowsers < 1 || *u.MaxBrowsers > 64) {
+		return config.Limits{}, wire.Errorf(wire.CodeInvalidParams, "max_browsers must be 1-64")
+	}
+	if u.IdleCloseMs != nil && (*u.IdleCloseMs < 0 || *u.IdleCloseMs > 7*24*3600*1000) {
+		return config.Limits{}, wire.Errorf(wire.CodeInvalidParams, "idle_close_ms must be 0-604800000")
+	}
+	if u.RecordMaxBytes != nil && (*u.RecordMaxBytes < 1<<20 || *u.RecordMaxBytes > 1<<40) {
+		return config.Limits{}, wire.Errorf(wire.CodeInvalidParams, "record_max_bytes must be 1 MiB-1 TiB")
+	}
+	if u.RecordRetentionMs != nil && (*u.RecordRetentionMs < 3600*1000 || *u.RecordRetentionMs > 366*24*3600*1000) {
+		return config.Limits{}, wire.Errorf(wire.CodeInvalidParams, "record_retention_ms must be an hour to a year")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u.MaxBrowsers != nil {
+		m.lim.MaxBrowsers = *u.MaxBrowsers
+	}
+	if u.IdleCloseMs != nil {
+		m.lim.IdleCloseMs = *u.IdleCloseMs
+		m.lim.IdleClose = time.Duration(*u.IdleCloseMs) * time.Millisecond
+	}
+	if u.RecordMaxBytes != nil {
+		m.lim.RecordMaxBytes = *u.RecordMaxBytes
+	}
+	if u.RecordRetentionMs != nil {
+		m.lim.RecordRetentionMs = *u.RecordRetentionMs
+	}
+	return m.lim, nil
+}
 
 // Chromium is the browser the daemon runs, and "" with the reason when there is none.
 func (m *Manager) Chromium() (chrome.Found, bool) {
@@ -333,6 +410,7 @@ func (m *Manager) ensureBrowser(ctx context.Context, profile string) (*Browser, 
 		m.publish("browser.started", map[string]any{"browser_id": b.ID, "profile": profile, "pid": b.proc.Pid,
 			"chromium_version": b.Version})
 		go m.watch(b)
+		go m.probeSandbox(b)
 		return b, nil
 	}
 }
@@ -671,10 +749,11 @@ func (m *Manager) RunMaintenance(stop <-chan struct{}) {
 
 // CloseIdle closes the browsers idle at now, and forgets the tombstones of groups gone an hour.
 func (m *Manager) CloseIdle(now time.Time) {
+	m.mu.Lock()
 	if m.lim.IdleClose <= 0 {
+		m.mu.Unlock()
 		return
 	}
-	m.mu.Lock()
 	for id, gg := range m.gone {
 		if now.Sub(gg.at) > time.Hour {
 			delete(m.gone, id)
@@ -781,8 +860,15 @@ func (m *Manager) onEvent(b *Browser, e cdp.Event) {
 	}
 	m.mu.Lock()
 	t := m.bySession[e.Session]
+	if t == nil && e.Method == "Fetch.requestPaused" {
+		t = m.settingUp[e.Session]
+	}
 	m.mu.Unlock()
 	if t == nil {
+		return
+	}
+	if e.Method == "Fetch.requestPaused" {
+		go m.guardPaused(t, e.Params)
 		return
 	}
 	t.event(e)

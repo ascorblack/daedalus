@@ -16,6 +16,7 @@ import (
 	"github.com/ascorblack/daedalus/browserd/internal/config"
 	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
+	"github.com/ascorblack/daedalus/browserd/internal/record"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
 	"github.com/ascorblack/daedalus/ptyd/proto/events"
@@ -36,6 +37,8 @@ type Daemon struct {
 	Log       *slog.Logger
 	// Net is the network wall; nil serves no net.* methods.
 	Net *netwall.Browsers
+	// Record keeps keyframes; nil serves no record.* methods.
+	Record *record.Recorder
 
 	sampler *procstat.Sampler
 }
@@ -77,6 +80,7 @@ func (d *Daemon) Register(s *server.Server) {
 	}
 	d.registerPage(s)
 	d.registerNet(s)
+	d.registerRecord(s)
 }
 
 // decode reads params strictly: an unknown field is an error, so a misspelt parameter is never
@@ -100,9 +104,8 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 		chromium["kind"] = "none"
 		chromium["error"] = "no Chromium found"
 	}
-	for _, b := range d.Manager.Browsers() {
-		chromium["version"] = b.Version
-		break
+	if v := d.Manager.ChromiumVersion(); v != "" {
+		chromium["version"] = v
 	}
 	counts := d.Manager.Counts()
 	counts["viewers"] = d.Hub.Count()
@@ -194,6 +197,9 @@ func (d *Daemon) groupClose(ctx context.Context, c *server.Conn, params json.Raw
 		return nil, err
 	}
 	d.Page.GroupClosed(p.GroupID)
+	if d.Record != nil {
+		d.Record.Forget(p.GroupID)
+	}
 	return map[string]any{"tabs": n}, nil
 }
 

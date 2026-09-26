@@ -138,11 +138,16 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
 | `view.detach` | `{channel}` |
 | `events.subscribe` | `{after_seq}` → `{instance, from_seq, resync}`, then `event` notifications |
 | `events.unsubscribe` | |
-| `browser.stats` | → `{at, supported, browsers: [{id, pid, processes, rss_bytes, cpu_percent, tabs}], daemon{pid, rss_bytes, cpu_percent}, machine}` |
+| `browser.stats` | → `{at, supported, memory_basis: "cgroup" \| "private" \| "rss", browsers: [{id, pid, processes, rss_bytes, cpu_percent, tabs}], daemon{pid, rss_bytes, cpu_percent}, machine}` (Limits, below, on what the memory is) |
 | `net.configure` | the network wall's rules → `{}`; see The network wall |
 | `net.grant` | `{group_id, host, port, ttl_ms? ≤ 86 400 000 = 3 600 000}` → `{}`: the operator's answer to an ask |
 | `net.revoke` | `{group_id, host, port}` → `{}` |
-| `record.set` | *not yet*: `{group_id, frames}`, recording keyframes |
+| `limits.set` | `{max_browsers?, idle_close_ms?, record_max_bytes?, record_retention_ms?}` → the limits as they now are: the host's settings, sent on every connection and whenever they change. A lower `max_browsers` closes nothing; it refuses the next browser |
+| `record.set` | `{group_id, frames, human?}` → `{group_id, frames, human}`: recording keyframes (Recording, below) |
+| `record.list` | `{group_id, after?, limit? ≤ 5000 = 500}` → `{recording{group_id, frames, human}, frames: [Frame]}`, oldest first; a closed group's frames are listed until they expire |
+| `record.read` | `{group_id, no}` → `{frame: Frame, data_b64}`; `1001` for a frame not kept |
+| `record.delete` | `{group_id}` → `{}` |
+| `record.groups` | → `{groups: [{group_id, frames, bytes, first_at, last_at}], bytes, max_bytes, retention_ms}` |
 
 ### `browser.open`
 
@@ -343,6 +348,7 @@ are in `data`. The daemon keeps the last 20 000, no more than 64 MiB. `events.su
 | `needs_you` | as above |
 | `egress` | `{browser_id, group_id?, host, port, decision, reason?, at}`, at most one per browser, host, port and decision a minute |
 | `browser.stats` | a `browser.stats` result, every 10 s while a browser runs |
+| `navigation.blocked` | `{group_id, tab_id, url, from, by: "page", host, port, decision, reason}` — a page's own navigation the allowlist stopped (The network wall) |
 
 `action.text_len` is the length of the typed text; the text itself is never in an event, a log or the
 daemon's memory past the call.
@@ -366,7 +372,7 @@ so a frame sent down the wrong kind of channel is refused rather than misread.
 | to the client | `0x22 EVENT` | a JSON object with a string `type` |
 | to the daemon | `0x30 ATTACH` | `{tier: "live" \| "thumb", tab?, max_w, max_h, dpr?, quality?}` |
 | to the daemon | `0x31 ACK` | `[u32 frame_no]`, the frame the client has drawn |
-| to the daemon | `0x32 VIEW` | `{tier?, tab?, max_w?, max_h?, dpr?, quality?}`: a resize, another tab, another tier |
+| to the daemon | `0x32 VIEW` | `{tier?, tab?, max_w?, max_h?, dpr?, quality?, hidden?}`: a resize, another tab, another tier; `hidden` says the client's page went out of sight (`true`) or came back (`false`) |
 | to the daemon | `0x33 INPUT` | a JSON object with a string `t`, at most 4 KiB |
 
 - `frame_no` counts from 1 per channel and never repeats; a frame carries a whole JPEG, never a part.
@@ -420,6 +426,9 @@ the tab has painted before, since the daemon keeps each watched tab's newest fra
   5 frames in a row, that client's frames are re-encoded at quality 40 and half size; below 120 ms for
   20 frames they go back. Nothing in the protocol changes: `meta.w` and `meta.h` say what came.
 - A client that sends no ACK for 60 s is sent `ping`s only; it is never disconnected for being slow.
+- **A hidden client** (VIEW `hidden: true`: the app's page is in the background) is sent no frames; its
+  mailbox keeps the newest, which it gets as soon as it says it is back. Events still reach it. The
+  host counts such a view as not watching (watch mode).
 
 ### Input
 
@@ -455,7 +464,10 @@ their content.
 
 In order: `--chromium`, `$BROWSERD_CHROMIUM`, the configuration's `chromium.path`, Playwright's pinned
 `chromium` under `$PLAYWRIGHT_BROWSERS_PATH`, then a system Chrome, Chromium or Edge.
-`daemon.info.chromium.kind` is `bundled` for Playwright's and `system` for the others. The daemon
+`daemon.info.chromium.kind` is `bundled` for Playwright's and `system` for the others;
+`chromium.version` is a running browser's own word, or, before any has run, what the executable
+printed for `--version` (asked once, in the background, when the daemon starts; Windows builds print
+nothing and say it only once a browser ran). The daemon
 always gives Chromium a profile directory of its own (Chrome 136 and later refuse remote debugging on
 the default one) and never reaches the operator's own profile.
 
@@ -483,7 +495,9 @@ It is started with:
   `Chrome/…`, with the matching client hints): it is what the same browser with a window says.
 - Chromium's own sandbox is always on. `--no-sandbox` is passed only with the configuration's
   `chromium.no_sandbox: true`, which `capabilities.sandbox` then reports as `off by configuration`.
-  `capabilities.sandbox` is `ok`, `unknown` before the first browser started, or why not:
+  `capabilities.sandbox` is `ok`, `unknown` until the first browser's first renderer has been asked
+  (a quarter of a second apart from the browser's start, so within a second or two of it), or why
+  not:
   - in a container: Chromium's namespace sandbox needs `seccomp=unconfined` (Docker's default
     profile refuses the user namespace). Measured on Docker with an Ubuntu 24.04 host: a non-root
     user, `seccomp=unconfined`, no added capability, and Docker's default AppArmor profile gives
@@ -508,11 +522,24 @@ It is started with:
 | `max_download_bytes` | 500 MiB | per file; 2 GiB per profile |
 | `max_upload_bytes` | 100 MiB | per file |
 | `fps_cap` | 15 | live frames a second |
+| `record_max_bytes` | 500 MiB | every recording of the daemon together; past it the oldest keyframes go first |
+| `record_retention_ms` | 7 days | a keyframe older than this is removed |
 
-The configuration's `limits` sets them. **Memory is measured as private memory**: the sum over the
-browser's processes of `RssAnon` and `RssShmem`. The sum of RSS counts Chromium's shared code once
-per process and read 1.1–2.6 GB for a browser whose cgroup held 0.2–0.56 GB (measured), so a limit
-against it would kill healthy browsers. Inside a container, the cgroup's own figure is in `machine`.
+The configuration's `limits` sets them, and `limits.set` changes the cap, the idle close and the
+recording's two while the daemon runs.
+
+**What a browser's memory is.** The question is what closing it would free. The sum of RSS answers it
+worst: it counts Chromium's shared code once per process and read 1.1–2.6 GB for browsers whose
+cgroup held 0.2–0.56 GB. The sum of each process's `RssAnon` and `RssShmem` (the "private" figure)
+still counts the pages a renderer shares with the zygote it was forked from once per renderer: it
+read 1.4–1.8 times the kernel's charge (611 MB against 385 MB for four tabs, measured). So where the
+daemon has a cgroup of its own — the compose service, or the launcher's systemd scope — `rss_bytes`
+is the kernel's charge for that cgroup (`memory.stat` `anon` + `shmem`, the page cache left out), less
+what its other processes hold (the daemon, an init, a health check), shared out over the browsers in
+proportion to their private figures, and `memory_basis` is `cgroup`. A cgroup with more than 64 other
+processes (a login session's) is not the daemon's own, and the private figure stands (`private`);
+outside Linux it is the resident size (`rss`). The hard memory limit is judged against the same
+figure.
 
 ## The host side
 
@@ -654,8 +681,12 @@ The shapes are the app's own types in `miniapp/src/api.ts`; a host test holds th
 | `GET /api/browsers/<group>/asks/<key>/thumbnail` | the element's picture for a permission card |
 | `GET /api/browsers/profiles` · `POST …/profiles/<env>/<profile>/clear` · `DELETE …/profiles/<env>/<profile>` | profiles with `size_bytes` and `running`; clearing or deleting one whose browser runs is refused |
 | `POST /api/browsers/envs/container/update {confirm?}` · `GET …/update/<job>` | recreate the browser service from the image (the rebuilder's `browser-request`): `409 live_browsers` with the count until confirmed |
-| `GET /api/browsers/load?cap` | the browsers' cost now and at `cap` per environment, in the terminals' load shape |
-| `GET /api/workloads/load?terminal_cap&browser_cap` | `{terminals, browsers}`: both loads, `null` where there is none |
+| `GET /api/browsers/load?cap` | the browsers' cost now and at `cap` per environment, in the terminals' load shape, with `memory_basis` |
+| `GET /api/workloads/load?terminal_cap&browser_cap` | `{terminals, browsers, together}`: both loads, `null` where there is none, and `together` — both filled to their own caps and judged as one machine (`daedalus/load.py`, `project_workloads`), which the app's load bar repeats |
+| `GET /api/browsers/running` · `POST …/running/<env>/<browser>/close` | the browsers each daemon runs, with their memory and whose groups they hold; closing one ends its groups, the profile stays |
+| `GET /api/browsers/<group>/recording?after&limit` · `POST … {frames, human?}` · `DELETE …` | the group's recording switch and keyframes; the operator's switch; delete its keyframes |
+| `GET /api/browsers/<group>/frames/<no>` | one keyframe's JPEG |
+| `GET /api/browsers/recordings` | the recordings on disk per environment, against their size and age |
 
 `BrowserGroup` is `{id, owner{kind, id, label}, session_id, staff_id, project_id, profile, env,
 browser_id, status: running | idle | closed | lost, close_reason, fresh, viewport{w, h}, tabs: [{id,
@@ -672,6 +703,29 @@ what the agent typed into a field that is not secret, kept while its session exi
 session is deleted); the audit itself keeps its length and hash only. The memory the load counts is
 the daemon's private figure under the cost profile `browser`, beside the terminals' in
 `daedalus/load.py`.
+
+### Settings, watch mode and the injection monitor
+
+`[browser]` in the host's configuration is Settings → Browser: `running_cap`, `idle_close_minutes`,
+`record_frames` (the default for a new group), `record_takeover`, `record_retention_days`,
+`record_max_mb`, `lan_allow`, `watch_mode` and `watch_domains`, `injection_monitor` and
+`injection_monitor_preset`. The host gives the daemon its part with `limits.set` and `net.configure`
+on every connection and within two seconds of a change.
+
+- **Watch mode.** With `watch_mode` on, on a host `watch_domains` names (`mail.example.com`, or
+  `*.example.com` for everything under it), an agent's `BrowserAct` and its `BrowserNavigate` there are
+  refused unless someone has the group's live view open and in view — a socket whose app has not said
+  VIEW `hidden: true`. The refusal says so and to ask with `BrowserHandoff`; it is a line of the action
+  log (`watch`).
+- **The injection monitor** (`daedalus/browser/monitor.py`). With `injection_monitor` on, the text a
+  `BrowserSnapshot` or `BrowserText` returns from an origin the owner has not had judged clean is first
+  read by a model (the named preset, else a middle one of the table) with a fixed classifier prompt.
+  `INJECTION` pauses the group, raises the operator's "needs you" (`confirm`, with the model's reason)
+  and refuses the read, so the agent never sees the page; `CLEAN` is remembered for the owner; any
+  other answer, or a failed call, lets the page through with a line in the log — the walls hold
+  either way. Each judgement is a line of the action log (`monitor`).
+- **A page's own navigation the allowlist stopped** (`navigation.blocked`) is a line of the action log
+  (`blocked`) and is told to the owning agent at the start of its next browser tool's result, once.
 
 ### The network wall's rules and asks
 
@@ -759,10 +813,17 @@ and the operator's address bar — are judged before they happen by the same rul
 - `egress_allow`: a host outside it is `ask`, `egress_allow`, unless it is the installation's own
   services range or already granted. Subresources to other hosts are logged, not blocked.
 
-A page's own link, redirect or form meets the proxy's address rules like every other request.
-Pausing it to apply `egress_allow` as well (`Fetch.requestPaused`, `resourceType: Document`, the main
-frame) is *not yet*: until then the allowlist's ask covers the navigations above, and a page that
-follows a link off the list is only logged.
+A page's own link, redirect or form meets the proxy's address rules like every other request, and,
+**when the operator has an allowlist, its navigation rules too**: every tab then pauses its
+documents at the request (`Fetch.enable`, `resourceType: Document`), a frame's go on at once, and the
+tab's own is judged as a navigation — the scheme, the address, `egress_allow`. One refused fails as
+blocked by the client (Chromium shows its error page at that address; nothing of it loaded) and is
+published as `navigation.blocked`; the host tells the agent at its next call that the page tried to
+take it there, and that its own `BrowserNavigate` there would be asked about. The pause is set up
+before a new page first runs, so a popup's first navigation meets it too, and `net.configure` turns
+it on or off in every open tab. While a person drives, their clicks are theirs and go on. Without an
+allowlist nothing is paused: it would cost every navigation a round trip on the pipe for nothing the
+proxy does not already refuse.
 
 A refused navigation is `1102 {host, port, decision, reason}`. An `ask` is a refusal the operator
 can lift: the host asks, and on a yes sends `net.grant {group_id, host, port}`, which opens exactly
@@ -778,6 +839,25 @@ the proxy for `accounts.google.com`, `android.clients.google.com`, `clients2.goo
 **What the wall is.** Natively it is the only wall between a page and this machine's ports and the
 LAN. In a container it is the second: the `browser` service's network has no route to the key
 proxy, SearXNG, the agent or the terminals, whatever the proxy says (`deploy/compose.yaml`).
+
+## Recording
+
+The operator may record a group's pages (`record.set {frames: true}`; the host's settings name the
+default for new groups, and the agent has no way to switch it). A recording group gets a keyframe:
+
+- when the recording starts (`kind: "start"`);
+- after every action, once the page settled (`kind: "action"`, with its `action_id`), so every row of
+  the action log has the picture it left;
+- every 5 s while the page changed since the last one (`kind: "change"`; a picture identical to the
+  last is not kept).
+
+A keyframe is the page model's screenshot of the active tab — every secret field masked, as in any
+screenshot — as a JPEG at quality 50, at most 1280 pixels wide. **Nothing is taken while a person
+drives** unless the operator chose so (`human: true`). They are kept under
+`<state>/recordings/<group>/` as numbered files with an index of one JSON line each: `Frame {no, at
+(ms), tab, url, kind, action_id?, w, h, bytes}`. Numbers never repeat within a group, across restarts
+too. A group's keyframes outlive it; they go when older than `record_retention_ms`, oldest first
+when the daemon's recordings pass `record_max_bytes`, or with `record.delete`.
 
 ## Measured
 

@@ -3,7 +3,9 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/ascorblack/daedalus/browserd/internal/config"
 	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
+	"github.com/ascorblack/daedalus/browserd/internal/record"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
@@ -78,6 +82,20 @@ func newLog(path, level string) (*slog.Logger, io.Closer, error) {
 // that rewrites its title many times a second ends up correct, not published every time.
 var tabUpdates = map[string]events.Policy{"tab.updated": {Window: 250 * time.Millisecond, Coalesce: true}}
 
+// keyframe is a recording's picture of a tab: the page model's screenshot, so every secret field is
+// masked in it as in any screenshot, at a quality and width that keep a week of frames small.
+func keyframe(model *page.Model) record.Shooter {
+	return func(ctx context.Context, t *browser.Tab) ([]byte, int, int, error) {
+		shot, err := model.Screenshot(ctx, t, page.ScreenshotParams{TabID: t.ID, MaxWidth: 1280, Format: "jpeg", Quality: 50,
+			Origin: &browser.Origin{Actor: browser.ActorOperator}})
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		data, err := base64.StdEncoding.DecodeString(shot.Data)
+		return data, shot.Width, shot.Height, err
+	}
+}
+
 func serve(args []string) error {
 	cfg, err := config.Parse(args)
 	if err != nil {
@@ -124,8 +142,16 @@ func serve(args []string) error {
 	hub.HumanInput = model.HumanInput
 	manager.Listen(hub)
 	manager.Listen(model)
+	recorder := &record.Recorder{Store: record.Open(filepath.Join(cfg.StateDir, "recordings")), Log: log,
+		Shoot:  keyframe(model),
+		Groups: manager.Group,
+		Limits: func() (int64, time.Duration) {
+			l := manager.Limits()
+			return l.RecordMaxBytes, time.Duration(l.RecordRetentionMs) * time.Millisecond
+		}}
+	model.AfterAction = recorder.AfterAction
 	daemon := &rpc.Daemon{Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(),
-		Manager: manager, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall}
+		Manager: manager, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall, Record: recorder}
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 
@@ -134,6 +160,7 @@ func serve(args []string) error {
 	go manager.RunStats(stop)
 	go manager.RunTitles(stop)
 	go hub.Run(stop)
+	go recorder.Run(stop)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)

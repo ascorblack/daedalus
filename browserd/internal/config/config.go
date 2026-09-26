@@ -27,6 +27,8 @@ const (
 	DefaultMaxProfileDownloads = 2 << 30
 	DefaultMaxUploadBytes      = 100 << 20
 	DefaultFPSCap              = 15
+	DefaultRecordMaxBytes      = 500 << 20
+	DefaultRecordRetention     = 7 * 24 * time.Hour
 
 	// The viewport a group gets unless the host asks for another, and the bounds of one it asks for.
 	DefaultViewportW = 1280
@@ -76,6 +78,9 @@ type Limits struct {
 	MaxProfileDownloads int64         `json:"max_profile_download_bytes"`
 	MaxUploadBytes      int64         `json:"max_upload_bytes"`
 	FPSCap              int           `json:"fps_cap"`
+	// Recorded keyframes: all of them together at most this many bytes, none older than this.
+	RecordMaxBytes    int64 `json:"record_max_bytes"`
+	RecordRetentionMs int64 `json:"record_retention_ms"`
 }
 
 // Chromium is which browser to run and how. Path empty means: find one (chrome.Find).
@@ -100,6 +105,8 @@ func DefaultLimits() Limits {
 		MaxProfileDownloads: DefaultMaxProfileDownloads,
 		MaxUploadBytes:      DefaultMaxUploadBytes,
 		FPSCap:              DefaultFPSCap,
+		RecordMaxBytes:      DefaultRecordMaxBytes,
+		RecordRetentionMs:   DefaultRecordRetention.Milliseconds(),
 	}
 }
 
@@ -117,6 +124,8 @@ type file struct {
 		MaxProfileDownloads *int64 `json:"max_profile_download_bytes"`
 		MaxUploadBytes      *int64 `json:"max_upload_bytes"`
 		FPSCap              *int   `json:"fps_cap"`
+		RecordMaxBytes      *int64 `json:"record_max_bytes"`
+		RecordRetentionMs   *int64 `json:"record_retention_ms"`
 	} `json:"limits"`
 	Chromium struct {
 		Path      string   `json:"path"`
@@ -218,6 +227,8 @@ func (c *Config) load(path string) error {
 		int64In("max_profile_download_bytes", f.Limits.MaxProfileDownloads, 1, 1<<42, &l.MaxProfileDownloads),
 		int64In("max_upload_bytes", f.Limits.MaxUploadBytes, 1, 1<<34, &l.MaxUploadBytes),
 		intIn("fps_cap", f.Limits.FPSCap, 1, 60, &l.FPSCap),
+		int64In("record_max_bytes", f.Limits.RecordMaxBytes, 1<<20, 1<<40, &l.RecordMaxBytes),
+		int64In("record_retention_ms", f.Limits.RecordRetentionMs, 3600*1000, 366*24*3600*1000, &l.RecordRetentionMs),
 	} {
 		if err != nil {
 			return err

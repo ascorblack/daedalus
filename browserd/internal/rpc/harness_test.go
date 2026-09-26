@@ -2,9 +2,11 @@ package rpc_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +23,7 @@ import (
 	"github.com/ascorblack/daedalus/browserd/internal/config"
 	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
+	"github.com/ascorblack/daedalus/browserd/internal/record"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
 	"github.com/ascorblack/daedalus/browserd/internal/wire"
@@ -77,6 +80,13 @@ func fixture(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<input type="password" value="SECRET-frame-pw"><input autocomplete="cc-number" value="SECRET-frame-cc">`)
 	})
+	mux.HandleFunc("/link", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!doctype html><title>Link</title><a href="%s" style="display:block;width:200px;height:40px">onward</a>`, html.EscapeString(r.URL.Query().Get("to")))
+	})
+	mux.HandleFunc("/go", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
+	})
 	mux.HandleFunc("/after-login", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "<title>Signed in</title>signed in")
 	})
@@ -91,6 +101,7 @@ type harness struct {
 	manager *browser.Manager
 	site    *httptest.Server
 	stop    chan struct{}
+	evlog   *events.Log
 }
 
 // start runs the daemon in this process on a temporary run directory, with limits changed by edit.
@@ -100,6 +111,13 @@ func start(t *testing.T, edit func(*config.Limits)) *harness {
 
 // startWith is start with Chromium switches of the test's own.
 func startWith(t *testing.T, edit func(*config.Limits), args []string) *harness {
+	t.Helper()
+	return startWall(t, edit, args, nil)
+}
+
+// startWall is startWith with a wall of the test's own making (a fake resolver, a redirect to the
+// fixture), for a test that needs names the wall judges as the internet.
+func startWall(t *testing.T, edit func(*config.Limits), args []string, makeWall func(site *httptest.Server, publish func(netwall.Egress)) *netwall.Browsers) *harness {
 	t.Helper()
 	needChromium(t)
 	dir := t.TempDir()
@@ -125,10 +143,16 @@ func startWith(t *testing.T, edit func(*config.Limits), args []string) *harness 
 	// Every test browses through the network wall, as the daemon does, with the fixture's port as
 	// the services range: the rest of this machine is refused.
 	site := fixture(t)
-	wall := netwall.NewBrowsers(netwall.New(netwall.Options{Events: func(e netwall.Egress) { deb.Publish("egress", "", e) }}))
-	sitePort := site.Listener.Addr().(*net.TCPAddr).Port
-	if err := wall.Wall.Configure(netwall.Config{ServicesPorts: [][2]int{{sitePort, sitePort}}}); err != nil {
-		t.Fatal(err)
+	publish := func(e netwall.Egress) { deb.Publish("egress", "", e) }
+	var wall *netwall.Browsers
+	if makeWall != nil {
+		wall = makeWall(site, publish)
+	} else {
+		wall = netwall.NewBrowsers(netwall.New(netwall.Options{Events: publish}))
+		sitePort := site.Listener.Addr().(*net.TCPAddr).Port
+		if err := wall.Wall.Configure(netwall.Config{ServicesPorts: [][2]int{{sitePort, sitePort}}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	m := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb, Wall: wall, Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
 	hub = view.New(m, evlog, log)
@@ -136,12 +160,27 @@ func startWith(t *testing.T, edit func(*config.Limits), args []string) *harness 
 	hub.HumanInput = model.HumanInput
 	m.Listen(hub)
 	m.Listen(model)
-	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall}
+	recorder := &record.Recorder{Store: record.Open(filepath.Join(cfg.StateDir, "recordings")), Log: log, Groups: m.Group,
+		Shoot: func(ctx context.Context, t *browser.Tab) ([]byte, int, int, error) {
+			shot, err := model.Screenshot(ctx, t, page.ScreenshotParams{TabID: t.ID, MaxWidth: 1280, Format: "jpeg", Quality: 50})
+			if err != nil {
+				return nil, 0, 0, err
+			}
+			data, err := base64.StdEncoding.DecodeString(shot.Data)
+			return data, shot.Width, shot.Height, err
+		},
+		Limits: func() (int64, time.Duration) {
+			l := m.Limits()
+			return l.RecordMaxBytes, time.Duration(l.RecordRetentionMs) * time.Millisecond
+		}}
+	model.AfterAction = recorder.AfterAction
+	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall, Record: recorder}
 	srv := server.New(ep.Token, log, d.Hello)
 	d.Register(srv)
-	h := &harness{t: t, manager: m, site: site, stop: make(chan struct{})}
+	h := &harness{t: t, manager: m, site: site, stop: make(chan struct{}), evlog: evlog}
 	go hub.Run(h.stop)
 	go m.RunTitles(h.stop)
+	go recorder.Run(h.stop)
 	go func() { _ = srv.Serve(ep.Listener) }()
 	c, err := clienttest.Dial(cfg.RunDir)
 	if err != nil {

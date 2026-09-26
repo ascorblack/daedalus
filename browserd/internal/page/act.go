@@ -280,6 +280,9 @@ func (p *Model) Act(ctx context.Context, t *browser.Tab, ap ActParams) (*ActResu
 	res.OK = true
 	done["effects"] = res.Effects
 	p.m.Publish("action_done", done)
+	if p.AfterAction != nil {
+		p.AfterAction(t, id)
+	}
 	return res, nil
 }
 

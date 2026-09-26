@@ -2,12 +2,15 @@
 package chrome
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Found is a browser to run, and whether it came with the installation.
@@ -143,4 +146,27 @@ func executable(path string) bool {
 		return false
 	}
 	return runtime.GOOS == "windows" || st.Mode()&0o111 != 0
+}
+
+var versionPattern = regexp.MustCompile(`\b(\d+\.\d+\.\d+\.\d+)\b`)
+
+// ProbeVersion asks a Chromium for its version without starting a browser (`--version`), so the
+// daemon can say which one it would run before anything has: a doctor that reads "version unknown"
+// until the agent first browses tells the operator nothing. It answers in the product form a running
+// browser reports ("Chrome/151.0.7922.34"), or "" when the build does not print one: Windows builds
+// are window programs and print nothing.
+func ProbeVersion(path string, timeout time.Duration) string {
+	if path == "" || runtime.GOOS == "windows" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	if m := versionPattern.FindSubmatch(out); m != nil {
+		return "Chrome/" + string(m[1])
+	}
+	return ""
 }

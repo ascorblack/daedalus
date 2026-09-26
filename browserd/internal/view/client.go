@@ -44,6 +44,7 @@ type Client struct {
 	slow     int
 	fast     int
 	degraded bool
+	hidden   bool
 	warnedAt time.Time
 }
 
@@ -189,6 +190,11 @@ func (cl *Client) attach(v wire.View, full bool) {
 	if v.MaxW != 0 {
 		cl.maxW, cl.maxH = v.MaxW, v.MaxH
 	}
+	shown := false
+	if v.Hidden != nil {
+		shown = cl.hidden && !*v.Hidden
+		cl.hidden = *v.Hidden
+	}
 	if v.Quality != 0 {
 		cl.quality = v.Quality
 	} else if full {
@@ -218,6 +224,9 @@ func (cl *Client) attach(v wire.View, full bool) {
 		cl.pending, cl.lastPic = nil, 0
 	}
 	cl.mu.Unlock()
+	if shown {
+		cl.trySend()
+	}
 	if full {
 		cl.hello()
 		cl.sendTabs()
@@ -326,7 +335,7 @@ func (cl *Client) gap() time.Duration {
 
 func (cl *Client) trySend() {
 	cl.mu.Lock()
-	if cl.ended || cl.pending == nil || cl.inFlight != 0 || cl.tab == nil {
+	if cl.ended || cl.pending == nil || cl.inFlight != 0 || cl.tab == nil || cl.hidden {
 		cl.mu.Unlock()
 		return
 	}
