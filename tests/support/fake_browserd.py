@@ -201,6 +201,12 @@ class FakeBrowserd:
         """Host → (decision, reason) the network wall gives it: ``deny`` or ``ask``. Others pass."""
         self.grants: set[tuple[str, str, int]] = set()
         """(browser, host, port) the host opened with ``net.grant``."""
+        self.limits: dict[str, Any] = {}
+        """What ``limits.set`` last set."""
+        self.recording: dict[str, dict[str, Any]] = {}
+        """Group → its recording switch."""
+        self.frames: dict[str, list[dict[str, Any]]] = {}
+        """Group → its keyframes, each with its ``data``: one after every action while recording."""
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -285,6 +291,19 @@ class FakeBrowserd:
         self.download_bytes[did] = data
         self.emit("download.done", {"group_id": group_id, "download": dict(download)})
         return download
+
+    def block_navigation(self, group_id: str, url: str, reason: str = "egress_allow") -> None:
+        """A page's own navigation the allowlist stopped, as the daemon publishes it."""
+        tab = self.tab_of(group_id)
+        host = url.split("/")[2] if "://" in url else url
+        self.emit("navigation.blocked", {"group_id": group_id, "tab_id": tab.id, "url": url, "from": tab.page.url, "by": "page", "host": host, "port": 443, "decision": "ask", "reason": reason})
+
+    def keyframe(self, group_id: str, kind: str, action_id: str = "") -> None:
+        if not self.recording.get(group_id, {}).get("frames"):
+            return
+        frames = self.frames.setdefault(group_id, [])
+        tab = self.tab_of(group_id) if group_id in self.groups else None
+        frames.append({"no": len(frames) + 1, "at": int(time.time() * 1000), "tab": tab.id if tab else "", "url": tab.page.url if tab else "", "kind": kind, "action_id": action_id, "w": 1280, "h": 800, "bytes": len(self.screenshot), "data": self.screenshot})
 
     def set_control(self, group_id: str, owner: str, holder: str | None = None, reason: str = "") -> None:
         group = self.groups[group_id]
@@ -626,6 +645,33 @@ class FakeBrowserd:
         if method == "net.configure":
             self.wall = dict(params)
             return {}
+        if method == "limits.set":
+            self.limits = dict(params)
+            return {"max_browsers": params.get("max_browsers", self.max_browsers)}
+        if method == "record.set":
+            group = self._group(str(params.get("group_id")))
+            was = self.recording.get(group.id, {}).get("frames")
+            self.recording[group.id] = {"group_id": group.id, "frames": bool(params.get("frames")), "human": bool(params.get("human"))}
+            if params.get("frames") and not was:
+                self.keyframe(group.id, "start")
+            return dict(self.recording[group.id])
+        if method == "record.list":
+            gid = str(params.get("group_id"))
+            after = int(params.get("after") or 0)
+            listed = [{k: v for k, v in f.items() if k != "data"} for f in self.frames.get(gid, []) if f["no"] > after]
+            return {"recording": self.recording.get(gid, {"group_id": gid, "frames": False, "human": False}), "frames": listed[: int(params.get("limit") or 500)]}
+        if method == "record.read":
+            gid = str(params.get("group_id"))
+            found = next((f for f in self.frames.get(gid, []) if f["no"] == int(params.get("no") or 0)), None)
+            if found is None:
+                raise _Fail(1001, "no such keyframe")
+            return {"frame": {k: v for k, v in found.items() if k != "data"}, "data_b64": base64.b64encode(found["data"]).decode()}
+        if method == "record.delete":
+            self.frames.pop(str(params.get("group_id")), None)
+            return {}
+        if method == "record.groups":
+            groups = [{"group_id": g, "frames": len(f), "bytes": sum(x["bytes"] for x in f), "first_at": f[0]["at"], "last_at": f[-1]["at"]} for g, f in self.frames.items() if f]
+            return {"groups": groups, "bytes": sum(g["bytes"] for g in groups), "max_bytes": int(self.limits.get("record_max_bytes") or 500 << 20), "retention_ms": int(self.limits.get("record_retention_ms") or 7 * 86_400_000)}
         if method in ("net.grant", "net.revoke"):
             group = self._group(str(params.get("group_id")))
             key = (group.browser_id, str(params.get("host")), int(params.get("port") or 0))
@@ -646,7 +692,7 @@ class FakeBrowserd:
                 await self.close_channel(channel.id)
             return {}
         if method == "browser.stats":
-            return {"at": stamp(), "supported": True, "machine": self.machine, "daemon": {"pid": 1, "rss_bytes": 20 << 20, "cpu_percent": 0.2},
+            return {"at": stamp(), "supported": True, "memory_basis": "cgroup", "machine": self.machine, "daemon": {"pid": 1, "rss_bytes": 20 << 20, "cpu_percent": 0.2},
                     "browsers": [{"id": b.id, "pid": b.pid, "processes": 6, "rss_bytes": 250 << 20, "cpu_percent": 5.0, "tabs": sum(len(g.tabs) for g in self.groups.values() if g.browser_id == b.id)} for b in self.browsers.values()]}
         raise _Fail(-32601, f"method not found: {method}")
 
@@ -749,6 +795,7 @@ class FakeBrowserd:
                 download = self.add_download(group.id, *element.downloads)
                 effects["download"] = {"id": download["id"], "name": download["name"], "size": download["size"]}
         self.emit("action_done", {"action_id": action_id, "group_id": group.id, "tab_id": tab.id, "ok": True, "effects": effects})
+        self.keyframe(group.id, "action", action_id)
         reply: dict[str, Any] = {"action_id": action_id, "ok": True, "effects": effects, "point": point, "box": box, "element": described, "sensitive": sensitive}
         if not effects.get("navigated"):
             # What the action changed in the outline, as lines that came and went; none after a navigation.

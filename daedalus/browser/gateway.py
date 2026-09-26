@@ -57,9 +57,10 @@ def _json_object(frame: bytes, name: str, limit: int) -> dict[str, Any]:
     return value
 
 
-def check_frame(read_only: bool) -> Callable[[bytes, RelayResult], bytes | None]:
+def check_frame(read_only: bool, on_view: Callable[[dict[str, Any]], None] | None = None) -> Callable[[bytes, RelayResult], bytes | None]:
     """The view's judgement of what the app sends. INPUT from a read-only socket is dropped here,
-    before the daemon sees it (the daemon also has the client as a watcher, and drops it again)."""
+    before the daemon sees it (the daemon also has the client as a watcher, and drops it again).
+    ``on_view`` hears every ATTACH and VIEW: whether the view is in view is watch mode's question."""
 
     def check(frame: bytes, result: RelayResult) -> bytes | None:
         kind = frame[0]
@@ -68,7 +69,9 @@ def check_frame(read_only: bool) -> Callable[[bytes, RelayResult], bytes | None]
                 raise Refused(CLOSE_POLICY, f"ACK is {wire.ACK_SIZE} bytes")
             return frame
         if kind in (wire.ATTACH, wire.VIEW):
-            _json_object(frame, "ATTACH" if kind == wire.ATTACH else "VIEW", wire.MAX_VIEW_JSON)
+            value = _json_object(frame, "ATTACH" if kind == wire.ATTACH else "VIEW", wire.MAX_VIEW_JSON)
+            if on_view is not None:
+                on_view(value)
             return frame
         if kind == wire.INPUT:
             value = _json_object(frame, "INPUT", wire.MAX_INPUT_JSON)
@@ -132,17 +135,26 @@ class BrowserGateway:
         started = time.monotonic()
         await self._audit(service, attachment, "view.attach", {**held.who, "socket_address": address, "read_only": held.read_only, "client_id": attachment.client_id})
         result = RelayResult(code=CLOSE_INTERNAL, reason="the relay was interrupted", ended_by="service")
+        token = service.watch(group)
+
+        def seen(view: dict[str, Any]) -> None:
+            # A view the app hides (its page is in the background) says so; one that says nothing is
+            # in view, as a freshly opened one is.
+            if "hidden" in view:
+                service.set_watch(group, token, not bool(view.get("hidden")))
+
         try:
             result = await relay(
                 sock,
                 attachment.channel,
-                check=check_frame(held.read_only),
+                check=check_frame(held.read_only, seen),
                 service_alive=lambda: attachment.service_alive,
                 target="view",
                 closed_text="the browser closed this view",
                 gone_text="the browser service went away",
             )
         finally:
+            service.unwatch(group, token)
             await self._audit(
                 service,
                 attachment,

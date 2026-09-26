@@ -3,8 +3,8 @@
 // the two must never tell the operator different things.
 
 import { describe, expect, it } from "vitest";
-import type { TerminalLoad } from "./api";
-import { level, loadFigures, overEstimate, roundBytes } from "./machineload";
+import type { BrowserLoad, TerminalLoad } from "./api";
+import { level, loadFigures, overEstimate, roundBytes, workloadFigures } from "./machineload";
 
 const GB = 1 << 30;
 const MB = 1 << 20;
@@ -88,5 +88,48 @@ describe("sizes in words", () => {
     expect(roundBytes(62 * GB + 300 * MB)).toEqual({ value: "62", unit: "gb" });
     expect(roundBytes(1.46 * GB)).toEqual({ value: "1.5", unit: "gb" });
     expect(roundBytes(820 * MB)).toEqual({ value: "820", unit: "mb" });
+  });
+});
+
+/** The same machine with one browser running, each new one about 260 MB. */
+function browsers(over: Partial<BrowserLoad> = {}): BrowserLoad {
+  const base = machine();
+  return {
+    cap: 2,
+    running: 1,
+    queued: [],
+    used: { ...base.used, rss_bytes: 300 * MB, daemon_rss_bytes: 10 * MB },
+    likely: { rss_bytes: 260 * MB, cpu_percent: 15, samples: 10, basis: "running" },
+    projection: base.projection,
+    envs: [],
+    thresholds: base.thresholds,
+    ...over,
+  };
+}
+
+describe("terminals and browsers on one track", () => {
+  it("fills both caps at once, as the host's project_workloads does", () => {
+    const f = workloadFigures(machine(), browsers());
+    // The host, for the same machine (test_browser_service.py): 38520487936 bytes, 56.1 %, CPU 17.2 %.
+    expect(f.machineAtCap).toBe(38520487936);
+    expect(f.memPercentAtCap).toBeCloseTo(56.05, 1);
+    expect(f.cpuAtCap).toBeCloseTo(17.19, 1);
+    expect(f.terminals?.atCap).toBe(3 * GB + 40 * MB + 17 * 700 * MB);
+    expect(f.browsers?.atCap).toBe(560 * MB);
+    expect(f.level).toBe("ok");
+  });
+
+  it("judges a browser cap together with the terminals'", () => {
+    // Each alone would fit; together they pass the bad line (the host: "bad").
+    const f = workloadFigures(machine({ used: { ...machine().used, rss_bytes: 3 * GB } }), browsers(), { terminals: 45, browsers: 32 });
+    expect(loadFigures(machine(), 45).level).not.toBe("bad");
+    expect(f.level).toBe("bad");
+  });
+
+  it("works with browsers alone", () => {
+    const f = workloadFigures(null, browsers(), { browsers: 4 });
+    expect(f.terminals).toBeNull();
+    expect(f.machineAtCap).toBe(24 * GB + 3 * 260 * MB);
+    expect(f.known).toBe(true);
   });
 });

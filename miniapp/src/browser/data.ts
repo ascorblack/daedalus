@@ -5,7 +5,7 @@
 // is down, as for every other list.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { api, telegram, type BrowserActionRow, type BrowserControl, type BrowserGroup, type BrowserList } from "../api";
+import { api, telegram, type BrowserActionRow, type BrowserControl, type BrowserGroup, type BrowserList, type BrowserRecording } from "../api";
 import { useEvent, useStreamUp } from "../events";
 import { invalidate, useQuery } from "../store";
 import { LiveView, type LiveSnapshot } from "./live";
@@ -57,6 +57,33 @@ export function useActions(group: string | null, limit = 100): BrowserActionRow[
     if (group && event.payload?.group_id === group) invalidate(key!);
   }, [key]);
   return query.data && Array.isArray(query.data.actions) ? query.data.actions : [];
+}
+
+/** The group's recording: whether it is on, and its keyframes, oldest first. */
+export function useRecording(group: string | null): BrowserRecording {
+  const key = group ? `${BROWSERS_KEY}/${enc(group)}/recording` : null;
+  const query = useQuery<BrowserRecording>(key, { pollMs: 15000, staleMs: 2000 });
+  useEvent(["browser."], (event) => {
+    if (group && event.payload?.group_id === group) invalidate(key!);
+  }, [key]);
+  const data = query.data;
+  return { recording: data?.recording ?? { frames: false, human: false }, frames: data && Array.isArray(data.frames) ? data.frames : [] };
+}
+
+/** Read the recording again soon: an action was just done, and its keyframe is taken once the page settles. */
+export function recordingMoved(group: string): void {
+  window.setTimeout(() => invalidate(`${BROWSERS_KEY}/${enc(group)}/recording`), 900);
+}
+
+/** Switch the recording of keyframes; only the operator can. */
+export async function setRecording(group: string, frames: boolean): Promise<void> {
+  await api.post(`${BROWSERS_KEY}/${enc(group)}/recording`, { frames });
+  invalidate(`${BROWSERS_KEY}/${enc(group)}/recording`);
+}
+
+export async function deleteRecording(group: string): Promise<void> {
+  await api.delete(`${BROWSERS_KEY}/${enc(group)}/recording`);
+  invalidate(`${BROWSERS_KEY}/${enc(group)}/recording`);
 }
 
 function refreshLists(): void {

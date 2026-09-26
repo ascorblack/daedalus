@@ -88,7 +88,7 @@ export type ViewEvent =
 export type ServerFrame = { kind: "frame"; frameNo: number; meta: FrameMeta; image: Uint8Array } | { kind: "event"; event: ViewEvent };
 
 export type Attach = { tier: Tier; tab?: string; max_w: number; max_h: number; dpr?: number; quality?: number };
-export type ViewChange = { tier?: Tier; tab?: string; max_w?: number; max_h?: number; dpr?: number; quality?: number };
+export type ViewChange = { tier?: Tier; tab?: string; max_w?: number; max_h?: number; dpr?: number; quality?: number; hidden?: boolean };
 
 export type Mods = number;
 export type InputMessage =
@@ -160,7 +160,7 @@ function typed(type: number, body: string): Uint8Array {
   return frame;
 }
 
-const VIEW_KEYS = ["tier", "tab", "max_w", "max_h", "dpr", "quality"] as const;
+const VIEW_KEYS = ["tier", "tab", "max_w", "max_h", "dpr", "quality", "hidden"] as const;
 
 export function encodeAttach(a: Attach): Uint8Array {
   return typed(VIEW.ATTACH, ordered(a, VIEW_KEYS));

@@ -1440,8 +1440,11 @@ class BrowserConfig(BaseModel):
     """Where an agent's browser runs: ``auto`` is the container's browser service where there is one
     and the operator's machine otherwise (a native installation)."""
     running_cap: int = Field(default=2, ge=1, le=32)
-    """Browsers that may run at once in one environment: the daemon's own limit, which the load bar
-    projects against. Changing it here does not change the daemon's; its configuration does."""
+    """Browsers that may run at once in one environment. The host gives it to each daemon on every
+    connection and whenever it changes, so it is the daemon's own limit; the load bar projects it."""
+    idle_close_minutes: int = Field(default=10, ge=0, le=24 * 60)
+    """A browser with no agent call, no person's input and nobody watching for this long is closed;
+    its profile, and so its logins, stay on disk. 0 = never."""
     agent_wait_seconds: float = Field(default=60.0, ge=0, le=600)
     """How long an agent's BrowserOpen waits in line when every browser is busy before it gives up."""
     control_wait_seconds: float = Field(default=20.0, ge=0, le=60)
@@ -1456,6 +1459,44 @@ class BrowserConfig(BaseModel):
     rules: list[BrowserRuleConfig] = Field(default_factory=list)
     """The operator's rules about sensitive actions by site. A rule never allows ``credentials``:
     typing into a sign-in is the operator's, however the site is trusted."""
+    record_frames: bool = False
+    """Whether a new browser records keyframes (one after every action, one every few seconds while
+    the page changes) for the action log's replay. Each browser can be switched from its panel; the
+    agent cannot switch it. The action log itself is always kept."""
+    record_takeover: bool = False
+    """Whether a recording goes on while the operator drives. Off: what a person does in the browser
+    is not pictured, as what they type is never recorded."""
+    record_retention_days: int = Field(default=7, ge=1, le=365)
+    record_max_mb: int = Field(default=500, ge=10, le=100_000)
+    """All the recorded keyframes of one environment together; past it the oldest go first."""
+    watch_mode: bool = False
+    """Watch mode: on the sites in ``watch_domains`` the agent acts only while the operator has the
+    browser open and in view. Off by default; the list is there to switch on."""
+    watch_domains: list[str] = Field(
+        default_factory=lambda: [
+            "mail.google.com",
+            "outlook.live.com",
+            "outlook.office.com",
+            "*.mail.yahoo.com",
+            "mail.yandex.ru",
+            "e.mail.ru",
+            "*.paypal.com",
+            "online.sberbank.ru",
+            "*.tbank.ru",
+            "*.gosuslugi.ru",
+            "*.gov.uk",
+            "*.irs.gov",
+        ],
+        max_length=200,
+    )
+    """Hosts (``mail.example.com``) or everything under a domain (``*.example.com``) watch mode covers."""
+    injection_monitor: bool = False
+    """A small model reads the text of every page the agent opens on a site new to its session, before
+    the agent does, and pauses the browser and asks the operator when the page looks like it is
+    talking to the agent. Off by default: it costs a model call per new site."""
+    injection_monitor_preset: str = ""
+    """The model preset the monitor asks; empty = a middle one of the table (the weaker of two), which
+    is what reading one page for one word needs."""
 
 
 class HeartbeatConfig(BaseModel):

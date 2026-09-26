@@ -72,7 +72,7 @@ export function secure(url: string): boolean {
 }
 
 /** A row of the action log in words: an i18n key and what fills it. */
-export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "name" | "text" | "text_len" | "keys" | "url" | "needs" | "download">): { key: string; vars: Record<string, string | number> } {
+export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "name" | "text" | "text_len" | "keys" | "url" | "needs" | "download"> & { ok?: boolean }): { key: string; vars: Record<string, string | number> } {
   const what = row.name || row.element || "";
   switch (row.kind) {
     case "click":
@@ -105,6 +105,12 @@ export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "na
     case "give":
     case "pause":
       return { key: `browser.act.${row.kind}`, vars: {} };
+    case "blocked":
+      return { key: "browser.act.blocked", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
+    case "watch":
+      return { key: "browser.act.watch", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
+    case "monitor":
+      return { key: row.ok === false ? "browser.act.monitor.hit" : "browser.act.monitor.clean", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
     default:
       return { key: "browser.act.other", vars: { kind: row.kind, what } };
   }

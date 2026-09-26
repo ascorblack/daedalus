@@ -247,3 +247,26 @@ describe("a live view", () => {
     expect(sockets.length).toBe(1);
   });
 });
+
+describe("a view out of sight", () => {
+  it("tells the daemon when its page is hidden and when it is back, and says so at attach", async () => {
+    let hidden = true;
+    let told: ((hidden: boolean) => void) | null = null;
+    deps.hidden = () => hidden;
+    deps.visibility = (callback) => {
+      told = callback;
+      return () => {
+        told = null;
+      };
+    };
+    const { conn, s } = await connected();
+    // Opened in a background tab: the ATTACH is followed at once by the VIEW that says so.
+    expect(s.json(VIEW.VIEW)).toEqual([{ hidden: true }]);
+    hidden = false;
+    told!(false);
+    told!(false);
+    expect(s.json(VIEW.VIEW)).toEqual([{ hidden: true }, { hidden: false }]);
+    conn.close();
+    expect(told).toBeNull();
+  });
+});

@@ -129,6 +129,10 @@ class Group:
     created: float = field(default_factory=time.time)
     actions: list[dict[str, Any]] = field(default_factory=list)
     dialog: dict[str, Any] | None = None
+    recording: bool = False
+    frames: list[dict[str, Any]] = field(default_factory=list)
+    """Keyframes while recording: one when it starts and one after every action, each the picture of
+    the scene on screen then (``scene`` names it; the REST answer leaves it out)."""
 
 
 @dataclass
@@ -170,6 +174,14 @@ class BrowserStub:
         self.counter = 0
         self.action_counter = 0
         self.available = True
+        self.running: list[dict[str, Any]] = []
+        """The browsers Settings lists as running (``/api/browsers/running``)."""
+        self.profiles: list[dict[str, Any]] = []
+        self.envs: list[dict[str, Any]] = [{
+            "env": "container", "configured": True, "available": True, "reason": "", "detail": "", "version": "src-4f1c2a9e0b7d",
+            "chromium": {"version": "Chrome/151.0.7922.34", "kind": "bundled", "error": ""}, "sandbox": "ok",
+            "limits": {"max_browsers": 2}, "counts": {"browsers": 1}, "image_version": "", "update_available": False,
+        }]
 
     # -- the groups -------------------------------------------------------------------------
 
@@ -285,7 +297,7 @@ class BrowserStub:
                 event["keys"] = keys
             g.acting = True
             g.last_activity = now
-            row = {"id": event["id"], "at": iso(now), "actor": "agent", "kind": kind, "element": element, "name": name, "tab": tab.id, "point": point, "box": box, "ok": True}
+            row = {"id": event["id"], "at": iso(now), "actor": "agent", "kind": kind, "element": element, "name": name, "tab": tab.id, "point": point, "box": box, "ok": True, "action_id": event["id"]}
             if text is not None:
                 row["text"] = text
             if text_len is not None:
@@ -299,7 +311,16 @@ class BrowserStub:
                 self.broadcast(group_id, per_client=lambda c: {"type": "tab", **{k: v for k, v in self.tab_view(tab).items() if k != "active"}})
             self.paint(group_id)
             self.broadcast(group_id, {"type": "action_done", "id": event["id"], "ok": True, "effects": {"navigated": bool(after)}})
+            self.keyframe(g, "action", event["id"])
             return event
+
+    def keyframe(self, g: Group, kind: str, action_id: str = "") -> None:
+        """A recording's picture of what is on screen now, as the daemon takes one after an action."""
+        if not g.recording:
+            return
+        tab = self.active(g)
+        s = self.scenes[tab.scene]
+        g.frames.append({"no": len(g.frames) + 1, "at": int(time.time() * 1000), "tab": tab.id, "url": s.url, "kind": kind, "action_id": action_id, "w": s.size[0], "h": s.size[1], "bytes": len(s.jpeg), "scene": tab.scene})
 
     def navigate(self, group_id: str, scene: str) -> None:
         with self.lock:
@@ -423,12 +444,16 @@ class BrowserStub:
 
     def answer(self, method: str, path: str, query: dict[str, list[str]], body: Any) -> tuple[int, Any]:
         segments = path.strip("/").split("/")  # api, browsers, [group], [action]
+        if len(segments) >= 3 and segments[2] in ("running", "profiles", "recordings", "load"):
+            return self.answer_settings(method, segments[2:], body)
         if len(segments) == 2 and method == "GET":
             session = query.get("session", [None])[0]
             staff = query.get("staff", [None])[0]
             rows = [self.group_view(g) for g in self.groups.values()
                     if (session and g.owner_kind == "session" and g.owner_id == session) or (staff and g.owner_kind == "staff" and g.owner_id == staff)]
-            return 200, {"available": self.available, "reason": "", "groups": rows}
+            if query.get("status"):
+                rows = [self.group_view(g) for g in self.groups.values() if g.status != "closed"]
+            return 200, {"available": self.available, "reason": "", "groups": rows, "envs": self.envs, "capacity": {"open": len(rows), "cap": 2, "queued": []}}
         g = self.groups.get(segments[2]) if len(segments) >= 3 else None
         if g is None:
             return 404, {"detail": "no such browser"}
@@ -460,10 +485,47 @@ class BrowserStub:
             g.dialog = None
             self.broadcast(g.id, {"type": "dialog", "state": "closed", "tab_id": self.active(g).id})
             return 200, {}
+        if action == "recording" and method == "GET":
+            return 200, {"recording": {"frames": g.recording, "human": False}, "frames": [{k: v for k, v in f.items() if k != "scene"} for f in g.frames]}
+        if action == "recording" and method == "POST":
+            was = g.recording
+            g.recording = bool(body.get("frames"))
+            if g.recording and not was:
+                self.keyframe(g, "start")
+            return 200, {"group_id": g.id, "frames": g.recording, "human": bool(body.get("human"))}
+        if action == "recording" and method == "DELETE":
+            g.frames = []
+            return 200, {"ok": True}
         if action == "close" and method == "POST":
             g.status = "closed"
             self.drop(g.id, 4404)
             return 200, {"tabs": len(g.tabs)}
+        return 404, {"detail": "no such route"}
+
+    def answer_settings(self, method: str, parts: list[str], body: Any) -> tuple[int, Any]:
+        """Settings → Browser's routes: the running browsers, the profiles, the recordings and the load."""
+        what = parts[0]
+        if what == "running" and method == "GET":
+            return 200, {"browsers": self.running}
+        if what == "running" and method == "POST" and len(parts) == 4 and parts[3] == "close":
+            self.running = [b for b in self.running if b["id"] != parts[2]]
+            return 200, {"ok": True}
+        if what == "profiles" and method == "GET":
+            return 200, {"profiles": self.profiles}
+        if what == "profiles" and len(parts) >= 3:
+            name = parts[-2] if parts[-1] == "clear" else parts[-1]
+            if method == "DELETE":
+                self.profiles = [p for p in self.profiles if p["id"] != name]
+            elif method == "POST" and parts[-1] == "clear":
+                for p in self.profiles:
+                    if p["id"] == name:
+                        p["size_bytes"] = 0
+            return 200, {"ok": True}
+        if what == "recordings" and method == "GET":
+            groups = [{"group_id": g.id, "frames": len(g.frames), "bytes": sum(f["bytes"] for f in g.frames), "first_at": g.frames[0]["at"], "last_at": g.frames[-1]["at"]} for g in self.groups.values() if g.frames]
+            return 200, {"envs": [{"env": "container", "groups": groups, "bytes": sum(x["bytes"] for x in groups), "max_bytes": 500 << 20, "retention_ms": 7 * 86_400_000}]}
+        if what == "load" and method == "GET":
+            return 200, browser_load(running=len(self.running))
         return 404, {"detail": "no such route"}
 
     def route(self, route: Any) -> None:
@@ -479,6 +541,16 @@ class BrowserStub:
                 body = None
         with self.lock:
             self.requests.append((request.method, path, body))
+            segments = path.strip("/").split("/")
+            if len(segments) == 5 and segments[3] == "frames" and request.method == "GET":
+                # A keyframe is a picture, not JSON: the scene it was taken of.
+                g = self.groups.get(segments[2])
+                frame = next((f for f in (g.frames if g else []) if str(f["no"]) == segments[4]), None)
+                if frame is None:
+                    route.fulfill(status=404, content_type="application/json", body=json.dumps({"detail": "no such keyframe"}))
+                else:
+                    route.fulfill(status=200, content_type="image/jpeg", body=self.scenes[frame["scene"]].jpeg)
+                return
             status, answer = self.answer(request.method, path, parse_qs(parts.query), body)
         route.fulfill(status=status, content_type="application/json", body=json.dumps(answer))
 
@@ -488,6 +560,24 @@ class BrowserStub:
 
     def posted(self, suffix: str) -> list[Any]:
         return [b for m, p, b in self.requests if m == "POST" and p.endswith(suffix)]
+
+
+GIB = 1 << 30
+MIB = 1 << 20
+
+
+def browser_load(*, running: int = 1, cap: int = 2, total: int = 62 * GIB, available: int = 38 * GIB, each: int = 260 * MIB) -> dict[str, Any]:
+    """``GET /api/browsers/load`` for the harness's 62 GB, 16-CPU machine: browsers of about 260 MB."""
+    daemon = 12 * MIB
+    used = running * each + daemon
+    return {
+        "cap": cap, "running": running, "queued": [], "memory_basis": "cgroup",
+        "used": {"rss_bytes": used, "daemon_rss_bytes": daemon, "cpu_percent": 4.0, "cpus": 16, "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": 14.0},
+        "likely": {"rss_bytes": each, "cpu_percent": 12.0, "samples": 30, "basis": "measured"},
+        "projection": {"cap": cap, "sessions": max(cap, running), "terminals_rss_bytes": used, "machine_used_bytes": total - available, "mem_total_bytes": total, "mem_percent": 40.0, "cpu_percent": 15.0, "level": "ok", "cpu_level": "ok"},
+        "envs": [{"env": "container", "supported": True, "browsers": running, "rss_bytes": running * each, "cpu_percent": 4.0, "mem_total_bytes": total, "mem_available_bytes": available}],
+        "thresholds": {"warn": 70.0, "bad": 90.0},
+    }
 
 
 def open_page(context: Any, bs: BrowserStub, general: Any, url: str, wait: str = ".chat-scroll .timeline") -> Any:

@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from daedalus import load as load_math
 from daedalus.browser.gateway import BrowserGateway
 from daedalus.browser.model import BrowserError, EnvUnavailable, InvalidRequest, NotFound
 from daedalus.gateway import SocketGone, ticket_who
@@ -54,6 +55,13 @@ class DialogBody(BaseModel):
     accept: bool
     tab_id: str = Field(default="", max_length=64)
     text: str | None = Field(default=None, max_length=10_000)
+
+
+class RecordingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    frames: bool
+    human: bool | None = None
+    """Whether the recording goes on while the operator drives; omitted = the Settings default."""
 
 
 class UpdateBody(BaseModel):
@@ -151,10 +159,19 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         bar can put both on one memory track. Either is ``null`` where this installation has none."""
         terminals = app.extensions.get("terminals")
         browsers = app.extensions.get("browser")
-        return {
-            "terminals": await terminals.load(cap=terminal_cap) if terminals is not None else None,  # type: ignore[attr-defined]
-            "browsers": await cast("Browsers", browsers).load(cap=browser_cap) if browsers is not None else None,
-        }
+        term = await terminals.load(cap=terminal_cap) if terminals is not None else None  # type: ignore[attr-defined]
+        brow = await cast("Browsers", browsers).load(cap=browser_cap) if browsers is not None else None
+        kinds: dict[str, Any] = {}
+        machine: dict[str, Any] = {}
+        for name, load, cap in (("terminals", term, terminal_cap), ("browsers", brow, browser_cap)):
+            if not load:
+                continue
+            likely = load.get("likely") or {}
+            kinds[name] = {"cap": cap or load["cap"], "running": load["running"], "used_rss": int(load["used"]["rss_bytes"]), "cost": load_math.Cost(float(likely.get("rss_bytes") or 0), float(likely.get("cpu_percent") or 0), int(likely.get("samples") or 0))}
+            if not machine and load["used"].get("mem_total_bytes"):
+                used = load["used"]
+                machine = {"mem_total_bytes": used["mem_total_bytes"], "mem_available_bytes": used["mem_available_bytes"], "cpus": used.get("cpus") or 0, "cpu_percent": used.get("machine_cpu_percent") or 0}
+        return {"terminals": term, "browsers": brow, "together": load_math.project_workloads(machine=machine, kinds=kinds) if kinds else None}
 
     @api.get("/api/browsers/profiles")
     async def browsers_profiles(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -170,6 +187,22 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     async def browsers_profile_delete(env: Literal["container", "host"], profile: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         await service().profile_action(env, profile, "delete")
         return {"ok": True}
+
+    @api.get("/api/browsers/running")
+    async def browsers_running(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The browsers every environment runs now, with their memory and whose groups they hold."""
+        return {"browsers": await service().running_browsers()}
+
+    @api.post("/api/browsers/running/{env}/{browser_id}/close")
+    async def browsers_running_close(env: Literal["container", "host"], browser_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """End one browser and every group in it; the profiles, and so the logins, stay."""
+        await service().close_browser(env, browser_id)
+        return {"ok": True}
+
+    @api.get("/api/browsers/recordings")
+    async def browsers_recordings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The recorded keyframes on disk per environment, against the size and age they are kept to."""
+        return {"envs": await service().recordings()}
 
     @api.get("/api/browsers/{group_id}")
     async def browsers_get(group_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -278,6 +311,30 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
                 out["handle"] = stored.handle
         await found.audit(group_id, row["env"], "operator", "download_saved", {"id": download_id, "name": name, "size": len(data), "path": out.get("path", ""), "handle": out.get("handle", "")})
         return out
+
+    @api.get("/api/browsers/{group_id}/recording")
+    async def browsers_recording(group_id: str, after: int = Query(default=0, ge=0), limit: int = Query(default=500, ge=1, le=5000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The group's recording switch and its keyframes, oldest first; a closed group's are there
+        until they expire."""
+        return await service().recording(group_id, after=after, limit=limit)
+
+    @api.post("/api/browsers/{group_id}/recording")
+    async def browsers_recording_set(group_id: str, body: RecordingBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Switch the recording of keyframes: the operator's alone; the agent has no say in it."""
+        return await service().set_recording(group_id, frames=body.frames, human=body.human)
+
+    @api.delete("/api/browsers/{group_id}/recording")
+    async def browsers_recording_delete(group_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await service().delete_recording(group_id)
+        return {"ok": True}
+
+    @api.get("/api/browsers/{group_id}/frames/{no}")
+    async def browsers_frame(group_id: str, no: int, _: dict[str, Any] = Depends(auth)) -> Response:
+        """One keyframe's picture. Its secret fields were masked when it was taken."""
+        if no < 1:
+            raise HTTPException(404, "no such keyframe")
+        _meta, data = await service().frame(group_id, no)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
     @api.get("/api/browsers/{group_id}/asks/{key}/thumbnail")
     async def browsers_ask_thumbnail(group_id: str, key: str, _: dict[str, Any] = Depends(auth)) -> Response:
