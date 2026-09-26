@@ -27,15 +27,17 @@ specified in [`docs/architecture/browser.md`](../docs/architecture/browser.md).
 | `internal/chrome` | finding a Chromium, its switches and preferences, starting it on a profile, ending its tree; its private memory and sandbox state from `/proc` |
 | `internal/browser` | browsers, groups, tabs and control; following Chromium's targets; navigation; idle close; statistics and the memory limit |
 | `internal/view` | live views: one screencast per watched tab, its pacing, each client's mailbox and acknowledgements, thumbnails, a person's input |
-| `internal/rpc` | the methods |
+| `internal/page` | what the agent reads and does on a page: the outline with refs and the readable text from `js/page.js` (run in an isolated world the page cannot reach), masked screenshots, actions as real input, waiting, dialogs, downloads and uploads, and the moments the operator is needed |
+| `internal/sensitive` | which consequences of an action the operator approves: the word lists in English and Russian and the classification |
+| `internal/rpc` | the methods; `testdata/site` is the local site the tests browse, `testdata/golden` the outlines of three of its pages (`go test ./internal/rpc -run Golden -update` rewrites them) |
 | `internal/wire` | the view frames; `testdata/frames.json` is shared byte for byte with the app |
 
 ## Testing
 
 The gate runs in the Go image named by `go.mod` plus a Chromium (`toolchain.Dockerfile`), as a
 non-root user with the seccomp profile Chromium's sandbox needs (the one the compose service gets),
-with the race detector and vets for macOS and Windows. The tests drive real Chromium against a local
-site and need no network; `BROWSERD_REQUIRE_CHROMIUM` makes a missing browser a failure rather than
+with the race detector and vets for macOS and Windows. The tests drive real Chromium and browse only a
+local site; `BROWSERD_REQUIRE_CHROMIUM` makes a missing browser a failure rather than
 a skip. The container is capped, as every Chromium run on a shared machine should be:
 
 ```sh

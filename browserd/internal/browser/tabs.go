@@ -114,6 +114,9 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 	}{
 		{"Page.enable", nil},
 		{"Page.setLifecycleEventsEnabled", map[string]any{"enabled": true}},
+		// For the status of a page's document and the challenge of a site that asks for a password;
+		// no bodies are kept.
+		{"Network.enable", map[string]any{"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}},
 		{"Emulation.setUserAgentOverride", map[string]any{"userAgent": b.userAgent, "userAgentMetadata": b.uaMetadata}},
 		{"Runtime.runIfWaitingForDebugger", nil},
 	} {
@@ -410,7 +413,9 @@ func (m *Manager) sizeWindow(ctx context.Context, b *Browser, target string, vp 
 }
 
 // measureFrame learns, on a browser's first page, how much of a window is not page: a window of
-// 1280×800 in --headless=new holds a page of 1280×657. The first page is then sized again.
+// 1280×800 in --headless=new holds a page of 1280×657. A window's new size reaches its page a moment
+// after it is set, and a size read in between is the old one, so the page's size is read until it
+// holds still, compared with the window's own, and the result checked on the page once resized.
 func (m *Manager) measureFrame(ctx context.Context, b *Browser, session, target string, vp Viewport) {
 	b.mu.Lock()
 	known := b.frameKnown
@@ -418,19 +423,71 @@ func (m *Manager) measureFrame(ctx context.Context, b *Browser, session, target 
 	if known {
 		return
 	}
-	var r struct {
-		Result struct {
-			Value []int `json:"value"`
-		} `json:"result"`
+	var w struct {
+		WindowID int `json:"windowId"`
 	}
-	err := b.conn.Call(ctx, session, "Runtime.evaluate", map[string]any{"expression": "[innerWidth, innerHeight]",
-		"returnByValue": true}, &r)
-	if err != nil || len(r.Result.Value) != 2 {
+	if err := b.conn.Call(ctx, "", "Browser.getWindowForTarget", map[string]any{"targetId": target}, &w); err != nil {
 		return
 	}
-	b.mu.Lock()
-	b.frameW, b.frameH = max(0, vp.W-r.Result.Value[0]), max(0, vp.H-r.Result.Value[1])
-	b.frameKnown = true
-	b.mu.Unlock()
-	m.sizeWindow(ctx, b, target, vp)
+	for attempt := 0; attempt < 3; attempt++ {
+		inner, ok := m.settledInner(ctx, b, session)
+		if !ok {
+			return
+		}
+		var wb struct {
+			Bounds struct {
+				Width  int `json:"width"`
+				Height int `json:"height"`
+			} `json:"bounds"`
+		}
+		if err := b.conn.Call(ctx, "", "Browser.getWindowBounds", map[string]any{"windowId": w.WindowID}, &wb); err != nil {
+			return
+		}
+		if inner[0] == vp.W && inner[1] == vp.H {
+			b.mu.Lock()
+			b.frameW, b.frameH = wb.Bounds.Width-vp.W, wb.Bounds.Height-vp.H
+			b.frameKnown = true
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Lock()
+		b.frameW, b.frameH = max(0, wb.Bounds.Width-inner[0]), max(0, wb.Bounds.Height-inner[1])
+		b.mu.Unlock()
+		m.sizeWindow(ctx, b, target, vp)
+	}
+	m.log.Warn("a page's size never matched its window", "browser", b.ID)
+}
+
+// settledInner reads a page's size until three reads 50 ms apart agree.
+func (m *Manager) settledInner(ctx context.Context, b *Browser, session string) ([2]int, bool) {
+	var last [2]int
+	same := 0
+	for i := 0; i < 40; i++ {
+		var r struct {
+			Result struct {
+				Value []int `json:"value"`
+			} `json:"result"`
+		}
+		err := b.conn.Call(ctx, session, "Runtime.evaluate", map[string]any{"expression": "[innerWidth, innerHeight]",
+			"returnByValue": true}, &r)
+		if err != nil || len(r.Result.Value) != 2 {
+			return last, false
+		}
+		cur := [2]int{r.Result.Value[0], r.Result.Value[1]}
+		if cur == last {
+			same++
+			if same >= 2 {
+				return cur, true
+			}
+		} else {
+			same = 0
+		}
+		last = cur
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-ctx.Done():
+			return last, false
+		}
+	}
+	return last, true
 }

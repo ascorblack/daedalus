@@ -120,6 +120,10 @@ func (m *Manager) publish(typ string, data any) {
 	}
 }
 
+// Publish publishes a daemon event (the page model's actions, downloads and requests for the
+// operator).
+func (m *Manager) Publish(typ string, data any) { m.publish(typ, data) }
+
 // publishKeyed goes through the rate limit of its type, per key (a tab).
 func (m *Manager) publishKeyed(typ, key string, data any) {
 	if m.deps.Events != nil {
@@ -146,6 +150,13 @@ func (m *Manager) Group(id string) (*Group, error) {
 		return nil, errBrowserGone(gg.reason)
 	}
 	return nil, wire.Errorf(wire.CodeNotFound, "no browser group %q; open one", id)
+}
+
+// TabByTarget returns the tab of a CDP target (a page's main frame has the target's id), or nil.
+func (m *Manager) TabByTarget(target string) *Tab {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byTarget[target]
 }
 
 // Tab returns the tab with id.

@@ -18,6 +18,7 @@ import (
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/chrome"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
 	"github.com/ascorblack/daedalus/browserd/internal/wire"
@@ -56,6 +57,27 @@ func fixture(t *testing.T) *httptest.Server {
 	page("/button", "Button", `<button id="b" style="position:absolute;left:100px;top:100px;width:200px;height:60px" onclick="document.title='clicked '+event.isTrusted">Press</button>`)
 	page("/popup", "Popup", `<a id="a" href="/still" target="_blank" style="position:absolute;left:100px;top:100px;width:200px;height:60px;display:block">open</a>`)
 	page("/dialog", "Dialog", `<button id="b" style="position:absolute;left:100px;top:100px;width:200px;height:60px" onclick="document.title=confirm('Leave?')?'yes':'no'">Ask</button>`)
+	mux.Handle("/site/", http.StripPrefix("/site/", http.FileServer(http.Dir("testdata/site"))))
+	mux.HandleFunc("/file.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Disposition", `attachment; filename="report.txt"`)
+		fmt.Fprint(w, "the quarterly report\n")
+	})
+	mux.HandleFunc("/private", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="fixture"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/secrets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, secretsPage())
+	})
+	mux.HandleFunc("/secrets-frame", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<input type="password" value="SECRET-frame-pw"><input autocomplete="cc-number" value="SECRET-frame-cc">`)
+	})
+	mux.HandleFunc("/after-login", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<title>Signed in</title>signed in")
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -71,11 +93,16 @@ type harness struct {
 
 // start runs the daemon in this process on a temporary run directory, with limits changed by edit.
 func start(t *testing.T, edit func(*config.Limits)) *harness {
+	return startWith(t, edit, nil)
+}
+
+// startWith is start with Chromium switches of the test's own.
+func startWith(t *testing.T, edit func(*config.Limits), args []string) *harness {
 	t.Helper()
 	needChromium(t)
 	dir := t.TempDir()
 	cfg := &config.Config{Env: "test", RunDir: filepath.Join(dir, "run"), StateDir: filepath.Join(dir, "state"),
-		Listen: "unix", Limits: config.DefaultLimits()}
+		Listen: "unix", Limits: config.DefaultLimits(), Chromium: config.Chromium{Args: args}}
 	if edit != nil {
 		edit(&cfg.Limits)
 	}
@@ -95,8 +122,11 @@ func start(t *testing.T, edit func(*config.Limits)) *harness {
 	var hub *view.Hub
 	m := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb, Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
 	hub = view.New(m, evlog, log)
+	model := page.New(m, cfg, log)
+	hub.HumanInput = model.HumanInput
 	m.Listen(hub)
-	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Events: evlog, Log: log}
+	m.Listen(model)
+	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Page: model, Events: evlog, Log: log}
 	srv := server.New(ep.Token, log, d.Hello)
 	d.Register(srv)
 	h := &harness{t: t, manager: m, site: fixture(t), stop: make(chan struct{})}
@@ -311,4 +341,34 @@ func deliver(v *viewConn, payload []byte) {
 			}
 		}
 	}
+}
+
+// secretFields are the field kinds whose values an agent never reads, each with a value it must not
+// see. The spellings vary as pages vary them.
+var secretFields = []string{
+	`<input type="password" value="%s">`,
+	`<input type="PASSWORD" value="%s">`,
+	`<input autocomplete="current-password" value="%s">`,
+	`<input autocomplete="section-login Current-Password" value="%s">`,
+	`<input autocomplete="new-password" value="%s">`,
+	`<input autocomplete="one-time-code" value="%s">`,
+	`<input autocomplete="cc-number" value="%s">`,
+	`<input autocomplete="cc-exp" value="%s">`,
+	`<input autocomplete="cc-csc" value="%s">`,
+	`<input autocomplete="billing cc-name" value="%s">`,
+	`<textarea autocomplete="one-time-code">%s</textarea>`,
+	`<label>Pin <input type="password" value="%s"></label>`,
+}
+
+func secretsPage() string {
+	var b strings.Builder
+	b.WriteString("<!doctype html><title>Secrets</title><main><h1>Fields</h1><form>")
+	for i, f := range secretFields {
+		fmt.Fprintf(&b, "<p>"+f+"</p>", fmt.Sprintf("SECRET-%d", i))
+	}
+	b.WriteString(`<button type="button" onclick="document.getElementById('x').textContent='changed'">Change</button><p id="x">same</p></form>`)
+	b.WriteString(`<div id="host"></div><iframe src="/secrets-frame" title="payment"></iframe></main><script>
+document.getElementById("host").attachShadow({mode: "open"}).innerHTML = '<input type="password" value="SECRET-shadow">';
+</script>`)
+	return b.String()
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
@@ -114,9 +115,12 @@ func serve(args []string) error {
 	manager := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb,
 		Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
 	hub = view.New(manager, evlog, log)
+	model := page.New(manager, cfg, log)
+	hub.HumanInput = model.HumanInput
 	manager.Listen(hub)
+	manager.Listen(model)
 	daemon := &rpc.Daemon{Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(),
-		Manager: manager, Hub: hub, Events: evlog, Log: log}
+		Manager: manager, Hub: hub, Page: model, Events: evlog, Log: log}
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 

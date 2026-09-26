@@ -14,6 +14,7 @@ import (
 
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
 	"github.com/ascorblack/daedalus/ptyd/proto/events"
@@ -29,6 +30,7 @@ type Daemon struct {
 	StartedAt time.Time
 	Manager   *browser.Manager
 	Hub       *view.Hub
+	Page      *page.Model
 	Events    *events.Log
 	Log       *slog.Logger
 
@@ -70,6 +72,7 @@ func (d *Daemon) Register(s *server.Server) {
 	} {
 		s.Handle(name, h)
 	}
+	d.registerPage(s)
 }
 
 // decode reads params strictly: an unknown field is an error, so a misspelt parameter is never
@@ -186,6 +189,7 @@ func (d *Daemon) groupClose(ctx context.Context, c *server.Conn, params json.Raw
 	if err != nil {
 		return nil, err
 	}
+	d.Page.GroupClosed(p.GroupID)
 	return map[string]any{"tabs": n}, nil
 }
 

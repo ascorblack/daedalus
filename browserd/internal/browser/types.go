@@ -439,6 +439,26 @@ func (t *Tab) Call(ctx context.Context, method string, params, result any) error
 	return t.Group.Browser.conn.Call(ctx, t.Session, method, params, result)
 }
 
+// Input sends one input event and waits for Chromium to have handled it, or for a dialog the event
+// opened: a click whose handler calls confirm() is not answered until the dialog is, and the
+// dialog is the input's effect, not a failure.
+func (t *Tab) Input(ctx context.Context, method string, params any) error {
+	reply := t.Group.Browser.conn.Send(ctx, t.Session, method, params)
+	for {
+		wake := t.Wake()
+		select {
+		case err := <-reply:
+			return err
+		case <-wake:
+			if t.Dialog() != nil {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // Value and SetValue keep per-tab state for other packages (the page model's refs).
 func (t *Tab) Value(key any) any {
 	t.mu.Lock()
@@ -466,6 +486,13 @@ func (t *Tab) Title() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.title
+}
+
+// Loader is the page's current document, as its lifecycle events name it.
+func (t *Tab) Loader() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.loader
 }
 
 // Dialog is the dialog open on the page, or nil.

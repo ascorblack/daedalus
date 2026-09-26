@@ -43,11 +43,11 @@ func (h *Hub) dispatch(ctx context.Context, t *browser.Tab, in wire.Input) error
 			p["buttons"] = buttonMask[button]
 		}
 		h.human(t, "mouse")
-		return t.Call(ctx, "Input.dispatchMouseEvent", p, nil)
+		return t.Input(ctx, "Input.dispatchMouseEvent", p)
 	case "wheel":
 		h.human(t, "wheel")
-		return t.Call(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseWheel", "x": in.X, "y": in.Y,
-			"deltaX": in.DX, "deltaY": in.DY, "modifiers": in.Mods}, nil)
+		return t.Input(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseWheel", "x": in.X, "y": in.Y,
+			"deltaX": in.DX, "deltaY": in.DY, "modifiers": in.Mods})
 	case "key":
 		var typ string
 		switch in.Type {
@@ -69,13 +69,13 @@ func (h *Hub) dispatch(ctx context.Context, t *browser.Tab, in wire.Input) error
 			p["unmodifiedText"] = in.Text
 		}
 		h.human(t, "key")
-		return t.Call(ctx, "Input.dispatchKeyEvent", p, nil)
+		return t.Input(ctx, "Input.dispatchKeyEvent", p)
 	case "text":
 		if in.Text == "" || len([]rune(in.Text)) > MaxInputText {
 			return fmt.Errorf("text input is 1-%d characters", MaxInputText)
 		}
 		h.human(t, "text")
-		return t.Call(ctx, "Input.insertText", map[string]any{"text": in.Text}, nil)
+		return t.Input(ctx, "Input.insertText", map[string]any{"text": in.Text})
 	case "touch":
 		types := map[string]string{"start": "touchStart", "move": "touchMove", "end": "touchEnd", "cancel": "touchCancel"}
 		typ, ok := types[in.Type]
@@ -87,7 +87,7 @@ func (h *Hub) dispatch(ctx context.Context, t *browser.Tab, in wire.Input) error
 			points = append(points, map[string]any{"x": pt.X, "y": pt.Y, "id": pt.ID})
 		}
 		h.human(t, "touch")
-		return t.Call(ctx, "Input.dispatchTouchEvent", map[string]any{"type": typ, "touchPoints": points, "modifiers": in.Mods}, nil)
+		return t.Input(ctx, "Input.dispatchTouchEvent", map[string]any{"type": typ, "touchPoints": points, "modifiers": in.Mods})
 	case "nav":
 		h.human(t, "nav")
 		// A person's navigation is not waited for: its progress arrives as tab updates, and the
