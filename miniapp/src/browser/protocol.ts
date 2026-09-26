@@ -81,7 +81,7 @@ export type ViewEvent =
   | ({ type: "control"; group?: string } & ViewControl)
   | { type: "dialog"; state?: "opened" | "closed"; tab_id?: string; dialog_type?: string; message?: string; default_prompt?: string; [k: string]: unknown }
   | { type: "download"; download: { id: string; name: string; size: number; state: string } }
-  | { type: "needs_you"; reason: string; what: string; url: string; tab_id?: string }
+  | { type: "needs_you"; reason: string; what: string; url: string; tab_id?: string; by?: "daemon" | "agent" }
   | { type: "error"; code: string; message: string }
   | { type: "ping"; at: number };
 

@@ -322,14 +322,16 @@ class BrowserStub:
             g.last_activity = time.time()
             self.broadcast(group_id, per_client=lambda c: {"type": "control", "group": g.id, **self.control_for(c)})
 
-    def needs_you(self, group_id: str, reason: str, what: str) -> None:
+    def needs_you(self, group_id: str, reason: str, what: str, by: str = "agent") -> None:
+        """A request for the operator: the agent's handoff, or (``by="daemon"``) one the daemon raised
+        itself, which may come with no sentence of its own."""
         with self.lock:
             g = self.groups[group_id]
             url = self.scenes[self.active(g).scene].url
-            g.needs = {"reason": reason, "what": what, "url": url, "at": iso(time.time())}
+            g.needs = {"reason": reason, "what": what, "url": url, "at": iso(time.time()), "by": by}
             g.owner, g.reason = "paused", reason
             g.last_activity = time.time()
-            self.broadcast(group_id, {"type": "needs_you", "reason": reason, "what": what, "url": url})
+            self.broadcast(group_id, {"type": "needs_you", "reason": reason, "what": what, "url": url, "by": by})
             self.broadcast(group_id, per_client=lambda c: {"type": "control", "group": g.id, **self.control_for(c)})
 
     def open_dialog(self, group_id: str, message: str, kind: str = "confirm") -> None:

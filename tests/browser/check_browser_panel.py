@@ -41,8 +41,8 @@ CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 ROOT = ".panel .bp"
 
 WORDS = {
-    "en": {"take": "Take control", "give": "Give back", "tab": "Browser"},
-    "ru": {"take": "Взять управление", "give": "Вернуть", "tab": "Браузер"},
+    "en": {"take": "Take control", "give": "Give back", "tab": "Browser", "forbidden": "password or payment field"},
+    "ru": {"take": "Взять управление", "give": "Вернуть", "tab": "Браузер", "forbidden": "поле пароля или оплаты"},
 }
 
 
@@ -196,6 +196,10 @@ def check(browser, scenes, lang: str, problems: list[str]) -> None:  # type: ign
         say("the banner does not say what the agent needs")
     if not page.locator(f"{ROOT} .bp-control.take.needs").count():
         say("the take button is not amber while the agent needs the operator")
+
+    # One the daemon raised itself, with no sentence: the reason is put in words.
+    bs.needs_you("g1", "field_forbidden", "", by="daemon")
+    page.wait_for_function(f"() => document.querySelector('{ROOT} .bp-banner').textContent.includes({WORDS[lang]['forbidden']!r})", timeout=5000)
 
     # A page dialog shows its chip; it can be answered only by someone driving.
     bs.open_dialog("g1", "Leave site? Changes you made may not be saved.")

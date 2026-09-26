@@ -41,6 +41,20 @@ export function needsOf<N>(listed: N | null, live: { needs: N | null; control: V
   return listed;
 }
 
+/** The reasons a request can carry, the agent's own and the daemon's (`by: "daemon"`). */
+export const NEED_REASONS = ["login", "captcha", "two_factor", "payment", "confirm", "field_forbidden", "basic_auth", "other"] as const;
+
+/**
+ * What a request asks for, in words: the agent's own sentence, or — for one the daemon raised by
+ * itself (a password field the agent tried to type into, a CAPTCHA, a sign-in prompt), which may come
+ * with no sentence — the reason's.
+ */
+export function needWords(need: { reason: string; what?: string } | null): string {
+  if (!need) return "";
+  if (need.what) return need.what;
+  return (NEED_REASONS as readonly string[]).includes(need.reason) ? t(`browser.reason.${need.reason}`) : t("browser.needs");
+}
+
 /** The host part of an address, without `www.`; the address itself when it has none (about:blank). */
 export function domainOf(url: string): string {
   try {

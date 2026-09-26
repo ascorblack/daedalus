@@ -18,7 +18,7 @@ import { t } from "../i18n";
 import { Icon } from "../icons";
 import { useLiveSnapshot, useLiveView } from "./data";
 import type { LiveSnapshot, LiveView } from "./live";
-import { domainOf, driveState, needsOf, pipGroup } from "./model";
+import { domainOf, driveState, needsOf, needWords, pipGroup } from "./model";
 import { tapKey } from "./keys";
 import { BrowserViewer, focusViewer } from "./viewer";
 import { Favicon } from "./favicon";
@@ -155,7 +155,7 @@ export function BrowserHeadButton({ groups, onOpen, streaming, saving }: { group
   if (!group) return null;
   const needs = needsOf(group.needs_you, snap);
   const drive = driveState({ ...group, needs_you: needs }, snap.control);
-  const label = drive === "needs" ? t("browser.head.needs", { what: needs?.what ?? "" }) : t("browser.head.open");
+  const label = drive === "needs" ? t("browser.head.needs", { what: needWords(needs) }) : t("browser.head.open");
   return (
     <button type="button" className={`iconbtn browser-headbtn ${drive}`} onClick={onOpen} aria-label={label} title={label} data-drive={drive}>
       <span className="browser-headbtn-thumb">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BrowserGroup } from "../api";
-import { actionWords, domainOf, driveState, extraCount, mergeActions, nearestCorner, needsOf, pipGroup, pipHidden, readCorner, rememberCorner, rowOfEvent, savingData, secure } from "./model";
+import { actionWords, domainOf, driveState, extraCount, mergeActions, nearestCorner, needsOf, needWords, pipGroup, pipHidden, readCorner, rememberCorner, rowOfEvent, savingData, secure } from "./model";
 
 function group(over: Partial<BrowserGroup> = {}): BrowserGroup {
   return {
@@ -146,5 +146,14 @@ describe("which request is current", () => {
   it("drops a request control has already answered", () => {
     expect(needsOf(need, { needs: null, control: control("agent"), clientId: "c1" })).toBeNull();
     expect(needsOf(need, { needs: null, control: control("human"), clientId: "c1" })).toBeNull();
+  });
+});
+
+describe("a request in words", () => {
+  it("is the agent's sentence, or the reason's for one the daemon raised without one", () => {
+    expect(needWords({ reason: "login", what: "Sign in to accounts.example.com" })).toBe("Sign in to accounts.example.com");
+    expect(needWords({ reason: "field_forbidden", what: "" })).toBe("type into a password or payment field");
+    expect(needWords({ reason: "future", what: "" })).toBe("Needs you");
+    expect(needWords(null)).toBe("");
   });
 });

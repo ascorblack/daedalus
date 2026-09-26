@@ -14,7 +14,7 @@ import { plural, t } from "../i18n";
 import { Icon } from "../icons";
 import { askTake, handOff, useLiveSnapshot, useLiveView } from "./data";
 import { Favicon } from "./favicon";
-import { agentName, domainOf, driveState, extraCount, nearestCorner, needsOf, PIP_PILL_BELOW, pipGroup, pipHidden, readCorner, rememberCorner, type Corner, type DriveState } from "./model";
+import { agentName, domainOf, driveState, extraCount, nearestCorner, needsOf, needWords, PIP_PILL_BELOW, pipGroup, pipHidden, readCorner, rememberCorner, type Corner, type DriveState } from "./model";
 import { BrowserViewer } from "./viewer";
 
 /** Groups hidden with ✕ this visit, and the activity they were hidden at. */
@@ -122,7 +122,7 @@ function PipCard({ group, extra, onOpen, onHide }: { group: BrowserGroup; extra:
     ...(drag ? { transform: `translate(${drag.dx}px, ${drag.dy}px)`, transition: "none" } : {}),
   };
   const domain = domainOf(url) || t("browser.blank");
-  const label = needs ? t("browser.pip.needs", { what: needs.what }) : t("browser.pip.open", { name: agentName(group), domain });
+  const label = needs ? t("browser.pip.needs", { what: needWords(needs) }) : t("browser.pip.open", { name: agentName(group), domain });
   return (
     <div
       ref={card}
@@ -149,7 +149,7 @@ function PipCard({ group, extra, onOpen, onHide }: { group: BrowserGroup; extra:
       {!pill && (
         <div className="bp-pip-frame">
           <BrowserViewer live={live} snap={snap} tier="thumb" interactive={false} compact agent={agentName(group)} />
-          {needs && <div className="bp-pip-need"><Icon name="alert" size={12} /><span className="truncate">{needs.what || t("browser.needs")}</span></div>}
+          {needs && <div className="bp-pip-need"><Icon name="alert" size={12} /><span className="truncate">{needWords(needs)}</span></div>}
           <div className="bp-pip-actions">
             <button type="button" className="iconbtn small" onClick={() => open(false)} aria-label={t("browser.pip.expand")} title={t("browser.pip.expand")}><Icon name="expand" size={14} /></button>
             <button type="button" className="iconbtn small" onClick={() => open(true)} aria-label={t("browser.take")} title={t("browser.take")}><Icon name="user" size={14} /></button>

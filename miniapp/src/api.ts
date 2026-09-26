@@ -209,7 +209,7 @@ export type BrowserControl = { owner: "agent" | "human" | "paused"; holder: stri
 export type BrowserTabView = { id: string; url: string; title: string; favicon_url: string; loading: boolean; active: boolean };
 
 /** What the agent asked the operator for (`BrowserHandoff`, or the daemon on its own). */
-export type BrowserNeed = { reason: "login" | "captcha" | "two_factor" | "payment" | "confirm" | "field_forbidden" | "basic_auth" | "other" | string; what: string; url: string; at: string };
+export type BrowserNeed = { reason: "login" | "captcha" | "two_factor" | "payment" | "confirm" | "field_forbidden" | "basic_auth" | "other" | string; what: string; url: string; at: string; by?: "daemon" | "agent" };
 
 /**
  * One agent owner's tabs in one browser (`GET /api/browsers?session=…` or `?staff=…`). `acting` is true

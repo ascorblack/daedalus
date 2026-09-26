@@ -18,7 +18,7 @@ import { navigate, pathFor } from "../router";
 import { confirmAsync, errorText, haptic } from "../ui";
 import { answerDialog, closeBrowser, consumeTake, deviceSaving, setControl, takeHandoff, useActions, useLiveSnapshot, useLiveView } from "./data";
 import type { LiveSnapshot, LiveView } from "./live";
-import { actionWords, agentName, domainOf, driveState, mergeActions, needsOf, rowOfEvent, secure, type DriveState } from "./model";
+import { actionWords, agentName, domainOf, driveState, mergeActions, needsOf, needWords, rowOfEvent, secure, type DriveState } from "./model";
 import type { ActionEvent } from "./protocol";
 import { BrowserViewer, focusViewer } from "./viewer";
 import { PhoneDrive } from "./phone";
@@ -409,7 +409,7 @@ function PhoneBar({ group, url, tabs, control }: { group: BrowserGroup; url: str
 
 const BANNER_ICON: Record<DriveState, IconName> = { acting: "bolt", idle: "globe", you: "user", other: "user", paused: "pause", needs: "alert", closed: "stop" };
 
-function Banner({ drive, agent, needs, state, control, viewers, bare }: { drive: DriveState; agent: string; needs: { what: string } | null; state: string; control: ControlApi; viewers: LiveSnapshot["viewers"]; bare?: boolean }) {
+function Banner({ drive, agent, needs, state, control, viewers, bare }: { drive: DriveState; agent: string; needs: { reason: string; what?: string } | null; state: string; control: ControlApi; viewers: LiveSnapshot["viewers"]; bare?: boolean }) {
   const offline = state === "reconnecting" || state === "proxy-blocked";
   let text: ReactNode;
   let action: ReactNode = null;
@@ -421,7 +421,7 @@ function Banner({ drive, agent, needs, state, control, viewers, bare }: { drive:
     text = t("browser.banner.other");
     action = <button type="button" className="bp-banner-act" onClick={() => void control.take()}>{t("browser.takeover")}</button>;
   } else if (drive === "needs") {
-    text = <><b>{t("browser.banner.needs")}</b> {needs?.what}</>;
+    text = <><b>{t("browser.banner.needs")}</b> {needWords(needs)}</>;
     action = <button type="button" className="bp-banner-act" onClick={() => void control.take()}>{t("browser.take")}</button>;
   } else if (drive === "paused") {
     text = t("browser.banner.paused", { name: agent });
