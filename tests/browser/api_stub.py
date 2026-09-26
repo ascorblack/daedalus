@@ -691,11 +691,10 @@ class FocusStub:
         self.notes: list[str] = []
         self.briefed: list[dict] = []
         self.controls: list[tuple[str, str]] = []
-        self.told: list[tuple[str, dict]] = []
         self.staff_views: dict[str, dict] = {}
         """What the staff view reads of a command-line member: ``session``, ``turns``, ``events``, ``changes``."""
         self.sent: list[tuple[str, dict]] = []
-        """What the staff view's composer posted, per member."""
+        """Every message the operator posted to a member, from the staff view or a terminal card."""
         self.seen: list[str] = []
 
     def project(self, pid: str) -> dict | None:
@@ -838,9 +837,10 @@ class FocusStub:
                 return staff_view
             if len(parts) == 5 and parts[4] == "messages" and method == "GET":
                 return 200, self.messages.get(parts[3], [])
-            if len(parts) == 5 and parts[4] == "tell" and method == "POST":
-                self.told.append((parts[3], dict(body or {})))
-                return 200, {"state": "queued", "message_id": f"m{len(self.told) + 10}"}
+            if len(parts) == 5 and parts[4] == "messages" and method == "POST":
+                # A member without a staff view of its own here (a terminal card's compose line).
+                self.sent.append((parts[3], dict(body or {})))
+                return 200, {"state": "queued", "message_id": f"m{len(self.sent) + 10}", "degraded_to": None}
             if len(parts) == 5 and parts[4] in ("interrupt", "pause", "release") and method == "POST":
                 self.controls.append((parts[3], parts[4]))
                 member = next((m for m in self.team.staff if m["id"] == parts[3]), None)
@@ -883,7 +883,7 @@ class FocusStub:
             payload = dict(body or {})
             self.sent.append((sid, payload))
             now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            row = {"id": f"m{sid}-{len(self.sent)}", "staff_id": sid, "staff_session_id": view["session"]["session"]["id"], "origin": "operator", "text": payload.get("text", ""), "mode": payload.get("mode", "queue"),
+            row = {"id": f"m{sid}-{len(self.sent)}", "staff_id": sid, "staff_session_id": view["session"]["session"]["id"], "origin": "operator", "text": payload.get("text", ""), "mode": payload.get("when", "now"),
                    "state": "queued", "attempts": 0, "created_at": now, "updated_at": now, "error": ""}
             self.messages.setdefault(sid, []).insert(0, row)
             return 200, {"state": "queued", "message_id": row["id"], "mode": row["mode"], "degraded_to": ""}
@@ -908,9 +908,9 @@ class FocusStub:
         naya["live"].update(terminal_id="tm-naya", status_at=at(minutes=2))
         naya["health"] = health(at, tools="missing", silent=True)
         self.messages["st-ira"] = [
-            {"id": "mi3", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.queued"], "mode": "queue", "state": "queued", "attempts": 0, "created_at": at(minutes=1), "updated_at": at(minutes=1), "error": ""},
-            {"id": "mi2", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "operator", "text": words["ira.sent"], "mode": "steer", "state": "submitted", "attempts": 1, "created_at": at(minutes=4), "updated_at": at(minutes=4), "error": ""},
-            {"id": "mi1", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.accepted"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": at(minutes=25), "updated_at": at(minutes=25), "error": "",
+            {"id": "mi3", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.queued"], "mode": "after_turn", "state": "queued", "attempts": 0, "created_at": at(minutes=1), "updated_at": at(minutes=1), "error": ""},
+            {"id": "mi2", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "operator", "text": words["ira.sent"], "mode": "now", "state": "submitted", "attempts": 1, "created_at": at(minutes=4), "updated_at": at(minutes=4), "error": ""},
+            {"id": "mi1", "staff_id": "st-ira", "staff_session_id": "ss-ira", "origin": "orchestrator", "text": words["ira.accepted"], "mode": "now", "state": "acknowledged", "attempts": 1, "created_at": at(minutes=25), "updated_at": at(minutes=25), "error": "",
              "delivery": {"via": "paste", "degraded_to": "", "enters": 1, "written_at": at(minutes=25), "submitted_at": at(minutes=25), "acknowledged_at": at(minutes=25)}},
         ]
         permission = {
@@ -1148,8 +1148,8 @@ class FocusStub:
             {"id": "tm-psql", "env": "container", "title": "psql · orders", "owner": {"kind": "project", "id": pid}, "project_id": pid, "profile": "shell", "sandbox": False, "cwd": "/home/operator/work/bakery-api", "status": "exited", "exit_code": 0, "exit_signal": None, "created_at": "2026-09-24T08:00:00Z", "exited_at": "2026-09-24T08:30:00Z", "last_output_at": None, "last_input_at": None, "cols": 120, "rows": 30},
         ]
         messages = {"st-lev": [
-            {"id": "m2", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "orchestrator", "text": words["lev.message"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:45:00Z", "updated_at": "2026-09-24T09:45:05Z", "error": ""},
-            {"id": "m1", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "operator", "text": words["lev.first"], "mode": "queue", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:30:00Z", "updated_at": "2026-09-24T09:30:02Z", "error": ""},
+            {"id": "m2", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "orchestrator", "text": words["lev.message"], "mode": "now", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:45:00Z", "updated_at": "2026-09-24T09:45:05Z", "error": ""},
+            {"id": "m1", "staff_id": "st-lev", "staff_session_id": "ss-lev", "origin": "operator", "text": words["lev.first"], "mode": "after_turn", "state": "acknowledged", "attempts": 1, "created_at": "2026-09-24T09:30:00Z", "updated_at": "2026-09-24T09:30:02Z", "error": ""},
         ]}
         sessions = [
             {"id": "orch-bakery", "title": "Orchestrator · Bakery 2.0", "status": "idle", "created_at": "2026-09-20T00:00:00Z", "last_message_at": "2026-09-24T09:55:00Z", "run_id": None, "model": "Claude Opus 5", "metadata": {"orchestrator_of": pid}, "project_id": pid, "project": "Bakery 2.0"},

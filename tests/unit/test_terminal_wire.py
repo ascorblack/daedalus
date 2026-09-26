@@ -13,8 +13,8 @@ from daedalus.terminals.wire import BrowserFrame, FrameError, decode_browser, de
 
 ROOT = Path(__file__).resolve().parents[2]
 WIRE = ROOT / "ptyd" / "internal" / "wire" / "testdata"
-# The socket framing moved into ptyd/proto/wire, shared with the browser daemon; its fixtures went
-# with it, while the terminal frames stayed.
+# The socket framing is shared with the browser daemon, so its golden form lives in ptyd's shared
+# packages.
 SOCKET_WIRE = ROOT / "ptyd" / "proto" / "wire" / "testdata"
 
 

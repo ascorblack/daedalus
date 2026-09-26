@@ -147,7 +147,6 @@ def desktop(page: Page, lang: str) -> None:
     expect(page.locator(".settings-stage")).to_be_visible()
     expect(rail).to_be_hidden()
     column = page.locator(".settings-col")
-    stage = page.locator(".settings-main")
     centre = column.evaluate("el => { const box = el.getBoundingClientRect(); const parent = el.parentElement.getBoundingClientRect(); return Math.abs((box.left + box.right) / 2 - (parent.left + parent.right) / 2); }")
     assert centre <= 2, f"{lang}: the settings column is {centre}px off centre"
     page.locator(".settings-nav a[href$='/settings/security']").click()

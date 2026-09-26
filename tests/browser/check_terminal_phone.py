@@ -366,7 +366,7 @@ def staff(browser, lang: str, check: Check) -> None:  # type: ignore[no-untyped-
     field.fill("use the owner's sheet")
     page.locator(".term-compose-send").tap()
     page.wait_for_timeout(500)
-    check.that(focus.told == [("st-ira", {"text": "use the owner's sheet", "mode": "queue"})], f"the message to Ira went as {focus.told}")
+    check.that(focus.sent[-1:] == [("st-ira", {"text": "use the owner's sheet", "when": "now"})], f"the message to Ira went as {focus.sent}")
     check.that(len(term.inputs("tm-ira")) == typed, "the message to Ira was typed into her program")
     page.locator(".term-phone-actions .ask-answers-row .btn").first.tap()
     page.wait_for_timeout(800)

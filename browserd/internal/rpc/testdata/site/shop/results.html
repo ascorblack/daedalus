@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Results</title></head>
+<body>
+<header><a href="index.html">Fixture shop</a> <span id="cart" role="status">Cart (0)</span></header>
+<main>
+  <h1>Results</h1>
+  <ul>
+    <li><h2>Running shoes</h2><p>Light, fast, 89 €.</p><button onclick="add()">Add to cart</button></li>
+    <li><h2>Walking boots</h2><p>Heavy, slow, 120 €.</p><button onclick="add()">Add to cart</button></li>
+  </ul>
+  <a href="checkout.html">Checkout</a>
+</main>
+<script>
+let n = Number(sessionStorage.getItem("cart") || 0);
+const show = () => document.getElementById("cart").textContent = "Cart (" + n + ")";
+function add() { n++; sessionStorage.setItem("cart", n); show(); }
+show();
+</script>
+</body></html>

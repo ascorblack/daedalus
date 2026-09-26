@@ -344,9 +344,9 @@ async def _delivered_note(orch: Orchestrators, task_id: str, handed: list[Stored
 # -- talking and reading -------------------------------------------------------------------------------------
 
 
-async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff: str, text: str, mode: str = "queue", files: list[str] | None = None) -> str:
-    if mode not in MESSAGE_MODES:
-        raise Refused(f"mode is one of {', '.join(MESSAGE_MODES)}")
+async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff: str, text: str, when: str = "now", files: list[str] | None = None) -> str:
+    if when not in MESSAGE_MODES:
+        raise Refused(f"when is one of {', '.join(MESSAGE_MODES)}")
     body = (text or "").strip()
     if not body:
         raise Refused("the message is empty")
@@ -355,17 +355,27 @@ async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff:
     member = await _member(orch, project, staff)
     handed = await _files(orch, project, session_id, files)
     try:
-        receipt = await _team(orch).tell(member, body, mode=mode, by="orchestrator", files=handed)
+        receipt = await _team(orch).tell(member, body, when=when, by="orchestrator", files=handed)
     except StaffError as exc:
         raise Refused(str(exc)) from exc
-    line = f"message {receipt['message_id']} to {member.name}: {receipt['state']}"
+    line = f"message {receipt['message_id']} to {member.name} ({when}): {receipt['state']}"
     if receipt.get("files"):
         line += f", with {len(receipt['files'])} file{'s' if len(receipt['files']) > 1 else ''} copied where they can open {'it' if len(receipt['files']) == 1 else 'them'}"
-    if receipt.get("degraded_to"):
-        line += f" (their executor cannot {mode}; it was sent as {receipt['degraded_to']})"
+    degraded = receipt.get("degraded_to")
+    if degraded:
+        line += " — " + _degraded(member, degraded)
     if receipt.get("error"):
         line += f" — {receipt['error']}"
     return line
+
+
+def _degraded(member: Staff, degraded: str) -> str:
+    """What became of a message for now whose executor cannot take one into a running turn, in words
+    the orchestrator can act on: it may want Interrupt instead, or nothing at all."""
+    label = HARNESS_NAMES.get(member.harness, member.harness)
+    if degraded == "after_turn":
+        return f"{label} cannot take a message into a running turn, so it goes in when {member.name}'s turn ends; Interrupt first if it cannot wait"
+    return f"in {label} a message during a turn stops that turn, so {member.name}'s turn was interrupted and the message starts the next one"
 
 
 def _cursor(staff_session_id: str, inner: str | None) -> str | None:

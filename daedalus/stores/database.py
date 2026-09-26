@@ -1350,6 +1350,62 @@ CREATE INDEX file_transfers_by_file ON file_transfers(file_id, id);
 """)
 
 
+# A message to staff is named by when it goes in — now, after the turn, or with an interrupt — rather
+# than by the queue and steer it was once implemented with: an orchestrator reading "queue" as the
+# ordinary choice sent every correction after the turn it was meant for. The values sit in two CHECK
+# constraints, so both tables are rebuilt. The delivery facts reference the messages with ON DELETE
+# CASCADE and foreign keys cannot be switched off inside a migration's transaction, so they are kept
+# aside and the facts table is dropped before the messages are, then filled again. Rowids are copied
+# so that the order of messages created in the same instant stays as it was. A watch that tells a
+# member keeps its timing under the new key.
+MIGRATIONS.append("""
+CREATE TEMP TABLE deliveries_aside AS SELECT * FROM harness_deliveries;
+DROP TABLE harness_deliveries;
+CREATE TABLE staff_messages_rebuilt (
+    id TEXT PRIMARY KEY,
+    staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    staff_session_id TEXT REFERENCES staff_sessions(id) ON DELETE SET NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('orchestrator', 'operator')),
+    text TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('now', 'after_turn', 'interrupt')),
+    state TEXT NOT NULL CHECK (state IN ('queued', 'written', 'submitted', 'acknowledged', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    error TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO staff_messages_rebuilt(rowid, id, staff_id, staff_session_id, origin, text, mode, state, attempts, created_at, updated_at, error)
+    SELECT rowid, id, staff_id, staff_session_id, origin, text,
+           CASE mode WHEN 'queue' THEN 'after_turn' WHEN 'steer' THEN 'now' ELSE mode END,
+           state, attempts, created_at, updated_at, error
+    FROM staff_messages;
+DROP TABLE staff_messages;
+ALTER TABLE staff_messages_rebuilt RENAME TO staff_messages;
+CREATE INDEX staff_messages_by_staff ON staff_messages(staff_id, created_at);
+CREATE TABLE harness_deliveries (
+    message_id TEXT PRIMARY KEY REFERENCES staff_messages(id) ON DELETE CASCADE,
+    launch_id TEXT NOT NULL REFERENCES harness_launches(launch_id) ON DELETE CASCADE,
+    via TEXT NOT NULL DEFAULT '',
+    degraded_to TEXT NOT NULL DEFAULT '' CHECK (degraded_to IN ('', 'after_turn', 'interrupt')),
+    client_ref TEXT NOT NULL DEFAULT '',
+    enters INTEGER NOT NULL DEFAULT 0,
+    written_at TEXT,
+    submitted_at TEXT,
+    acknowledged_at TEXT
+);
+INSERT INTO harness_deliveries(message_id, launch_id, via, degraded_to, client_ref, enters, written_at, submitted_at, acknowledged_at)
+    SELECT message_id, launch_id, via, CASE degraded_to WHEN 'queue' THEN 'after_turn' ELSE degraded_to END,
+           client_ref, enters, written_at, submitted_at, acknowledged_at
+    FROM deliveries_aside;
+CREATE INDEX harness_deliveries_by_launch ON harness_deliveries(launch_id, client_ref);
+DROP TABLE deliveries_aside;
+UPDATE watches SET action_json = json_remove(json_set(action_json, '$.when',
+        CASE json_extract(action_json, '$.mode') WHEN 'queue' THEN 'after_turn' WHEN 'steer' THEN 'now' ELSE json_extract(action_json, '$.mode') END),
+    '$.mode')
+    WHERE json_extract(action_json, '$.action') = 'tell' AND json_type(action_json, '$.mode') IS NOT NULL;
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

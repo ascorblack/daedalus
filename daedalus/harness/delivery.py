@@ -5,8 +5,8 @@ A message to a CLI is text put into a TUI that a person may be typing into, that
 dialog, and that may or may not have taken what it was given. So each live session has one worker
 that takes its messages in order and, for each:
 
-1. **waits for the window** — the status allows the mode (a queued message waits for the turn to
-   end; a steer goes into a running turn where the CLI can take one), no request of the session is
+1. **waits for the window** — the status allows the timing (``after_turn`` waits for the turn to
+   end; ``now`` goes into a running turn where the CLI can take one), no request of the session is
    open, and no dialog is on the screen. Nothing is typed while a dialog may be open: an Enter
    there answers the dialog.
 2. **hands it over** — through the CLI's structured channel where it has one (the adapter's
@@ -30,7 +30,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from daedalus.config import HarnessConfig
@@ -56,9 +56,11 @@ MATCH_CHARS = 200
 """How much of a message's start must match a prompt the CLI reports, whitespace aside: enough to
 tell two messages apart, and still a match when the CLI trims the end."""
 
-QUEUE_WINDOW = frozenset({StaffState.IDLE, StaffState.TURN_DONE_UNSEEN, StaffState.ERROR})
-"""Where a queued message may go in. ``error`` included: a message is how a failed turn is retried."""
-STEER_WINDOW = QUEUE_WINDOW | {StaffState.WORKING, StaffState.NO_SIGNAL}
+AFTER_TURN_WINDOW = frozenset({StaffState.IDLE, StaffState.TURN_DONE_UNSEEN, StaffState.ERROR})
+"""Where a message for after the turn may go in. ``error`` included: a message is how a failed turn
+is retried."""
+NOW_WINDOW = AFTER_TURN_WINDOW | {StaffState.WORKING, StaffState.NO_SIGNAL}
+"""Where a message for now may go in: a busy session too, which is the point of it."""
 
 
 def normalised(text: str) -> str:
@@ -120,19 +122,20 @@ class DeliveryWorker:
         return len(self.waiting) + (1 if self.inflight is not None else 0)
 
     def _take(self) -> Pending:
-        """The next message: a steer or an interrupt before anything queued — it is meant for the
-        turn running now, and a queued message waits for that turn to end — else the oldest."""
-        urgent = next((p for p in self.waiting if p.mode != "queue" and not p.reexamine), None)
+        """The next message: one for now or an interrupt before one for after the turn — it is meant
+        for the turn running now, and the other waits for that turn to end — else the oldest."""
+        urgent = next((p for p in self.waiting if p.mode != "after_turn" and not p.reexamine), None)
         chosen = urgent or self.waiting[0]
         self.waiting.remove(chosen)
         return chosen
 
     def degraded(self, mode: SendMode) -> str:
-        """What a mode becomes for this CLI: a steer it cannot take is queued, or interrupts and sends."""
+        """What a timing becomes for this CLI: ``now`` that it cannot take into a running turn waits
+        for the turn's end, or interrupts the turn and sends."""
         steer = self.adapter.capabilities.steer
-        if mode == "steer" and steer == "degrade_to_queue":
-            return "queue"
-        if mode == "steer" and steer == "cancel_and_send":
+        if mode == "now" and steer == "degrade_to_queue":
+            return "after_turn"
+        if mode == "now" and steer == "cancel_and_send":
             return "interrupt"
         return ""
 
@@ -163,7 +166,7 @@ class DeliveryWorker:
             except _Gone:
                 return
             except _Overtaken:
-                # A steer arrived while this waited for the turn to end: it goes first, this after.
+                # A message for now arrived while this waited for the turn to end: it goes first, this after.
                 self.waiting.insert(0, pending)
                 continue
             except Exception as exc:  # noqa: BLE001 — one message failing must not stop the next
@@ -178,12 +181,12 @@ class DeliveryWorker:
             return
         cfg = self.config()
         mode: SendMode = pending.mode
-        if mode == "steer" and pending.degraded_to:
+        if mode == "now" and pending.degraded_to:
             mode = pending.degraded_to  # type: ignore[assignment]
         if mode == "interrupt":
             await self._interrupt(cfg)
-            mode = "queue"
-        await self._window(mode, yielding=mode == "queue" and pending.mode == "queue")
+            mode = "after_turn"
+        await self._window(mode, yielding=mode == "after_turn" and pending.mode == "after_turn")
         if self.adapter.capabilities.paste is None:
             await self._structured(pending, mode, cfg)
         else:
@@ -200,12 +203,12 @@ class DeliveryWorker:
             if StaffState(live.session.status) not in (StaffState.WORKING, StaffState.NO_SIGNAL):
                 return
             await self._nudged(WINDOW_POLL_S)
-        # The turn did not say it stopped; the message then waits for the window like a queued one.
+        # The turn did not say it stopped; the message then waits for the turn's end like any other.
 
     async def _window(self, mode: SendMode, *, yielding: bool = False) -> None:
-        allowed = STEER_WINDOW if mode == "steer" else QUEUE_WINDOW
+        allowed = NOW_WINDOW if mode == "now" else AFTER_TURN_WINDOW
         while True:
-            if yielding and any(p.mode != "queue" and not p.reexamine for p in self.waiting):
+            if yielding and any(p.mode != "after_turn" and not p.reexamine for p in self.waiting):
                 raise _Overtaken
             live = await self._live()
             try:
@@ -277,7 +280,7 @@ class DeliveryWorker:
             if where == "lost" and pastes < PASTES_MAX:
                 # A dialog took the paste and has gone: the composer is empty, nothing was submitted,
                 # so pasting again is the first delivery of the message, not a second.
-                await self._window(pending.mode if pending.mode == "steer" else "queue")
+                await self._window("now" if pending.mode == "now" and not pending.degraded_to else "after_turn")
                 continue
             if pending.acknowledged.done():
                 await self._state(pending, "acknowledged")
@@ -380,6 +383,10 @@ class DeliveryWorker:
     async def _record(self, pending: Pending, delivery: Delivery) -> None:
         if not pending.message_id:
             return
+        if pending.degraded_to and not delivery.degraded_to:
+            # The receipt said at once what became of the timing; the fact row keeps it too, or a
+            # later look at a message that waited for the turn could not tell it was asked for now.
+            delivery = replace(delivery, degraded_to=pending.degraded_to)  # type: ignore[arg-type]
         with contextlib.suppress(Exception):
             await self.store.record_delivery(self.session.launch.launch_id, delivery)
 
@@ -393,7 +400,7 @@ class _Gone(Exception):
 
 
 class _Overtaken(Exception):
-    """A queued message still waiting for its window steps back for a steer that arrived after it."""
+    """A message for after the turn, still waiting for it, steps back for one for now that arrived after it."""
 
 
 def pending_of(message: Any, *, first: bool = False) -> Pending:

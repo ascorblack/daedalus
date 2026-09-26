@@ -293,7 +293,7 @@ class CodexAdapter:
         """The first prompt goes by ``turn/start`` once the thread is there; its ``userMessage`` item
         acknowledges it."""
         if plan.first_prompt:
-            await self.send(term, "", plan.first_prompt, "queue")
+            await self.send(term, "", plan.first_prompt, "after_turn")
 
     async def attach(self, term: TerminalPort, launch: Launch) -> None:
         self._launches.setdefault(term.id, _Launch())
@@ -611,7 +611,7 @@ class CodexAdapter:
         client = message_id or f"d{secrets.token_hex(6)}"
         state.client_ids[client] = message_id
         words = [{"type": "text", "text": text}]
-        if mode == "steer" and state.turn_id:
+        if mode == "now" and state.turn_id:
             try:
                 await self._call(state, "turn/steer", {"threadId": state.thread_id, "expectedTurnId": state.turn_id, "input": words, "clientUserMessageId": client})
                 return Delivery(message_id, "submitted", via="turn/steer", client_ref=client)

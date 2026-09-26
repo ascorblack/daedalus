@@ -20,7 +20,8 @@ from daedalus.extensions.staff import AlreadyAnswered, Team
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.launch_queue import Entry, LaunchQueue
 from daedalus.host.session_runner import SessionManager
-from daedalus.staff_runtime import FakeStaffRuntime, LiveSession
+from daedalus.host.staff_daedalus import DaedalusStaffRuntime
+from daedalus.staff_runtime import FakeStaffRuntime, LiveSession, OutgoingMessage
 from daedalus.stores.database import Database
 from daedalus.stores.projects import FolderSpec, Project
 from daedalus.stores.staff import Staff, StaffError
@@ -667,9 +668,14 @@ async def test_the_team_server_takes_only_its_own_token(settings: Settings, db: 
             again = await client.post(f"/api/asks/{ask['id']}/answer", headers={"X-Daedalus-Token": "tok"}, json={"selected": ["b"]})
             assert again.status_code == 409 and "already answered by the operator" in again.json()["detail"]
 
-            told = await client.post(f"/api/staff/{cleo.id}/tell", headers={"X-Daedalus-Token": "tok"}, json={"text": "also the prices", "mode": "steer"})
+            told = await client.post(f"/api/staff/{cleo.id}/messages", headers={"X-Daedalus-Token": "tok"}, json={"text": "also the prices", "when": "now"})
             assert told.status_code == 200 and told.json()["state"] == "submitted"
-            assert cli.sent[-1][1].mode == "steer"
+            assert cli.sent[-1][1].mode == "now"
+            # The operator's message takes the same default as the orchestrator's: into the running turn.
+            later = await client.post(f"/api/staff/{cleo.id}/messages", headers={"X-Daedalus-Token": "tok"}, json={"text": "and the menu"})
+            assert later.status_code == 200 and cli.sent[-1][1].mode == "now"
+            old = await client.post(f"/api/staff/{cleo.id}/messages", headers={"X-Daedalus-Token": "tok"}, json={"text": "x", "mode": "steer"})
+            assert old.status_code == 422, "the old field is gone, not quietly ignored"
             released = await client.post(f"/api/staff/{cleo.id}/release", headers={"X-Daedalus-Token": "tok"}, json={"keep_worktree": True})
             assert released.json() == {"released": True} and cli.stopped
             gone = await client.post(f"{url}/report", headers={"X-Daedalus-Team-Token": req.team_token}, json={"kind": "checkpoint", "note": "late"})
@@ -709,7 +715,7 @@ async def test_live_sessions_answer_for_a_member(settings: Settings, db: Databas
         await team.assign(ada, await board_task(manager, project, "Menu"))
         live = await team.live_of(ada)
         assert isinstance(live, LiveSession) and live.staff.id == ada.id
-        told = await team.tell(ada, "hello", mode="queue")
+        told = await team.tell(ada, "hello", when="after_turn")
         message = await manager.staff.message(told["message_id"])
         assert message is not None and message.state == "submitted" and message.attempts == 1
         assert [e.payload["state"] for e in await events(manager, "staff.message") if e.payload["message_id"] == told["message_id"]] == ["submitted"]
@@ -741,3 +747,29 @@ async def test_a_notification_answers_a_command_line_request_and_the_router_hold
         assert (resolved["request_ref"], resolved["via"], resolved["decision"]) == (ref, "push", "allow")
     finally:
         await manager.close()
+
+
+async def test_a_daedalus_member_is_steered_for_now_and_followed_up_after_the_turn() -> None:
+    """A Daedalus member has the host's own queues: now is a steer into the running run, after the
+    turn a follow-up it takes when the run ends, and an interrupt stops the run before sending."""
+    submitted: list[dict[str, Any]] = []
+    stopped: list[str] = []
+
+    async def submit(session_id: str, text: str, **kwargs: Any) -> None:
+        submitted.append({"session": session_id, "text": text, **kwargs})
+
+    async def receipt(session_id: str, message_id: str) -> dict[str, Any]:
+        return {"status": "consumed" if message_id == "m-now" else "queued"}
+
+    async def stop(session_id: str) -> None:
+        stopped.append(session_id)
+
+    manager = SimpleNamespace(submit=submit, stop=stop, live=SimpleNamespace(receipt=receipt), live_state=lambda session_id: None)
+    runtime = DaedalusStaffRuntime(manager)  # type: ignore[arg-type]
+    live = SimpleNamespace(session_id="s-ada", staff=SimpleNamespace(name="Ada"))
+    now = await runtime.send(live, OutgoingMessage("m-now", "use the owner's sheet", "now", "orchestrator"))  # type: ignore[arg-type]
+    later = await runtime.send(live, OutgoingMessage("m-later", "then the prices", "after_turn", "operator"))  # type: ignore[arg-type]
+    await runtime.send(live, OutgoingMessage("m-stop", "stop, wrong file", "interrupt", "orchestrator"))  # type: ignore[arg-type]
+    assert [(s["client_message_id"], s["steer"], s["follow_up"]) for s in submitted] == [("m-now", True, False), ("m-later", False, True), ("m-stop", False, False)]
+    assert (now.state, later.state) == ("acknowledged", "submitted")
+    assert stopped == ["s-ada"], "only the interrupt stopped the run"

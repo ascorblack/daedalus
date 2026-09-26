@@ -9,15 +9,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from protocore.contracts.tools import ToolContext
 
 from daedalus.config import ORCHESTRATOR_ONLY_TOOLS, Settings
 from daedalus.extensions.orchestrator_ops import Refused
 from daedalus.harness.catalog import HarnessCatalog
 from daedalus.harness.contract import AgentEntry, Catalog
+from daedalus.host.services import SessionServices, locator
 from daedalus.staff_runtime import Availability, FakeStaffRuntime, LiveSession, ReadPage, Receipt
 from daedalus.stores.database import Database
 from daedalus.stores.harness import HarnessStore
 from daedalus.stores.staff import Staff
+from daedalus.tools.orchestrator import tell
 from tests.support.models import DEFAULT_PRESET
 from tests.support.waiting import until_await
 from tests.unit.test_orchestrator import Rig, _idle, events, rig
@@ -325,22 +328,51 @@ async def test_assignments_past_the_concurrency_wait_in_the_queue(settings: Sett
 # -- talking, reading and control ------------------------------------------------------------------------------------
 
 
-async def test_tell_maps_its_modes_to_the_runtime_and_returns_the_receipt(settings: Settings, db: Database, tmp_path: Path) -> None:
+async def test_the_tell_tool_hands_its_timing_through_and_offers_only_the_three(settings: Settings, db: Database, tmp_path: Path) -> None:
     r = await rig(settings, db, tmp_path)
     try:
         runtime = fake(r)
         sid = await office(r)
         await working(r)
-        for mode in ("queue", "steer", "interrupt"):
-            said = await r.call(sid, "tell", staff="Ada", text=f"a {mode} message", mode=mode)
-            assert said.endswith(": submitted")
-        assert [(m.mode, m.origin) for _, m in runtime.sent] == [("queue", "orchestrator"), ("steer", "orchestrator"), ("interrupt", "orchestrator")]
-        runtime.receipt = Receipt("submitted", degraded_to="queue")
-        assert "sent as queue" in await r.call(sid, "tell", staff="Ada", text="now", mode="steer")
+        schema = tell().definition.parameters.properties["when"]
+        assert schema["enum"] == ["now", "after_turn", "interrupt"]
+        assert "now (the default)" in tell().definition.description
+        locator.register(SessionServices(session_id=sid, workspace_dir=tmp_path, max_tool_output_chars=4000, extra={"manager": r.manager}))
+        try:
+            context = ToolContext(tenant_id="t", run_id="r", session_id=sid, metadata={"tool_call_id": "c"})
+            later = await tell().invoke(context, {"staff": "Ada", "text": "then the prices", "when": "after_turn"})
+            default = await tell().invoke(context, {"staff": "Ada", "text": "use the owner's sheet"})
+        finally:
+            locator.unregister(sid)
+        assert not later.is_error and not default.is_error
+        assert [(m.text, m.mode) for _, m in runtime.sent] == [("then the prices", "after_turn"), ("use the owner's sheet", "now")]
+    finally:
+        await r.manager.close()
+
+
+async def test_tell_passes_its_timing_to_the_runtime_and_returns_the_receipt(settings: Settings, db: Database, tmp_path: Path) -> None:
+    r = await rig(settings, db, tmp_path)
+    try:
+        runtime = fake(r)
+        sid = await office(r)
+        await working(r)
+        for when in ("after_turn", "now", "interrupt"):
+            said = await r.call(sid, "tell", staff="Ada", text=f"a message for {when}", when=when)
+            assert said.endswith(f"({when}): submitted")
+        # Without a timing a message goes into the running turn: a message to someone at work is
+        # about that work, and one held until the turn's end arrived after the work it was for.
+        await r.call(sid, "tell", staff="Ada", text="the default")
+        assert [(m.mode, m.origin) for _, m in runtime.sent] == [("after_turn", "orchestrator"), ("now", "orchestrator"), ("interrupt", "orchestrator"), ("now", "orchestrator")]
+        runtime.receipt = Receipt("submitted", degraded_to="after_turn")
+        waits = await r.call(sid, "tell", staff="Ada", text="now")
+        assert "cannot take a message into a running turn" in waits and "Interrupt first if it cannot wait" in waits
+        runtime.receipt = Receipt("submitted", degraded_to="interrupt")
+        assert "turn was interrupted" in await r.call(sid, "tell", staff="Ada", text="now")
         runtime.receipt = Receipt("failed", "the terminal is gone")
-        assert await r.call(sid, "tell", staff="Ada", text="now") == f"message {runtime.sent[-1][1].id} to Ada: failed — the terminal is gone"
-        with pytest.raises(Refused, match="mode is one of"):
-            await r.call(sid, "tell", staff="Ada", text="x", mode="shout")
+        assert await r.call(sid, "tell", staff="Ada", text="now") == f"message {runtime.sent[-1][1].id} to Ada (now): failed — the terminal is gone"
+        for old in ("queue", "steer", "shout"):
+            with pytest.raises(Refused, match="when is one of now, after_turn, interrupt"):
+                await r.call(sid, "tell", staff="Ada", text="x", when=old)
         with pytest.raises(Refused, match="empty"):
             await r.call(sid, "tell", staff="Ada", text="  ")
     finally:
