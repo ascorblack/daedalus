@@ -16,7 +16,7 @@ import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { navigate, pathFor } from "../router";
 import { confirmAsync, errorText, haptic } from "../ui";
-import { answerDialog, closeBrowser, consumeTake, deleteRecording, deviceSaving, recordingMoved, setControl, setRecording, takeHandoff, useActions, useLiveSnapshot, useLiveView, useRecording } from "./data";
+import { answerDialog, closeBrowser, consumeTake, deleteRecording, deviceSaving, recordingMoved, resizeViewport, setControl, setRecording, takeHandoff, useActions, useLiveSnapshot, useLiveView, useRecording } from "./data";
 import { frameOfRow, ReplayStage } from "./replay";
 import type { LiveSnapshot, LiveView } from "./live";
 import { actionWords, agentName, domainOf, driveState, mergeActions, needsOf, needWords, rowOfEvent, secure, type DriveState } from "./model";
@@ -50,9 +50,53 @@ type PanelProps = {
   onGroup?: (id: string) => void;
   toast: (text: string) => void;
   phone?: boolean;
-  /** The page of its own: no panel around it, the log beside the picture. */
+  /** The page of its own: no panel around it. The log sits beside the picture once it is opened. */
   full?: boolean;
-};
+}
+
+const PAGE_MIN = 320;
+const PAGE_MAX = 3840;
+/** A resize settles, including the handoff that grows the corner card into this picture. */
+const FILL_QUIET_MS = 240;
+
+/**
+ * The desktop picture asks the page to become the box it is drawn in. A phone does not: fitting its
+ * sheet would reflow the page the agent is reading every time the sheet opens. Below a few pixels
+ * the tab is hidden. The daemon's own bounds are 320–3840; a box outside them is clamped, and a
+ * refusal leaves the letterbox rather than taking the tab down.
+ */
+function useFillPage(group: string, stage: { current: HTMLDivElement | null }, enabled: boolean): void {
+  useEffect(() => {
+    if (!enabled) return;
+    const el = stage.current;
+    if (!el) return;
+    let last = "";
+    let timer = 0;
+    const send = () => {
+      const rawW = Math.round(el.clientWidth);
+      const rawH = Math.round(el.clientHeight);
+      if (rawW < 64 || rawH < 64) return;
+      const w = Math.min(PAGE_MAX, Math.max(PAGE_MIN, rawW));
+      const h = Math.min(PAGE_MAX, Math.max(PAGE_MIN, rawH));
+      const key = `${w}x${h}`;
+      if (key === last) return;
+      last = key;
+      void resizeViewport(group, w, h).catch(() => {
+        last = "";
+      });
+    };
+    const watched = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(send, FILL_QUIET_MS);
+    });
+    watched.observe(el);
+    timer = window.setTimeout(send, FILL_QUIET_MS);
+    return () => {
+      window.clearTimeout(timer);
+      watched.disconnect();
+    };
+  }, [enabled, group, stage]);
+}
 
 export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = false, full = false }: PanelProps) {
   const saving = useMemo(() => deviceSaving(phone), [phone]);
@@ -71,6 +115,7 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
   const viewing = snap.tabs.find((tab) => tab.id === (snap.viewing ?? snap.active)) ?? group.tabs.find((tab) => tab.active) ?? group.tabs[0] ?? null;
   const url = viewing?.url ?? "";
   const [logOpen, setLogOpen] = useState(false);
+  useFillPage(group.id, stage, !phone);
   const recording = useRecording(group.id);
   const listed = useActions(group.id);
   // The replay frames an action's element from its row: the listing's, or the live event's while the
@@ -551,7 +596,7 @@ export function ActionLog({ group, recent, open, onToggle, onFocus, agent, page 
           {rows.length > 0 && <span className="bp-log-count">{rows.length}</span>}
         </div>
       )}
-      {/* Always in the page: a drawer shows them only while open, a wide tab as a column beside the picture. */}
+      {/* In the page either way: a closed drawer hides them, and a wide tab shows them as a column only while open. */}
       <ol className="bp-log-rows">
         {rows.length === 0 && <li className="bp-log-empty sub">{t("browser.log.empty")}</li>}
         {rows.map((row) => (

@@ -24,6 +24,18 @@ export function frameOfRow(frames: BrowserFrame[], row: Pick<BrowserActionRow, "
   return -1;
 }
 
+/**
+ * The CSS width the keyframe was taken at. New frames say so (`vw`). A frame without it was taken
+ * before the page followed the pane: the picture is at most 1280 px of a page that was itself at
+ * most 1280 CSS pixels wide, so the picture's width is the page. The group's size now would slide
+ * those boxes once the pane is resized.
+ */
+export function frameCssWidth(frame: Pick<BrowserFrame, "vw" | "w">, current: number): number {
+  if (frame.vw) return frame.vw;
+  if (frame.w > 0 && frame.w <= 1280) return frame.w;
+  return current;
+}
+
 /** Where the logged box sits on a picture drawn at `rect`, for a page `viewportW` CSS pixels wide. */
 export function placeBox(box: { x: number; y: number; w: number; h: number }, rect: { x: number; y: number; w: number }, viewportW: number): { x: number; y: number; w: number; h: number } {
   const scale = viewportW > 0 ? rect.w / viewportW : 0;
@@ -104,8 +116,9 @@ export function ReplayStage({ group, viewportW, frames, index, rows, agent, onIn
 
   const row = useMemo(() => (frame?.action_id ? rows.find((r) => (r.action_id || r.id) === frame.action_id) ?? null : null), [frame, rows]);
   const rect = frame ? fit(size.w, size.h, frame.w, frame.h, "top") : { x: 0, y: 0, w: 0, h: 0 };
-  const placed = row?.box && rect.w ? placeBox(row.box, rect, viewportW) : null;
-  const point = row?.point && rect.w ? placeBox({ ...row.point, w: 0, h: 0 }, rect, viewportW) : null;
+  const cssW = frame ? frameCssWidth(frame, viewportW) : viewportW;
+  const placed = row?.box && rect.w ? placeBox(row.box, rect, cssW) : null;
+  const point = row?.point && rect.w ? placeBox({ ...row.point, w: 0, h: 0 }, rect, cssW) : null;
   if (!frame) return null;
   const words = row ? actionWords(row) : null;
   return (

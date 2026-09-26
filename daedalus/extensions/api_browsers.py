@@ -34,6 +34,12 @@ class TicketBody(BaseModel):
     """The app says which view it opens; the tier itself travels in the socket's ATTACH."""
 
 
+class ViewportBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    w: int = Field(ge=320, le=3840)
+    h: int = Field(ge=320, le=3840)
+
+
 class ControlBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner: Literal["agent", "human", "paused"]
@@ -239,6 +245,11 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         if body.owner == "human" and not body.client_id:
             raise InvalidRequest("taking control names the live view that drives: its client_id")
         return await service().control(group_id, body.owner, client_id=body.client_id, ttl_ms=body.ttl_ms, reason=body.reason, note=body.note, by="operator")
+
+    @api.post("/api/browsers/{group_id}/viewport")
+    async def browsers_viewport(group_id: str, body: ViewportBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator's picture asks the page to become this size, so the pane is the page."""
+        return {"viewport": await service().resize(group_id, body.w, body.h)}
 
     @api.post("/api/browsers/{group_id}/dialog")
     async def browsers_dialog(group_id: str, body: DialogBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

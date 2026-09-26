@@ -15,6 +15,7 @@ type recFrame struct {
 	Kind     string `json:"kind"`
 	ActionID string `json:"action_id"`
 	W        int    `json:"w"`
+	VW       int    `json:"vw"`
 }
 
 func (h *harness) frames(group string) []recFrame {
@@ -57,7 +58,7 @@ func TestRecordingKeepsKeyframesOfActions(t *testing.T) {
 		t.Fatal("recording did not switch on")
 	}
 	first := h.waitFrames("g1", 1, 5*time.Second)
-	if first[0].Kind != "start" || first[0].W != 1280 {
+	if first[0].Kind != "start" || first[0].W != 1280 || first[0].VW != 1280 {
 		t.Fatalf("the first frame: %+v", first[0])
 	}
 	var snap struct {

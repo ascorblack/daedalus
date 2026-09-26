@@ -297,6 +297,11 @@ async def test_the_routes_list_hand_over_and_keep_downloads(served: Served, tmp_
         kinds = [(a["actor"], a["kind"]) for a in actions]
         assert ("operator", "take") in kinds and ("operator", "give") in kinds and ("page", "download") in kinds and ("operator", "dialog") in kinds
         assert (await http.get("/api/browsers/nope/actions", headers=H)).status_code == 404
+        refused = await http.post(f"/api/browsers/{group}/viewport", json={"w": 100, "h": 800}, headers=H)
+        assert refused.status_code == 422
+        resized = (await http.post(f"/api/browsers/{group}/viewport", json={"w": 960, "h": 720}, headers=H)).json()
+        assert resized["viewport"] == {"w": 960, "h": 720}
+        assert (await http.get(f"/api/browsers/{group}", headers=H)).json()["viewport"] == {"w": 960, "h": 720}
         assert (await http.get(f"/api/browsers/{group}/asks/abcdef012345/thumbnail", headers=H)).status_code == 404
         load = (await http.get("/api/workloads/load", headers=H)).json()
         assert load["browsers"]["running"] == 1 and load["terminals"] is None

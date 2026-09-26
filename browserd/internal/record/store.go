@@ -28,6 +28,10 @@ type Frame struct {
 	W        int    `json:"w"`
 	H        int    `json:"h"`
 	Bytes    int    `json:"bytes"`
+	// The page's CSS size when this picture was taken. A later resize of the window would otherwise
+	// place an action's box on a picture of a different page. Absent on frames taken before that.
+	VW int `json:"vw,omitempty"`
+	VH int `json:"vh,omitempty"`
 }
 
 // GroupFrames summarises one group's recording on disk.

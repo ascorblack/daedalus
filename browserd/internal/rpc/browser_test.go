@@ -72,6 +72,67 @@ func TestOpenNavigateAndTabs(t *testing.T) {
 	}
 }
 
+func TestResizeChangesThePageTheViewerSees(t *testing.T) {
+	h := start(t, nil)
+	h.open("g1", "project-a", "/still")
+	v := h.attach("g1", wire.Attach{Tier: "live", MaxW: 1280, MaxH: 800})
+	first, ok := v.frame(10 * time.Second)
+	if !ok || first.Meta.VW != 1280 || first.Meta.VH != 800 {
+		t.Fatalf("opened frame: %+v ok=%v", first.Meta, ok)
+	}
+	v.ack(first.FrameNo)
+	if err := h.call("group.resize", map[string]any{"group_id": "g1", "viewport": map[string]any{"w": 100, "h": 800}}, nil); code(err) != -32602 {
+		t.Fatalf("a side under the minimum: %v", err)
+	}
+	if err := h.call("group.resize", map[string]any{"group_id": "missing", "viewport": map[string]any{"w": 960, "h": 640}}, nil); code(err) != 1001 {
+		t.Fatalf("a missing group: %v", err)
+	}
+	var resized struct {
+		Viewport struct {
+			W int `json:"w"`
+			H int `json:"h"`
+		} `json:"viewport"`
+	}
+	h.must("group.resize", map[string]any{"group_id": "g1", "viewport": map[string]any{"w": 960, "h": 640}}, &resized)
+	if resized.Viewport.W != 960 || resized.Viewport.H != 640 {
+		t.Fatalf("resize: %+v", resized.Viewport)
+	}
+	// A still page sends a frame when its window changes, and that frame is the new page.
+	deadline := time.Now().Add(8 * time.Second)
+	var got wire.Frame
+	seen := false
+	for time.Now().Before(deadline) {
+		f, ok := v.frame(time.Until(deadline))
+		if !ok {
+			break
+		}
+		v.ack(f.FrameNo)
+		got, seen = f, true
+		if f.Meta.VW == 960 && f.Meta.VH == 640 {
+			break
+		}
+	}
+	// The picture itself, not only the metadata: a JPEG that stayed 16:10 would still leave a band
+	// under the page when the pane is taller.
+	if !seen || got.Meta.VW != 960 || got.Meta.VH != 640 || got.Meta.W != 960 || got.Meta.H != 640 {
+		t.Fatalf("frame after resize: %+v", got.Meta)
+	}
+	var listed struct {
+		Groups []struct {
+			Viewport struct {
+				W int `json:"w"`
+				H int `json:"h"`
+			} `json:"viewport"`
+		} `json:"groups"`
+	}
+	h.must("group.list", nil, &listed)
+	if len(listed.Groups) != 1 || listed.Groups[0].Viewport.W != 960 || listed.Groups[0].Viewport.H != 640 {
+		t.Fatalf("listed: %+v", listed.Groups)
+	}
+	// The same size again is the size, and does not have to repaint.
+	h.must("group.resize", map[string]any{"group_id": "g1", "viewport": map[string]any{"w": 960, "h": 640}}, &resized)
+}
+
 func TestBrowserCapAndThrowawayGroups(t *testing.T) {
 	h := start(t, func(l *config.Limits) { l.MaxBrowsers = 1 })
 	h.open("g1", "project-a", "/still")

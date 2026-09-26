@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ascorblack/daedalus/browserd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
@@ -111,7 +112,7 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 	}()
 	// The page's size is its window's: in the pinned Chromium the screencast shows the window whatever
 	// Emulation says, so an emulated viewport would put every click beside what the frame shows.
-	m.sizeWindow(ctx, b, info.TargetID, g.Viewport)
+	m.sizeWindow(ctx, b, info.TargetID, g.ViewportNow())
 	var replies []<-chan error
 	var methods []string
 	for _, call := range []struct {
@@ -142,7 +143,7 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 			m.log.Warn("page setup", "method", methods[i], "error", err.Error())
 		}
 	}
-	m.measureFrame(ctx, b, session, info.TargetID, g.Viewport)
+	m.measureFrame(ctx, b, session, info.TargetID, g.ViewportNow())
 	m.mu.Lock()
 	if _, ok := m.groups[g.ID]; !ok {
 		m.mu.Unlock()
@@ -415,6 +416,32 @@ func (m *Manager) RunTitles(stop <-chan struct{}) {
 			}
 		}
 	}
+}
+
+// Resize makes every open page of the group vp CSS pixels and remembers that as the group's size.
+// The picture the operator watches is this window drawn into the pane. A page left at the size it
+// was opened (1280×800) in a taller pane leaves an empty band under the picture, and scaling the
+// picture to cover the band would crop sides the agent can still click. The agent's reads use this
+// same size, so the page it sees is the page in the pane.
+func (m *Manager) Resize(ctx context.Context, groupID string, vp Viewport) (Viewport, error) {
+	if vp.W < config.MinViewport || vp.W > config.MaxViewport || vp.H < config.MinViewport || vp.H > config.MaxViewport {
+		return Viewport{}, wire.Errorf(wire.CodeInvalidParams, "viewport sides must be %d-%d", config.MinViewport, config.MaxViewport)
+	}
+	g, err := m.Group(groupID)
+	if err != nil {
+		return Viewport{}, err
+	}
+	if g.ViewportNow() == vp {
+		return vp, nil
+	}
+	for _, t := range g.Tabs() {
+		if t.Closed() {
+			continue
+		}
+		m.sizeWindow(ctx, g.Browser, t.TargetID, vp)
+	}
+	g.setViewport(vp)
+	return vp, nil
 }
 
 // sizeWindow gives a page's window the size that makes its viewport vp, once the browser knows how

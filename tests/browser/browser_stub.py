@@ -465,6 +465,13 @@ class BrowserStub:
             ticket = {"ticket": f"bt-{g.id}-{len(self.tickets) + 1}", "tier": body.get("tier", "live"), "read_only": bool(body.get("read_only"))}
             self.tickets.append(ticket)
             return 200, {"ticket": ticket["ticket"], "expires_in": 30}
+        if action == "viewport" and method == "POST":
+            # The picture asks the page to become the pane. The harness's frames stay the scene's
+            # size: the assertion is that the app asked, and for what.
+            w, h = int(body.get("w") or 0), int(body.get("h") or 0)
+            if not (320 <= w <= 3840 and 320 <= h <= 3840):
+                return 400, {"detail": "viewport sides must be 320-3840"}
+            return 200, {"viewport": {"w": w, "h": h}}
         if action == "control" and method == "POST":
             owner = body.get("owner")
             if owner == "human":

@@ -267,7 +267,7 @@ func (cl *Client) hello() {
 	}
 	g := cl.group
 	cl.event(map[string]any{"type": "hello", "client_id": cl.id, "read_only": cl.readOnly, "tier": tier,
-		"group": map[string]any{"id": g.ID, "profile": g.Profile, "viewport": g.Viewport}, "tab_id": tabID,
+		"group": map[string]any{"id": g.ID, "profile": g.Profile, "viewport": g.ViewportNow()}, "tab_id": tabID,
 		"control": g.Control().View(cl.id), "fps_cap": cl.hub.fps})
 }
 

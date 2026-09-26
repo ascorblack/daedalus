@@ -115,6 +115,7 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
 | `browser.close` | `{browser_id}` → `{groups}`: ends the browser and forgets its groups |
 | `group.list` | `{browser_id?}` → `{groups: [Group]}` |
 | `group.close` | `{group_id}` → `{tabs}`: closes its tabs; an ephemeral group's context is disposed |
+| `group.resize` | `{group_id, viewport{w, h}}` → `{viewport{w, h}}`. Each side is 320–3840. Every page's window is sized the way `browser.open` sized it, and the group's viewport becomes that. The app calls it as the operator's picture changes size, so a tall pane is a tall page rather than a 1280×800 picture with an empty band under it. The agent's reads and actions are in that page's CSS pixels, so they follow |
 | `profile.list` | → `{profiles: [{id, size_bytes, last_used_at, running}]}` |
 | `profile.clear`, `profile.delete` | `{profile}` → `{}`; `1004` while its browser runs. Clear keeps the directory and removes cookies, storage and cache; delete removes it |
 | `tab.list` | `{group_id}` → `{tabs: [Tab], active_tab}` |
@@ -163,7 +164,7 @@ unknown field is `-32602`. Errors use the JSON-RPC codes plus:
   window's own frame measured on the browser's first page: a 1280×800 window in `--headless=new`
   holds a 1280×657 page). It does not emulate a size: the pinned Chromium's screencast shows the
   window whatever `Emulation.setDeviceMetricsOverride` says, so an emulated viewport would put every
-  click beside what the frame shows.
+  click beside what the frame shows. It stays that size until `group.resize`.
 - No Chromium is `1007 {reason}`; a Chromium that cannot start its sandbox is `1007` with the reason
   `capabilities.sandbox` gives.
 
@@ -672,6 +673,7 @@ The shapes are the app's own types in `miniapp/src/api.ts`; a host test holds th
 | `POST /api/browsers/<group>/ticket {tier?, read_only?}` | `{ticket, expires_in}`; `409` while the environment is down, `404` for a group that is not open |
 | `WS /ws/browsers/<group>?ticket=` | the live view (The host's relay, above) |
 | `POST /api/browsers/<group>/control {owner, client_id?, ttl_ms?, reason?, note?}` | the group's `Control` as it now is; `human` needs the view's `client_id` |
+| `POST /api/browsers/<group>/viewport {w, h}` | `{viewport{w, h}}`: the operator's picture asks the page to become that size (`group.resize`). Each side is 320–3840 |
 | `POST /api/browsers/<group>/dialog {accept, tab_id?, text?}` | the operator answers the page's dialog |
 | `POST /api/browsers/<group>/close` | closes the group; the profile stays |
 | `GET /api/browsers/<group>/actions?limit` | `{actions: [BrowserActionRow]}`, newest first |
@@ -855,7 +857,9 @@ A keyframe is the page model's screenshot of the active tab — every secret fie
 screenshot — as a JPEG at quality 50, at most 1280 pixels wide. **Nothing is taken while a person
 drives** unless the operator chose so (`human: true`). They are kept under
 `<state>/recordings/<group>/` as numbered files with an index of one JSON line each: `Frame {no, at
-(ms), tab, url, kind, action_id?, w, h, bytes}`. Numbers never repeat within a group, across restarts
+(ms), tab, url, kind, action_id?, w, h, bytes, vw?, vh?}`. `vw` and `vh` are the page's CSS size when
+the picture was taken, so a later `group.resize` still places an action's box on that picture; frames
+taken before it was recorded omit them. Numbers never repeat within a group, across restarts
 too. A group's keyframes outlive it; they go when older than `record_retention_ms`, oldest first
 when the daemon's recordings pass `record_max_bytes`, or with `record.delete`.
 

@@ -12,7 +12,9 @@ At 1440 × 900, in English and Russian:
   `text`, Enter as a key with its carriage return);
 - "Give back" posts the note, and the page is the agent's again;
 - a request for the operator turns the banner and the button amber, and a page dialog shows its chip;
-- the log lists the actions, and a row moves the cursor to its element;
+- the log starts as a button under the picture; opening it lists the actions, and a row moves the cursor;
+- on the page of its own the opened log is a column beside the picture;
+- the picture asks the page to become the box it is drawn in;
 - a socket closed by a restarting host (1012) comes back with a new ticket and draws again;
 - the address and the history buttons are the operator's only while they drive.
 
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -74,6 +77,18 @@ def check(browser, scenes, lang: str, problems: list[str]) -> None:  # type: ign
     if "panel=browser" not in page.url:
         say(f"the Browser tab is not in the address: {page.url}")
     frames = wait_frames(page, ROOT, 1)
+    # The picture asks the page to become the box it is drawn in, so a tall pane is not a short page
+    # with an empty band under it.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not bs.posted("/viewport"):
+        page.wait_for_timeout(100)
+    views = bs.posted("/viewport")
+    box = page.locator(f"{ROOT} .bv").bounding_box()
+    print(f"[{lang}] viewport: {views[-1] if views else None} box: {box}")
+    if not views or box is None:
+        say("the panel did not ask the page to fill the picture")
+    elif abs(views[-1]["w"] - box["width"]) > 24 or abs(views[-1]["h"] - box["height"]) > 24:
+        say(f"the page was asked for {views[-1]}, not the picture {box['width']:.0f}×{box['height']:.0f}")
     live = next(c for c in bs.clients if c.tier == "live" and not c.closed)
     page.wait_for_timeout(300)
     print(f"[{lang}] frames drawn: {frames}; acks: {live.of('ack')}; attach: {live.of('attach')}")
@@ -245,10 +260,21 @@ def check(browser, scenes, lang: str, problems: list[str]) -> None:  # type: ign
         say(f"the overlay grew to {nodes} nodes")
     page.close()
 
-    # The page of its own, for a second monitor: the same view, the log beside the picture.
+    # The page of its own, for a second monitor. The log starts as the button under the picture;
+    # opening it puts the list in a column beside the picture.
     page = open_page(context, bs, stub, f"{BASE}/browser/g1?token=t&scheme=dark&lang={lang}", wait=".browser-full .bp .bv[data-state='live']")
     wait_frames(page, ".browser-full .bp", 1)
-    page.wait_for_selector(".browser-full .bp-log-row", timeout=5000)
+    closed = page.evaluate("""() => {
+      const pic = document.querySelector('.browser-full .bp-stage-wrap').getBoundingClientRect();
+      const log = document.querySelector('.browser-full .bp-log').getBoundingClientRect();
+      const row = document.querySelector('.browser-full .bp-log-row');
+      return { beside: log.left >= pic.right - 1, below: log.top >= pic.bottom - 2, shown: !!(row && row.getClientRects().length) };
+    }""")
+    print(f"[{lang}] own window closed: {closed}")
+    if closed["beside"] or not closed["below"] or closed["shown"]:
+        say(f"the log is open before it is asked for: {closed}")
+    page.locator(".browser-full .bp-log-head").click()
+    page.wait_for_selector(".browser-full .bp-log.open .bp-log-row", timeout=5000)
     side = page.evaluate("""() => {
       const pic = document.querySelector('.browser-full .bp-stage-wrap').getBoundingClientRect();
       const log = document.querySelector('.browser-full .bp-log').getBoundingClientRect();
@@ -256,7 +282,7 @@ def check(browser, scenes, lang: str, problems: list[str]) -> None:  # type: ign
     }""")
     print(f"[{lang}] own window: {side}")
     if not side["beside"] or side["log_w"] != 280 or side["rows"] == 0:
-        say(f"the page of its own does not put the log beside the picture: {side}")
+        say(f"the page of its own does not put the opened log beside the picture: {side}")
     page.close()
     context.close()
 

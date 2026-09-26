@@ -165,7 +165,8 @@ func (p *Model) Screenshot(ctx context.Context, t *browser.Tab, sp ScreenshotPar
 		w, h = lm.CSSContentSize.Width, math.Min(lm.CSSContentSize.Height, 16000)
 		beyond = true
 	default:
-		w, h = float64(t.Group.Viewport.W), float64(t.Group.Viewport.H)
+		vp := t.Group.ViewportNow()
+		w, h = float64(vp.W), float64(vp.H)
 	}
 	if w < 1 || h < 1 {
 		return nil, wire.Errorf(wire.CodeForbidden, "the element has no size on the page")

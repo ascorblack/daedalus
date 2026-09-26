@@ -231,11 +231,25 @@ func (g *Group) View() map[string]any {
 	n := len(g.tabs)
 	g.m.mu.Unlock()
 	g.cmu.Lock()
-	control, last := g.control, g.lastActivity
+	control, last, vp := g.control, g.lastActivity, g.Viewport
 	g.cmu.Unlock()
 	return map[string]any{"id": g.ID, "browser_id": g.Browser.ID, "profile": g.Profile,
-		"viewport": g.Viewport, "tabs": n, "active_tab": active, "control": control.View(""), "labels": g.Labels,
+		"viewport": vp, "tabs": n, "active_tab": active, "control": control.View(""), "labels": g.Labels,
 		"created_at": g.CreatedAt, "last_activity_at": last}
+}
+
+// ViewportNow is the page's size in CSS pixels. It changes while the operator watches (Resize),
+// so a read takes the same lock as the write and cannot tear one side from the other.
+func (g *Group) ViewportNow() Viewport {
+	g.cmu.Lock()
+	defer g.cmu.Unlock()
+	return g.Viewport
+}
+
+func (g *Group) setViewport(vp Viewport) {
+	g.cmu.Lock()
+	g.Viewport = vp
+	g.cmu.Unlock()
 }
 
 // Touch records activity: the browser is not idle.

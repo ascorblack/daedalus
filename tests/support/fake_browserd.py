@@ -522,6 +522,14 @@ class FakeBrowserd:
             return {"groups": groups}
         if method == "group.list":
             return {"groups": [g.view() for g in self.groups.values() if not params.get("browser_id") or g.browser_id == params["browser_id"]]}
+        if method == "group.resize":
+            group = self._group(str(params.get("group_id")))
+            viewport = params.get("viewport") or {}
+            w, h = int(viewport.get("w") or 0), int(viewport.get("h") or 0)
+            if not (320 <= w <= 3840 and 320 <= h <= 3840):
+                raise _Fail(-32602, "viewport sides must be 320-3840")
+            group.viewport = {"w": w, "h": h}
+            return {"viewport": {"w": w, "h": h}}
         if method == "group.close":
             group = self._group(str(params.get("group_id")))
             del self.groups[group.id]

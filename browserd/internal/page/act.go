@@ -503,7 +503,8 @@ func (p *Model) dispatch(ctx context.Context, t *browser.Tab, ap ActParams, ref 
 		if ref != "" {
 			return nil // prepare already brought it into view
 		}
-		vw, vh := float64(t.Group.Viewport.W), float64(t.Group.Viewport.H)
+		vp := t.Group.ViewportNow()
+		vw, vh := float64(vp.W), float64(vp.H)
 		dy := vh * 0.8
 		if ap.Direction == "up" {
 			dy = -dy

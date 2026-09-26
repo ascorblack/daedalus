@@ -3462,7 +3462,10 @@ button.staff-row:hover { background: var(--surface-2); }
 .bp-dialog-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bp-dialog-actions { flex: none; display: flex; gap: 6px; }
 
-/* The action log: a drawer under the picture, or a column beside it where the tab is wide. */
+/* The action log. Closed, it is the one row that opens it, under the picture, so the picture can
+   use the pane. Opened in a wide tab it becomes a column beside the picture: a drawer under the
+   picture would spend the height the page was just given. A phone's sheet keeps it under the
+   picture (`.page`) and does not fold it. */
 .bp-log { flex: none; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--line); background: var(--surface-1); }
 .bp-log.open { max-height: 40%; }
 .bp-log:not(.open):not(.page) .bp-log-rows { display: none; }
@@ -3491,11 +3494,9 @@ button.staff-row:hover { background: var(--surface-2); }
 .bp-log-empty { padding: 8px 6px; font-size: var(--fs-12); }
 .bp-log.page { flex: 1; max-height: none; border-top: 0; }
 @container (min-width: 900px) {
-  .bp:not(.phone) .bp-main { flex-direction: row; }
-  .bp:not(.phone) .bp-log { width: 280px; max-height: none; border-top: 0; border-left: 1px solid var(--line); }
-  .bp:not(.phone) .bp-log .bp-log-rows { display: block; }
-  .bp:not(.phone) .bp-log-head { cursor: default; pointer-events: none; }
-  .bp:not(.phone) .bp-log-head .chev, .bp:not(.phone) .bp-log-latest { display: none; }
+  .bp.log-open:not(.phone) .bp-main { flex-direction: row; }
+  .bp.log-open:not(.phone) .bp-log { width: 280px; max-height: none; border-top: 0; border-left: 1px solid var(--line); }
+  .bp.log-open:not(.phone) .bp-log .bp-log-rows { display: block; }
 }
 .bp-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: var(--space-8) var(--space-5); color: var(--fg-2); font-size: var(--fs-13); text-align: center; }
 .bp-empty .ic { color: var(--fg-3); margin-bottom: 4px; }

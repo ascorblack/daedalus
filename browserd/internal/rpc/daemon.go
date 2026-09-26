@@ -59,6 +59,7 @@ func (d *Daemon) Register(s *server.Server) {
 		"browser.stats":      d.stats,
 		"group.list":         d.groupList,
 		"group.close":        d.groupClose,
+		"group.resize":       d.groupResize,
 		"profile.list":       d.profileList,
 		"profile.clear":      d.profileClear,
 		"profile.delete":     d.profileDelete,
@@ -183,6 +184,21 @@ func (d *Daemon) groupList(ctx context.Context, c *server.Conn, params json.RawM
 		out = append(out, g.View())
 	}
 	return map[string]any{"groups": out}, nil
+}
+
+func (d *Daemon) groupResize(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {
+	var p struct {
+		GroupID  string           `json:"group_id"`
+		Viewport browser.Viewport `json:"viewport"`
+	}
+	if err := decode(params, &p); err != nil {
+		return nil, err
+	}
+	vp, err := d.Manager.Resize(ctx, p.GroupID, p.Viewport)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"viewport": vp}, nil
 }
 
 func (d *Daemon) groupClose(ctx context.Context, c *server.Conn, params json.RawMessage) (any, error) {

@@ -877,6 +877,24 @@ class Browsers:
         await self.audit(group, row["env"], by, {"human": "take", "paused": "pause", "agent": "give"}[owner], {"client_id": client_id, "reason": reason[:300], "note_len": len(note.strip())})
         return result if isinstance(result, dict) else {}
 
+    async def resize(self, group: str, w: int, h: int) -> dict[str, int]:
+        """Give the group's pages the operator's picture, in CSS pixels.
+
+        A page opened at 1280×800 and drawn into a taller pane leaves an empty band under the
+        picture. The window follows the pane, and the agent's reads follow the window: what it
+        sees is what the pane shows. A side outside 320–3840 is refused before the daemon is asked.
+        """
+        if w < 320 or h < 320 or w > 3840 or h > 3840:
+            raise InvalidRequest("viewport sides must be 320-3840")
+        row = await self._row(group)
+        if row["status"] != "open":
+            raise BrowserGone(self._gone_text(row))
+        result = await self._call(row["env"], "group.resize", {"group_id": group, "viewport": {"w": w, "h": h}}, what="resizing the page")
+        viewport = result.get("viewport") if isinstance(result, dict) else None
+        if not isinstance(viewport, dict):
+            return {"w": w, "h": h}
+        return {"w": int(viewport.get("w") or w), "h": int(viewport.get("h") or h)}
+
     async def handoff(self, group: str, reason: str, what: str, *, actor: str) -> dict[str, Any]:
         """The agent asks the operator to take over: the group is paused with the reason, and the
         operator is told it needs them. Returns what the tool tells the agent about where it stopped."""

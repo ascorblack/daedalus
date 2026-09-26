@@ -132,7 +132,8 @@ func (r *Recorder) capture(t *browser.Tab, kind, actionID string) {
 		return
 	}
 	maxBytes, _ := r.Limits()
-	if _, err := r.Store.Put(g.ID, Frame{At: time.Now().UnixMilli(), Tab: t.ID, URL: t.URL(), Kind: kind, ActionID: actionID, W: w, H: h}, jpeg, maxBytes); err != nil && r.Log != nil {
+	vp := g.ViewportNow()
+	if _, err := r.Store.Put(g.ID, Frame{At: time.Now().UnixMilli(), Tab: t.ID, URL: t.URL(), Kind: kind, ActionID: actionID, W: w, H: h, VW: vp.W, VH: vp.H}, jpeg, maxBytes); err != nil && r.Log != nil {
 		r.Log.Warn("keyframe not written", "group", g.ID, "error", err.Error())
 	}
 }

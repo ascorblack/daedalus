@@ -274,8 +274,10 @@ export type BrowserActionRow = {
 };
 
 /** One keyframe of a group's recording (`GET /api/browsers/{group}/recording`): after an action, when the
- *  page changed, or when the recording started. `w`×`h` is the picture; its secret fields were masked. */
-export type BrowserFrame = { no: number; at: number; tab: string; url: string; kind: "action" | "change" | "start"; action_id?: string; w: number; h: number; bytes: number };
+ *  page changed, or when the recording started. `w`×`h` is the picture; its secret fields were masked.
+ *  `vw`×`vh` is the page's CSS size when the picture was taken, so a later resize of the window still
+ *  places an action's box on it. Frames taken before that was recorded omit it. */
+export type BrowserFrame = { no: number; at: number; tab: string; url: string; kind: "action" | "change" | "start"; action_id?: string; w: number; h: number; bytes: number; vw?: number; vh?: number };
 
 export type BrowserRecording = { recording: { frames: boolean; human: boolean }; frames: BrowserFrame[] };
 

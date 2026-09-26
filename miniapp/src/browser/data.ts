@@ -94,6 +94,15 @@ function refreshLists(): void {
  * Take control, give it back, pause or resume. Taking names this window's live client, which is the
  * one whose input the daemon then accepts; giving back may carry a note the agent is woken with.
  */
+/**
+ * Ask the page to become this many CSS pixels. The picture is that page drawn into the pane; left
+ * at the size it was opened, a taller pane has an empty band under it. A failure leaves the band:
+ * an older daemon, or a group that has since closed, must not take the tab down with it.
+ */
+export async function resizeViewport(group: string, w: number, h: number): Promise<void> {
+  await api.post(`${BROWSERS_KEY}/${enc(group)}/viewport`, { w, h });
+}
+
 export async function setControl(group: string, body: { owner: BrowserControl["owner"]; client_id?: string | null; note?: string; reason?: string }): Promise<BrowserControl> {
   const out = await api.post<BrowserControl>(`${BROWSERS_KEY}/${enc(group)}/control`, Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined && v !== null && v !== "")));
   refreshLists();
