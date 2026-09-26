@@ -3,7 +3,7 @@
 // should reproduce (`?panel=preview&path=reports/menu.md`), the browser remembers the width and the
 // last open tab, and the component in panel.tsx is the only thing that turns either into pixels.
 
-export type PanelTab = "details" | "files" | "preview" | "jobs" | "board" | "brief" | "wakeups" | "folders" | "questions";
+export type PanelTab = "details" | "files" | "preview" | "jobs" | "board" | "brief" | "wakeups" | "folders" | "questions" | "browser";
 
 /** A session's own tabs: what the agent is, the files it works on, one of them open, its jobs. */
 export const PANEL_TABS: PanelTab[] = ["details", "files", "preview", "jobs"];
@@ -20,12 +20,22 @@ export type PanelContext = "session" | "orchestrator" | "member" | "main";
  * is the project's alone, with what waits for the operator first; a session inside a project keeps
  * its own tabs and gains the project's, so the board is one click away from whoever is working on
  * it; the main chat keeps a session's tabs behind the questions of every project.
+ *
+ * The Browser tab is there only for a session that has had a browser (`browser`): most never do,
+ * and the member panel already has eight tabs. It follows the agent's own tabs, before the project's.
  */
-export function tabsFor(context: PanelContext): PanelTab[] {
-  if (context === "orchestrator") return ["questions", ...PROJECT_TABS];
-  if (context === "member") return [...PANEL_TABS, ...PROJECT_TABS];
-  if (context === "main") return ["questions", ...PANEL_TABS];
-  return PANEL_TABS;
+export function tabsFor(context: PanelContext, opts: { browser?: boolean } = {}): PanelTab[] {
+  const browser: PanelTab[] = opts.browser ? ["browser"] : [];
+  if (context === "orchestrator") return ["questions", ...browser, ...PROJECT_TABS];
+  if (context === "member") return [...PANEL_TABS, ...browser, ...PROJECT_TABS];
+  if (context === "main") return ["questions", ...PANEL_TABS, ...browser];
+  return [...PANEL_TABS, ...browser];
+}
+
+/** Every tab a route may name in this context. A link to `?panel=browser` must open the tab even
+ *  before the listing that says the session has a browser has arrived. */
+export function routeTabsFor(context: PanelContext): PanelTab[] {
+  return tabsFor(context, { browser: true });
 }
 
 /** One file the Preview tab showed: where the bytes come from, and the lines an answer cited, if any. */
@@ -43,7 +53,7 @@ export type PanelState = {
 
 export const PANEL_CLOSED: PanelState = { tab: null, stack: [], at: -1, expanded: false };
 
-export function isPanelTab(v: string | null | undefined, tabs: readonly PanelTab[] = [...PANEL_TABS, ...PROJECT_TABS, "questions"]): v is PanelTab {
+export function isPanelTab(v: string | null | undefined, tabs: readonly PanelTab[] = [...PANEL_TABS, ...PROJECT_TABS, "questions", "browser"]): v is PanelTab {
   return !!v && (tabs as readonly string[]).includes(v);
 }
 

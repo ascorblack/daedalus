@@ -28,6 +28,8 @@ function listed(file: string, name: string): string[] {
 // Words that are the same in both languages: names, brands and the ids of tools and config fields.
 // Everything else being identical means a row was copied and never translated.
 const SAME_IN_BOTH = [
+  // The agent's name on its browser cursor is the product's name in both languages.
+  "browser.agent",
   // Three of the components are proper names of programs and are spelled the same in Russian.
   "comp.name.git",
   "comp.name.node",

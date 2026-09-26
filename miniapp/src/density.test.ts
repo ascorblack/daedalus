@@ -201,7 +201,7 @@ describe("the scale", () => {
   it("is declared once, in :root", () => {
     const root = all.find((r) => r.selector === ":root" && !r.media);
     expect(root).toBeDefined();
-    for (const name of [...Object.keys(TOKENS), "--space-2", "--radius-sm", "--radius-md", "--radius-lg", "--row-h", "--row-h-dense", "--row-h-touch", "--ctl-h", "--ctl-h-sm", "--ctl-h-lg", "--avatar", "--sidebar-w", "--rail-w", "--panel-w", "--reading-w", "--chat-w", "--head-h"]) {
+    for (const name of [...Object.keys(TOKENS), "--space-2", "--radius-sm", "--radius-md", "--radius-lg", "--row-h", "--row-h-dense", "--row-h-touch", "--ctl-h", "--ctl-h-sm", "--ctl-h-lg", "--avatar", "--sidebar-w", "--rail-w", "--panel-w", "--pip-w", "--reading-w", "--chat-w", "--head-h"]) {
       expect(root!.body, name).toContain(`${name}:`);
     }
   });
@@ -289,6 +289,18 @@ describe("rows and controls", () => {
     expect(body(".rail-item")).toContain("height: var(--row-h)");
     // A drag writes the width once a frame; a transition on it is what made the edge lag and glide.
     expect(body(".sidebar")).not.toMatch(/transition/);
+  });
+
+  it("put the browser's corner preview inside the conversation's column, at its token width", () => {
+    // Absolute inside `.chat-main`, never fixed to the page: that is what keeps it left of the panel
+    // and inside its own pane of a dual view. check_density.py measures it at 1440 and 1280.
+    expect(decl(".bp-pip")).toContain("position: absolute");
+    expect(decl(".bp-pip")).toContain("width: var(--pip-w)");
+    expect(decl(".bp-pip")).not.toMatch(/position: fixed/);
+    expect(decl(".bp-pip-foot")).toContain("height: 24px");
+    // The phone's header thumbnail is a control, not a picture: 28 × 18 inside an icon button.
+    expect(decl(".browser-headbtn-thumb")).toContain("width: 28px");
+    expect(decl(".browser-headbtn-thumb")).toContain("height: 18px");
   });
 
   it("fold a step of the run into 28 px", () => {
