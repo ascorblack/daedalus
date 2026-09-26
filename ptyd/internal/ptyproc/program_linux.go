@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
+	"github.com/ascorblack/daedalus/ptyd/proto/procstat"
 )
 
 // ProgramGroup is the process group the terminal's own program leads: the group an idle shell

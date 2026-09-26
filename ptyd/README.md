@@ -25,7 +25,6 @@ The protocol, the run directory, the events and the guarantees about the output 
 | Package | What it is |
 |---|---|
 | `cmd/ptyd` | flags, signals, shutdown |
-| `internal/server` | the run directory, the token handshake, channels, the JSON-RPC dispatcher; `clienttest` is a client for tests |
 | `internal/rpc` | the methods |
 | `internal/term` | one terminal (reader, emulator goroutine, input arbitration, keys, environment, the commands its shell reports), its attachments (flow control, size ownership, the keyboard), and the registry |
 | `internal/scan` | the clamps and the marks, over the raw output |
@@ -36,13 +35,23 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `cmd/ptyd-replay` | plays a terminal recording through the emulator and writes its snapshots, for the cross-check against xterm.js |
 | `libghostty` | the pinned sources of the screen emulator, the patch carried against them, and the script that builds it |
 | `internal/ptyproc` | PTY start, resize, signals, ending a process tree; on Windows a pseudoconsole (ConPTY) and a job object |
-| `internal/procstat` | the process table and the machine's memory and CPU, from `/proc` on Linux and the kernel's sysctl tables on macOS; `proctest` stands a `setsid` in for tests on a Mac |
-| `internal/events` | the ordered event log and its per-terminal rate limits |
 | `internal/sidechan` | `exec.run` and its program list, `fs.*` with its roots and deny list, `net.dial` |
 | `internal/hooks` | launches (token, overlay files, dial directory, ports), the loopback hook listener with held replies, `hook-post` and `hook` |
 | `internal/teammcp` | `team-mcp`: the team tools (`Report`, `AskOrchestrator`) as an MCP server on stdio, posting to the hook listener |
-| `internal/wire` | frame codecs; `testdata/frames.json` is shared byte for byte with the app |
+| `internal/wire` | the terminal frames an attachment carries; `testdata/frames.json` is shared byte for byte with the app |
 | `internal/logx` | the log and the journal of agent writes |
+
+The packages under `proto/` are shared with `browserd`, the browser daemon beside this one, which
+imports this module for them; `internal/` would forbid it. They hold nothing about terminals:
+
+| Package | What it is |
+|---|---|
+| `proto/wire` | the socket framing and JSON-RPC 2.0; `testdata/socket_frames.json` is its golden form |
+| `proto/server` | the run directory, the token handshake, channels, the JSON-RPC dispatcher; `clienttest` is a client for tests |
+| `proto/events` | the ordered event log and its per-key rate limits |
+| `proto/procstat` | the process table and the machine's memory and CPU, from `/proc` on Linux and the kernel's sysctl tables on macOS; `proctest` stands a `setsid` in for tests on a Mac |
+
+A change under `proto/` changes both daemons, and so both version digests.
 
 ## The screen emulator
 
@@ -76,7 +85,7 @@ at 6 GB, as every build of the library should be:
 docker build -q -t ptyd-toolchain -f libghostty/toolchain.Dockerfile libghostty
 docker run --rm --memory 6g --memory-swap 6g --user "$(id -u):$(id -g)" -v "$PWD":/src -w /src \
   -e HOME=/tmp -e GOCACHE=/src/.cache/go-build -e GOMODCACHE=/src/.cache/go-mod -e GOFLAGS=-buildvcs=false \
-  ptyd-toolchain sh -c 'export PKG_CONFIG_PATH="$(libghostty/build.sh)" && test -z "$(gofmt -l cmd internal)" &&
+  ptyd-toolchain sh -c 'export PKG_CONFIG_PATH="$(libghostty/build.sh)" && test -z "$(gofmt -l cmd internal proto)" &&
     go vet ./... && go test -race ./... && GOOS=darwin go vet ./... && GOOS=windows go vet ./... &&
     GOOS=windows GOARCH=arm64 go vet ./...'
 ```

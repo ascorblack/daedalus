@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // Notification is one notification from the daemon.

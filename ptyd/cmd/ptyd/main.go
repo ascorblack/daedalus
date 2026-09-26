@@ -18,14 +18,14 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
 )
 
 const usage = `usage:
@@ -118,7 +118,7 @@ func serve(args []string) error {
 	// was started from a terminal when that terminal closes; SIGPIPE is handled per write.
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 
-	ep, err := server.Prepare(cfg.RunDir, cfg.Listen)
+	ep, err := server.Prepare(cfg.RunDir, cfg.Listen, "ptyd")
 	if err != nil {
 		if errors.Is(err, server.ErrHeld) {
 			return err

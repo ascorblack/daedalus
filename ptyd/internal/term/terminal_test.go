@@ -18,7 +18,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
-	"github.com/ascorblack/daedalus/ptyd/internal/procstat/proctest"
+	"github.com/ascorblack/daedalus/ptyd/proto/procstat/proctest"
 )
 
 type recorded struct {

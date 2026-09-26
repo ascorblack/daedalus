@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
 )
 
 // flood is a channel handler whose producer sends as fast as it can until the channel closes.
@@ -27,7 +27,7 @@ func (f *flood) Closed()      { f.once.Do(func() { close(f.closed) }) }
 // on the wire, and the producer learns of the close from its next send.
 func TestNothingFollowsAChannelsClose(t *testing.T) {
 	dir := runDir(t)
-	ep, err := server.Prepare(dir, "unix")
+	ep, err := server.Prepare(dir, "unix", testDaemon)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,6 @@
-// Package wire is the byte format between the host and the daemon: length-prefixed frames with a
-// channel id, JSON-RPC 2.0 on channel 0, and the browser frames that attachment channels carry.
+// Package wire is the byte format between the host and a daemon: length-prefixed frames with a
+// channel id, and JSON-RPC 2.0 on channel 0. ptyd and browserd both speak it; what a channel other
+// than 0 carries is each daemon's own (ptyd's terminal frames are in ptyd/internal/wire).
 package wire
 
 import (

@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // maxInflight bounds the requests one connection may have running. A request past it is refused

@@ -15,10 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
+
+// testDaemon names the daemon the tests prepare run directories for.
+const testDaemon = "ptyd"
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -36,7 +39,7 @@ func runDir(t *testing.T) string {
 
 func start(t *testing.T, dir string) (*server.Endpoint, *server.Server) {
 	t.Helper()
-	ep, err := server.Prepare(dir, "unix")
+	ep, err := server.Prepare(dir, "unix", testDaemon)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +68,7 @@ func start(t *testing.T, dir string) (*server.Endpoint, *server.Server) {
 func TestHandshakeAndCalls(t *testing.T) {
 	dir := runDir(t)
 	start(t, dir)
-	for name, mode := range map[string]os.FileMode{"": 0o700, server.TokenFile: 0o600, server.SocketFile: 0o600} {
+	for name, mode := range map[string]os.FileMode{"": 0o700, server.TokenFile: 0o600, server.SocketName(testDaemon): 0o600} {
 		st, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -125,7 +128,7 @@ func TestWrongTokenClosesAfterADelay(t *testing.T) {
 	dir := runDir(t)
 	start(t, dir)
 	began := time.Now()
-	_, err := clienttest.DialWith("unix", filepath.Join(dir, server.SocketFile), strings.Repeat("0", 64))
+	_, err := clienttest.DialWith("unix", filepath.Join(dir, server.SocketName(testDaemon)), strings.Repeat("0", 64))
 	if err == nil {
 		t.Fatal("a wrong token was accepted")
 	}
@@ -137,7 +140,7 @@ func TestWrongTokenClosesAfterADelay(t *testing.T) {
 func TestSecondInstanceRefusesAndStaleSocketIsRemoved(t *testing.T) {
 	dir := runDir(t)
 	start(t, dir)
-	if _, err := server.Prepare(dir, "unix"); !errors.Is(err, server.ErrHeld) {
+	if _, err := server.Prepare(dir, "unix", testDaemon); !errors.Is(err, server.ErrHeld) {
 		t.Fatalf("second instance: %v", err)
 	}
 
@@ -146,22 +149,22 @@ func TestSecondInstanceRefusesAndStaleSocketIsRemoved(t *testing.T) {
 	if err := os.MkdirAll(stale, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("unix", filepath.Join(stale, server.SocketFile))
+	ln, err := net.Listen("unix", filepath.Join(stale, server.SocketName(testDaemon)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ln.(*net.UnixListener).SetUnlinkOnClose(false)
 	ln.Close()
-	if _, err := os.Stat(filepath.Join(stale, server.SocketFile)); err != nil {
+	if _, err := os.Stat(filepath.Join(stale, server.SocketName(testDaemon))); err != nil {
 		t.Fatal("the stale socket was not left behind for the test")
 	}
-	ep, err := server.Prepare(stale, "unix")
+	ep, err := server.Prepare(stale, "unix", testDaemon)
 	if err != nil {
 		t.Fatalf("over a stale socket: %v", err)
 	}
 	ep.Listener.Close()
 	ep.Release()
-	for _, f := range []string{server.EndpointFile, server.TokenFile, server.SocketFile} {
+	for _, f := range []string{server.EndpointFile, server.TokenFile, server.SocketName(testDaemon)} {
 		if _, err := os.Stat(filepath.Join(stale, f)); !os.IsNotExist(err) {
 			t.Errorf("%s left after release", f)
 		}
@@ -170,13 +173,13 @@ func TestSecondInstanceRefusesAndStaleSocketIsRemoved(t *testing.T) {
 
 func TestTokenIsNewEveryStart(t *testing.T) {
 	dir := runDir(t)
-	a, err := server.Prepare(dir, "unix")
+	a, err := server.Prepare(dir, "unix", testDaemon)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Listener.Close()
 	a.Release()
-	b, err := server.Prepare(dir, "unix")
+	b, err := server.Prepare(dir, "unix", testDaemon)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +191,7 @@ func TestTokenIsNewEveryStart(t *testing.T) {
 
 func TestTCPEndpoint(t *testing.T) {
 	dir := runDir(t)
-	ep, err := server.Prepare(dir, "tcp:127.0.0.1:0")
+	ep, err := server.Prepare(dir, "tcp:127.0.0.1:0", testDaemon)
 	if err != nil {
 		t.Fatal(err)
 	}

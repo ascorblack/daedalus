@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 func TestScreenMethods(t *testing.T) {

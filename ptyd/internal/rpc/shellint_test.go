@@ -17,7 +17,7 @@ import (
 
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // These tests run real shells with their integration loaded, as the daemon launches them, and drive

@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
 )
 
 // recorder is the event log's stand-in: it keeps what was published and wakes whoever waits.

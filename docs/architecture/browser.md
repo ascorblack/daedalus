@@ -1,0 +1,534 @@
+# The browser: the daemon and its protocol
+
+The agent's browser is Chromium owned by `browserd`, a small daemon written in Go (`browserd/`).
+There is one daemon per **environment**, like `ptyd`: `container` (a compose service of its own) and
+`host` (a child of the desktop launcher). The Daedalus host talks to each over a local socket, runs
+the agent's browser tools through it, and relays live views of its pages to the app. `browserd`
+knows browsers, profiles, tabs, pages, pixels and processes; it knows nothing about sessions,
+projects, policies or agents. Everything the host says about an owner travels as `labels` it echoes.
+
+This document is the contract the daemon, the host and the app are tested against. A section marked
+*not yet* describes a part whose method names and shapes are fixed but which the daemon does not
+serve yet; calling it returns `-32601 method not found`.
+
+## Running it
+
+```
+browserd serve --env container --run-dir /run/daedalus-browser --state-dir /var/lib/browserd
+browserd version
+```
+
+| Flag | Default and meaning |
+|---|---|
+| `--env` | the environment's name, echoed to clients (required) |
+| `--run-dir` | the run directory: endpoint, token, socket (required) |
+| `--state-dir` | profiles, downloads, uploads, the daemon's log (required) |
+| `--listen` | `unix` (a socket in the run directory), or `tcp:127.0.0.1:<port>`; on Windows `tcp:127.0.0.1:0` |
+| `--chromium` | the browser to run; see Which Chromium |
+| `--config` | a JSON file: `{"limits": {…}, "chromium": {"path", "args": [], "no_sandbox"}}`; unknown keys are refused |
+| `--log-file`, `--log-level` | the daemon's own JSON-lines log (stderr, `info`) |
+
+`SIGTERM` or `SIGINT` stops the daemon: the endpoint file is removed first, every browser is asked to
+close (`Browser.close` over its pipe), and after 3 s whatever is left of each browser's process group
+gets `SIGKILL` (on Windows the job object is closed). Then the socket and token are removed. The
+daemon owns its browsers: when it stops, they stop. Restarting the Daedalus host leaves the daemon
+and its browsers running.
+
+## Run directory and handshake
+
+Exactly as `ptyd`'s (terminals.md, Run directory and handshake), with the daemon's own file names:
+
+```
+<run>/endpoint       "unix:browserd.sock" or "tcp:127.0.0.1:<port>"
+<run>/token          64 hex characters (32 random bytes), mode 0600, new at every start
+<run>/browserd.sock  mode 0600
+<run>/browserd.lock  held for the daemon's lifetime
+```
+
+A second daemon on the same directory exits with `another browserd holds the run directory`. The
+first frame on channel 0 carries the token; a good one is answered with the notification
+`hello {version, protocol, instance, env}`. `protocol` is 1. The host refuses a protocol it does not
+know and reports the environment unavailable.
+
+## Framing
+
+The socket framing is `ptyd`'s, from the same Go package (`ptyd/proto/wire`):
+
+```
+frame   := u32be length | u32be channel | payload     (length = 4 + len(payload), at most 1 MiB + 4)
+channel 0     : one UTF-8 JSON-RPC 2.0 message per frame
+channel n > 0 : a live view (payload = one view frame, below)
+empty payload : closed from that side; the other side answers with its own empty frame
+```
+
+Requests run concurrently, at most 256 in flight per connection. Parameters are decoded strictly: an
+unknown field is `-32602`. Errors use the JSON-RPC codes plus:
+
+| Code | Name | Meaning; `error.data` |
+|---|---|---|
+| 1001 | `not_found` | no such browser, group, profile, download or upload |
+| 1003 | `limit` | a limit was reached: running browsers, tabs, groups, viewers, sizes; `{limit, max}` |
+| 1004 | `forbidden` | not in this state (a profile in use cannot be cleared) or not allowed (a scheme) |
+| 1005 | `timeout` | |
+| 1007 | `unsupported` | not in this build or on this platform, or no usable Chromium; `{reason}` |
+| 1101 | `human_driving` | a human holds control of the group and the call waited `wait_ms` in vain; `{owner, holder, until}` |
+| 1102 | `blocked` | the network wall refused (*not yet*: the wall answers it); `{host, reason}` |
+| 1103 | `stale_ref` | the ref is not on the page any more; `{ref}`. Take a new snapshot |
+| 1104 | `no_such_tab` | the tab closed, or never belonged to this group; `{tab_id}` |
+| 1105 | `field_forbidden` | a password, one-time-code or payment field; `{ref, field: "password" \| "one_time_code" \| "payment"}` |
+| 1106 | `paused` | the operator paused the agent in this group; `{reason}` |
+| 1107 | `dialog_open` | a page dialog blocks the page; `{dialog{type, message}}`. Answer it with `dialog.answer` |
+| 1108 | `browser_gone` | the group's browser exited or crashed; `{reason}`. `browser.open` starts it again |
+
+## Objects
+
+- **Profile.** A Chromium user-data directory under `<state>/profiles/<profile>/`, mode 0700,
+  persistent: cookies and logins survive the browser. `profile` is the host's id, 1–64 of `A-Z a-z
+  0-9 - _` (the host maps its scopes to it: `project-<id>`, `session-<id>`). The reserved id
+  `ephemeral` is a throwaway context: a `Target.createBrowserContext` inside one shared browser with a
+  temporary directory, wiped when its group closes.
+- **Browser.** One Chromium process on one profile (all ephemeral groups share one browser).
+  `Browser {id, profile, pid, status: "starting" | "running" | "exited", started_at, groups, tabs,
+  labels}`. The id is the daemon's (`b` and 8 hex characters). A profile has at most one browser.
+- **Group.** A set of tabs owned by one agent owner inside one browser. `group_id` is the host's, 1–64
+  of `A-Z a-z 0-9 - _`; the host makes one group per owner and profile, so two sessions of one
+  project share cookies but never see each other's tabs. `Group {id, browser_id, profile, viewport{w,
+  h}, tabs, active_tab, control, labels, created_at, last_activity_at}`.
+- **Tab.** One page target. `Tab {id, group_id, url, title, favicon_url, loading, active, opener,
+  created_at}`. The id is the daemon's (`t` and a counter), stable for the tab's life, never the CDP
+  target id. Popups and `target=_blank` links open as tabs in the opener's group, subject to its tab
+  cap (past it the popup is closed and `tab.refused` is published).
+- **Control**, per group: `Control {owner: "agent" | "human" | "paused", holder, until, reason}`.
+  `holder` is the live-view client that holds human control; `until` is in milliseconds since the
+  epoch, or null.
+
+`labels` (at most 32, each at most 256 bytes) are stored and echoed, never interpreted: the host puts
+`owner_kind`, `owner_id`, `project_id`, `session_id` or `staff_id` in them.
+
+## Methods
+
+| Method | Params → result |
+|---|---|
+| `daemon.info` | → `{version, protocol, instance, env, os, arch, pid, started_at, uptime_s, chromium{path, version, kind: "bundled" \| "system" \| "none", error?}, capabilities{sandbox, headed: false, screencast: true}, limits{…}, counts{browsers, groups, tabs, viewers}, machine}` |
+| `browser.open` | `{group_id, profile, labels?, viewport?{w, h}, url?}` → `{group: Group, tab: Tab, created}` |
+| `browser.list` | → `{browsers: [Browser]}` |
+| `browser.close` | `{browser_id}` → `{groups}`: ends the browser and forgets its groups |
+| `group.list` | `{browser_id?}` → `{groups: [Group]}` |
+| `group.close` | `{group_id}` → `{tabs}`: closes its tabs; an ephemeral group's context is disposed |
+| `profile.list` | → `{profiles: [{id, size_bytes, last_used_at, running}]}` |
+| `profile.clear`, `profile.delete` | `{profile}` → `{}`; `1004` while its browser runs. Clear keeps the directory and removes cookies, storage and cache; delete removes it |
+| `tab.list` | `{group_id}` → `{tabs: [Tab], active_tab}` |
+| `tab.new` | `{group_id, url?, origin?}` → `Tab`; it becomes the active tab |
+| `tab.select` | `{tab_id, origin?}` → `Tab` |
+| `tab.close` | `{tab_id, origin?}` → `{}` |
+| `page.navigate` | `{tab_id, url, origin?, timeout_ms? ≤ 60000 = 30000}` → `{url, title, status?, error?}` |
+| `page.back`, `page.forward`, `page.reload` | `{tab_id, origin?}` → `{url, title}` |
+| `page.snapshot` | `{tab_id, scope_ref?, max_chars? ≤ 200000 = 40000, origin?}` → `{url, title, text, refs, truncated, frames}` |
+| `page.text` | `{tab_id, ref?, max_chars? ≤ 200000 = 40000, origin?}` → `{url, title, text, truncated}` |
+| `page.screenshot` | `{tab_id, ref?, full_page?, max_width? ≤ 2560 = 1280, format? "jpeg" \| "png", quality?, origin?}` → `{format, width, height, data_b64, masked}` |
+| `page.act` | see Actions → `{action_id, ok, effects, point?, box?, diff?}` |
+| `page.wait` | `{tab_id, for: "load" \| "idle" \| "text" \| "gone" \| "url", value?, timeout_ms ≤ 60000, origin?}` → `{matched: <for> \| "timeout", url}` |
+| `dialog.answer` | `{tab_id, accept, text?, origin?}` → `{}`; `1001` with no dialog open |
+| `download.list` | `{group_id}` → `{downloads: [Download]}` |
+| `download.read` | `{id, offset, max? ≤ 512 KiB}` → `{data_b64, offset, size, eof}` |
+| `download.delete` | `{id}` → `{}` |
+| `upload.put` | `{upload_id?, group_id, name, offset, data_b64}` → `{upload_id, size}` |
+| `control.set` | `{group_id, owner, client_id?, ttl_ms? ≤ 86 400 000, reason?}` → `Control` |
+| `view.attach` | `{group_id, client{kind? = "human" \| "viewer", label?, via?, read_only?}}` → `{channel, client_id}` |
+| `view.detach` | `{channel}` |
+| `events.subscribe` | `{after_seq}` → `{instance, from_seq, resync}`, then `event` notifications |
+| `events.unsubscribe` | |
+| `browser.stats` | → `{at, supported, browsers: [{id, pid, processes, rss_bytes, cpu_percent, tabs}], daemon{pid, rss_bytes, cpu_percent}, machine}` |
+| `net.configure` | *not yet*: the network wall's rules, below |
+| `record.set` | *not yet*: `{group_id, frames}`, recording keyframes |
+
+### `browser.open`
+
+- It creates the group, starting the profile's browser when it is not running, and opens a first tab
+  (at `url`, or `about:blank`). With the group already open it returns it with `created: false` and
+  its active tab, and ignores `url`.
+- A new browser past `max_browsers` running (2) is `1003 {limit: "browsers"}`. The daemon never
+  closes a browser to make room: that is the host's decision (the cap queue).
+- Groups per browser are capped at `max_groups_per_browser` (8), tabs per group at
+  `max_tabs_per_group` (8).
+- `viewport` is the page's size in CSS pixels, default 1280×800, each side 320–3840. It is set on every
+  page of the group with `Emulation.setDeviceMetricsOverride`, because `--window-size` in
+  `--headless=new` leaves room for a window frame the page never shows (a 1280×800 window gave a
+  1280×657 page).
+- No Chromium is `1007 {reason}`; a Chromium that cannot start its sandbox is `1007` with the reason
+  `capabilities.sandbox` gives.
+
+### `origin` and control
+
+Every method that reads or acts on a page takes `origin {actor: "agent" | "operator", launch_id?,
+wait_ms? ≤ 60000 = 20000}`; without it the call is the agent's. An operator's call (the app's toolbar,
+through the host) is never held back by control. An agent's call:
+
+- runs at once while the group's owner is `agent`;
+- while `human`, waits up to `wait_ms` for control to come back, then fails `1101`. **Reads are refused
+  the same way** (`page.snapshot`, `page.text`, `page.screenshot`, `page.wait`): while a person
+  drives, the agent sees nothing of the page;
+- while `paused`, fails `1106` at once.
+
+`control.set {owner: "human", client_id}` names the live-view client whose INPUT is accepted; it
+must be a client attached to one of the group's tabs, and not read-only. `ttl_ms` defaults to 30
+minutes and every input from the holder renews it; at its end the owner returns to `agent` and
+`control` is published. `owner: "agent"` gives control back, `owner: "paused"` pauses the agent
+(with a `reason` the app shows). The holder detaching does not end human control: a reconnecting app
+takes it again with its new client id.
+
+## Actions
+
+`page.act {tab_id, action, ref?, to_ref?, element, text?, keys?, option?, submit?, direction?,
+upload_ids?, dry_run?, origin?}`
+
+| `action` | Needs | What happens |
+|---|---|---|
+| `click`, `double_click`, `right_click` | `ref` | the element is scrolled into view, and the mouse moves to a point inside its box and presses |
+| `hover` | `ref` | the mouse moves there |
+| `type` | `ref`, `text` (≤ 10 000 characters) | the field is focused, its content selected, and `text` inserted; with `submit`, Enter follows |
+| `press` | `keys` | named keys, one or a chord: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `Space`, `ArrowUp` … `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`, a single character, and `Ctrl+`, `Shift+`, `Alt+`, `Meta+` before any of them; sent to the focused element, or to `ref` when given |
+| `select` | `ref`, `option` | the option of a `<select>` whose label (else value) is `option` |
+| `check`, `uncheck` | `ref` | clicks the box when its state differs |
+| `scroll` | `ref`, or `direction: "up" \| "down"` | the element into view, or the page by one screen |
+| `drag` | `ref`, `to_ref` | press on one, move, release on the other |
+| `upload` | `ref`, `upload_ids` | the files put with `upload.put` are set on the file input |
+
+- `element` is required: the agent's own description of what it acts on ("the Add to cart button").
+  It goes into the `action` event and the audit, beside the accessible name the daemon finds.
+- **Trusted input.** The ref is resolved in the daemon's isolated world, the element scrolled into
+  view and its box taken; the mouse goes to a point inside the box (the centre, moved by a small
+  offset derived from the action id, never outside) with `Input.dispatchMouseEvent`; text goes in
+  with `Input.insertText` and keys with `Input.dispatchKeyEvent`. Pages see trusted events
+  (`isTrusted` is true, measured).
+- **Secret fields.** `type`, `press` into, and `select` on a password field, a field whose
+  `autocomplete` is `current-password`, `new-password`, `one-time-code` or any `cc-*`, or a field the
+  operator typed into while driving, fail `1105` and publish `needs_you {reason: "field_forbidden"}`.
+  Clicking such a field is allowed; typing into it is the operator's.
+- **Dry run.** With `dry_run: true` nothing is done. The reply is `{element{role, name, tag, type?,
+  autocomplete?, href?, form_action?}, point, box, sensitive{kinds[], evidence{}}}` — the host's
+  preflight for the sensitive-action policy (Sensitive actions, below). The same `sensitive` is in
+  the reply of the real action.
+- **The reply** is `{action_id, ok, effects{navigated?, url?, new_tab?, dialog?, download?}, point,
+  box, diff?}`. `point` and `box` are in CSS pixels of the viewport, as dispatched. `diff` is a short
+  snapshot (at most 2 KB) of what changed around the element, in the snapshot's format.
+- Before the input is dispatched the daemon publishes `action`, and after it `action_done` (Events).
+- An open dialog makes every page method except `dialog.answer` fail `1107`.
+
+### Uploads and downloads
+
+- `upload.put` streams a file into `<state>/uploads/<group>/<upload_id>/<name>` in chunks of at most
+  512 KiB: the first call without `upload_id` and at offset 0 creates it, later calls continue it at
+  exactly its size. At most `max_upload_bytes` (100 MiB) a file. `page.act {action: "upload"}` sets the
+  files on the input (`DOM.setFileInputFiles`) and removes them from the state directory once the page
+  has them. The daemon never sees a workspace path: the host reads the file through its walls.
+- Downloads land in `<state>/downloads/<group>/` (`Browser.setDownloadBehavior allowAndName`).
+  `Download {id, group_id, tab_id, name, url, mime?, size, state: "in_progress" | "completed" |
+  "canceled" | "failed" | "too_large", sha256?, started_at, finished_at?}`. One past
+  `max_download_bytes` (500 MiB) is cancelled as `too_large`; a profile's downloads are capped at 2
+  GiB, oldest removed first. The host copies a finished one into a workspace with `download.read`.
+
+## The snapshot
+
+`page.snapshot` returns an outline of the page, built by the daemon's own script in an **isolated
+world** (`Page.createIsolatedWorld`), so the page's scripts can neither see nor change the refs.
+
+```
+- banner
+  - link "Shop" [ref=e3]
+  - searchbox "Search" [ref=e9] value="shoes"
+- main
+  - heading "Running shoes" [level=1]
+  - button "Add to cart" [ref=e14]
+  - textbox "Password" [ref=e17] [secret]
+  - checkbox "Remember me" [ref=e18] [checked]
+  - iframe "Payment" [ref=f2]
+    - textbox "Card number" [ref=f2e4] [secret]
+```
+
+- One node per line: `- <role> "<name>"`, then `[ref=…]` for elements that can be acted on, then the
+  states in this order: `[level=n]`, `[checked]`, `[mixed]`, `[selected]`, `[expanded]`,
+  `[collapsed]`, `[disabled]`, `[required]`, `[focused]`, `[secret]`, then `value="…"` for a field that
+  is not secret, and `url="…"` for a link. Text is a `- text "…"` line. Roles and names are computed
+  as the accessibility tree computes them; `Accessibility.getFullAXTree` is the cross-check in tests.
+- **Refs** are `e<n>` in the top document and `f<k>e<n>` in frame `k`. A ref names one element for as
+  long as the element lives in its document, across re-renders that keep it; a navigation starts the
+  refs over. An element that is gone is `1103`.
+- **Masking.** The value of every secret field (as for `type`, above) is never included, in the
+  snapshot, in `page.text`, or in a `diff`: the node carries `[secret]` instead.
+- `scope_ref` returns only that element's subtree. `max_chars` cuts the outline; `truncated` says so,
+  and the cut keeps the focused element's region and ends with a line naming the refs to scope to.
+- `refs` is the number of refs; `frames` lists `{ref, url, cross_origin}` for the frames included.
+- The text is the page's own words. The host frames it as untrusted before any model reads it; the
+  daemon adds nothing.
+
+`page.text` returns the page's readable text (the main content, as a reader view extracts it), or one
+element's, with the same masking. `page.screenshot` masks secret fields before the capture (their
+text is hidden and a blank box drawn over them, then both removed), and `masked` lists their refs.
+
+## Sensitive actions
+
+The daemon classifies an action from the element and the page. `sensitive.kinds` is any of:
+
+| Kind | When |
+|---|---|
+| `credentials` | a submit or Enter in a form with a password field, or with a field whose `autocomplete` is `one-time-code` or `cc-*` |
+| `purchase` | the control's name, value or nearest heading matches the purchase words (buy, pay, place order, checkout, purchase, subscribe, donate, book now; купить, оплатить, оформить заказ, заказать, подписаться, забронировать), or a form with payment fields |
+| `send` | send, post, publish, share, reply, submit, tweet; отправить, опубликовать, поделиться, ответить |
+| `destroy` | delete, remove, cancel subscription, close account, revoke; удалить, отменить подписку, закрыть счёт |
+| `accept` | accept or agree to terms, and a cookie consent that is not a refusal |
+| `upload` | any file input |
+| `cross_origin_post` | a form whose action is on another registrable domain than the page |
+
+`evidence` is `{name, role, words[], form_action?, form_origin?, page_origin, fields[]}`. The word
+lists live in one file with its tests, and are broad on purpose: a false alarm costs the operator a
+tap. The daemon only classifies; asking is the host's policy.
+
+## Dialogs, waiting, and the operator's attention
+
+- A page dialog (`alert`, `confirm`, `prompt`, `beforeunload`) publishes `dialog.opened {group_id,
+  tab_id, type, message, default_prompt?}` and blocks the page until `dialog.answer`;
+  `dialog.closed` follows.
+- `page.wait`: `load` (the load event), `idle` (no network request for 500 ms), `text` (the text
+  appears in the page), `gone` (a ref, or a text, disappears), `url` (the URL contains `value`).
+- **`needs_you {group_id, tab_id, reason, what, url}`** asks for the operator. The daemon raises it on
+  its own for `field_forbidden` (above), `captcha` (a reCAPTCHA, hCaptcha or Turnstile frame
+  appears) and `basic_auth` (an HTTP authentication challenge, which the daemon cancels: the agent
+  never answers one). The host raises the others (`login`, `two_factor`, `payment`, `confirm`,
+  `other`) for the agent's handoff.
+
+## Events
+
+An `event` notification carries `{seq, at, type, data}`, one counter for all, as `ptyd`'s; the ids
+are in `data`. The daemon keeps the last 20 000, no more than 64 MiB. `events.subscribe` behaves as
+`ptyd`'s (`resync`, `events.resync {from_seq}`).
+
+| Type | `data` |
+|---|---|
+| `browser.started` | `{browser_id, profile, pid, chromium_version}` |
+| `browser.exited` | `{browser_id, profile, code, crashed, reason: "closed" \| "idle" \| "crashed" \| "memory" \| "shutdown", groups[]}` |
+| `group.opened`, `group.closed` | `{group_id, browser_id, profile, labels}` |
+| `tab.created` | `{group_id, tab: Tab}` |
+| `tab.updated` | `{group_id, tab_id, url, title, favicon_url, loading}` — at most one per 250 ms per tab, the latest wins |
+| `tab.closed` | `{group_id, tab_id}` |
+| `tab.refused` | `{group_id, url, reason: "tab_cap"}` |
+| `action` | `{action_id, group_id, tab_id, actor, kind, point{x, y}, box{x, y, w, h}, name, element, text_len?, keys?, at}` |
+| `action_done` | `{action_id, group_id, tab_id, ok, effects, error?}` |
+| `control` | `{group_id, owner, holder, until, reason}` |
+| `dialog.opened`, `dialog.closed` | as above |
+| `download.started` | `{group_id, download: Download}` |
+| `download.done` | `{group_id, download: Download}` |
+| `needs_you` | as above |
+| `egress` | *not yet*: `{group_id, host, decision}`, at most one per host per group per minute |
+| `browser.stats` | a `browser.stats` result, every 10 s while a browser runs |
+
+`action.text_len` is the length of the typed text; the text itself is never in an event, a log or the
+daemon's memory past the call.
+
+## Live views
+
+`view.attach` opens a channel that carries view frames both ways; the host relays them to a WebSocket
+unchanged. The daemon sends nothing until the client's first ATTACH. `read_only` (or `kind:
+"viewer"`) makes the client a watcher whose INPUT is dropped. A tab takes at most
+`max_viewers_per_tab` (8) clients. `view.detach`, the host closing the channel, the connection
+ending and the group closing all end the client; the channel's closing frame is always its last.
+
+### View frames
+
+Big-endian; the first byte is the type. The types are apart from the terminal frames' (`0x01`–`0x13`)
+so a frame sent down the wrong kind of channel is refused rather than misread.
+
+| Direction | Frame | Layout |
+|---|---|---|
+| to the client | `0x21 FRAME` | `[u32 frame_no][u16 meta_len][meta JSON][JPEG bytes]` |
+| to the client | `0x22 EVENT` | a JSON object with a string `type` |
+| to the daemon | `0x30 ATTACH` | `{tier: "live" \| "thumb", tab?, max_w, max_h, dpr?, quality?}` |
+| to the daemon | `0x31 ACK` | `[u32 frame_no]`, the frame the client has drawn |
+| to the daemon | `0x32 VIEW` | `{tier?, tab?, max_w?, max_h?, dpr?, quality?}`: a resize, another tab, another tier |
+| to the daemon | `0x33 INPUT` | a JSON object with a string `t`, at most 4 KiB |
+
+- `frame_no` counts from 1 per channel and never repeats; a frame carries a whole JPEG, never a part.
+- `meta` is `{tab, tier, w, h, vw, vh, scroll_x, scroll_y, offset_top, page_scale, ts}`: the image's
+  size in pixels, the viewport's in CSS pixels (so the image is `w / vw` pixels per CSS pixel), the
+  page's scroll and zoom as Chromium reported them for this frame, and `ts`, the capture time in
+  milliseconds since the epoch. The app places the agent's cursor from these, never from its own
+  guess.
+- `max_w` × `max_h` is the client's box in device pixels (CSS size × `dpr`), each 64–4096; the daemon
+  caps a live frame at 1600×1000. `quality` is 30–90 (default 60 live, 45 thumb).
+- The golden frames are `browserd/internal/wire/testdata/frames.json` and
+  `miniapp/src/browser/testdata/frames.json`, byte-identical (a host test checks it); each codec is
+  tested against its copy. JSON in these frames is compact, with keys in the order this document
+  gives them.
+
+### What a client receives
+
+On ATTACH: `hello`, then `tabs`, then `viewers`, then a frame as soon as there is one — at once when
+the tab has painted before, since the daemon keeps each watched tab's newest frame.
+
+- `hello {client_id, read_only, tier, group{id, profile, viewport{w, h}}, tab_id, control{owner,
+  holder, until, reason}, fps_cap}` — `holder` is `"you"`, `"other"` or null as this client sees it.
+- `tabs {tabs[{id, url, title, favicon_url, loading, active}], active}` at every change of the list.
+- `tab {id, url, title, favicon_url, loading}` when the viewed tab changes.
+- `viewers {count, others[{id, kind, label}]}` whenever someone attaches or leaves.
+- `action`, `action_done`, `control`, `dialog`, `download`, `needs_you`: as the daemon's events of the
+  same names, for this group.
+- `error {code, message}`: `bad_frame`, `not_holder` (INPUT from a client that does not hold
+  control), `tab_closed`.
+- `ping {at}` every 20 s.
+
+### Frames, rate and flow control
+
+- **A screencast runs only while someone watches** (or, later, while recording is on): it starts at the
+  first ATTACH on a tab and stops when the tab's last client leaves. **A page that does not change
+  sends nothing**: Chromium produces a frame only when the page repaints (measured: one frame in 8 s
+  on a still page, the first).
+- **Newest wins, per client.** Each client has a mailbox of one frame. The daemon sends the next frame
+  only after the client's ACK of the previous one; a frame that arrives while one is in flight
+  replaces whatever waits. A slow client (a phone on a train) gets fewer frames, never a backlog.
+  Chromium's own acknowledgement is decoupled from the clients': the daemon acknowledges Chromium
+  itself, paced to the frame rate below.
+- **`live`**: the screencast is asked for the largest live client's box (at most 1600×1000) at its
+  `quality`, and paced to at most `fps_cap` frames a second (15) by delaying Chromium's
+  acknowledgement. Unpaced, Chromium sends 50–60 frames a second while anything moves, at 1.2–1.5
+  CPUs (measured).
+- **`thumb`**: at most one frame a second, at most 320×200 at quality 45, sent only when the page
+  changed. With no live client on the tab the screencast itself runs at the thumbnail's size and pace;
+  with one, the daemon downscales the newest live frame for its thumbnail clients.
+- **Adaptive quality.** The daemon measures each live client's time from frame to ACK. Above 400 ms for
+  5 frames in a row, that client's frames are re-encoded at quality 40 and half size; below 120 ms for
+  20 frames they go back. Nothing in the protocol changes: `meta.w` and `meta.h` say what came.
+- A client that sends no ACK for 60 s is sent `ping`s only; it is never disconnected for being slow.
+
+### Input
+
+INPUT is accepted only from the client that holds human control of the group (`control.set`); from
+anyone else it is dropped and answered `error {code: "not_holder"}` at most once a second. Every
+accepted input renews the holder's TTL. Coordinates are CSS pixels of the viewport (the client maps
+from the image with the frame's meta). `mods` is a bit set: 1 Alt, 2 Ctrl, 4 Meta, 8 Shift, as CDP's.
+
+| `t` | Fields | Becomes |
+|---|---|---|
+| `mouse` | `type: "down" \| "up" \| "move", x, y, button: "left" \| "middle" \| "right" \| "none", clicks, mods` | `Input.dispatchMouseEvent` |
+| `wheel` | `x, y, dx, dy, mods` | a `mouseWheel` event |
+| `key` | `type: "down" \| "up", key, code, key_code, text?, mods` | `Input.dispatchKeyEvent` |
+| `text` | `text` (at most 1000 characters) | `Input.insertText`: composed text, paste, a phone's keyboard |
+| `touch` | `type: "start" \| "move" \| "end" \| "cancel", points[{x, y, id}]` | `Input.dispatchTouchEvent` |
+| `nav` | `action: "url" \| "back" \| "forward" \| "reload", url?` | the address bar and the toolbar while the operator drives; the same scheme rules as `page.navigate` |
+
+A human's keystrokes are counted, never recorded: `view.detach`'s audit counterpart on the host gets
+the count of inputs by kind, and nothing reaches the daemon's log. Every field a human typed into is
+remembered as secret for the life of its document, so the agent can never read it back.
+
+### The host's relay
+
+The host relays a view as it relays a terminal (terminals.md, The WebSocket): a single-use ticket,
+the socket accepted first and judged afterwards (4401, 4403, 4404, 4409, 1012), the Origin rule, and
+nothing buffered beyond the daemon's mailbox. From the app it accepts only ATTACH and VIEW (a JSON
+object, at most 4 KiB), ACK (exactly 5 bytes) and INPUT (at most 4 KiB + 1); anything else ends the
+socket with 1008, 1009 when too long, 1003 for a text message. A read-only ticket makes the client a
+viewer and drops its INPUT before the daemon sees it. The audit counts a person's inputs, never
+their content.
+
+## Which Chromium
+
+In order: `--chromium`, `$BROWSERD_CHROMIUM`, the configuration's `chromium.path`, Playwright's pinned
+`chromium` under `$PLAYWRIGHT_BROWSERS_PATH`, then a system Chrome, Chromium or Edge.
+`daemon.info.chromium.kind` is `bundled` for Playwright's and `system` for the others. The daemon
+always gives Chromium a profile directory of its own (Chrome 136 and later refuse remote debugging on
+the default one) and never reaches the operator's own profile.
+
+It is started with:
+
+```
+--headless=new --remote-debugging-pipe --user-data-dir=<profile> --no-first-run --no-default-browser-check
+--password-store=basic --disable-field-trial-config --disable-background-networking --disable-component-update
+--disable-sync --disable-default-apps --disable-extensions --disable-breakpad --metrics-recording-only
+--no-service-autorun --mute-audio --hide-scrollbars --disable-client-side-phishing-detection
+--disable-domain-reliability --no-pings --webrtc-ip-handling-policy=disable_non_proxied_udp
+--disable-features=Translate,OptimizationHints,MediaRouter,AutofillServerCommunication,PasswordManagerOnboarding
+```
+
+- `--password-store=basic` and `--disable-field-trial-config` together are what let a pinned
+  Chromium on a desktop session load a page at all: without them its cookie store waits for a
+  keyring that never answers, and every request hangs before it is sent (measured).
+- `--webrtc-ip-handling-policy=disable_non_proxied_udp` is the switch that keeps WebRTC's UDP off
+  the network (measured: STUN packets reach the wire without it; `--force-webrtc-ip-handling-policy`
+  is not honoured). The profile's preferences say the same (`webrtc.ip_handling_policy`), written
+  before every start.
+- The control channel is `--remote-debugging-pipe` (file descriptors 3 and 4, NUL-terminated JSON):
+  no debugging port is ever open, and no agent is ever given raw CDP.
+- The user agent drops the `Headless` word Chromium puts in it (`HeadlessChrome/…` becomes
+  `Chrome/…`, with the matching client hints): it is what the same browser with a window says.
+- Chromium's own sandbox is always on. `--no-sandbox` is passed only with the configuration's
+  `chromium.no_sandbox: true`, which `capabilities.sandbox` then reports as `off by configuration`.
+  `capabilities.sandbox` is `ok`, `unknown` before the first browser started, or why not:
+  - in a container: Chromium's namespace sandbox needs `seccomp=unconfined` (Docker's default
+    profile refuses the user namespace). Measured on Docker with an Ubuntu 24.04 host: a non-root
+    user, `seccomp=unconfined`, no added capability, and Docker's default AppArmor profile gives
+    every renderer its own user and PID namespaces and a seccomp filter. Adding
+    `apparmor=unconfined` breaks it, because the host's restriction on unprivileged user namespaces
+    then applies;
+  - natively on Linux distributions that restrict unprivileged user namespaces through AppArmor
+    (Ubuntu 23.10 and later), a downloaded Chromium has no sandbox unless a setuid sandbox helper is
+    named in `CHROME_DEVEL_SANDBOX` (a system Chrome's `chrome-sandbox`, or one installed for the
+    purpose) or an AppArmor profile allows it. The reason says which.
+
+## Limits
+
+| Name | Default | |
+|---|---|---|
+| `max_browsers` | 2 | running browsers; past it `browser.open` is `1003` |
+| `max_groups_per_browser` | 8 | |
+| `max_tabs_per_group` | 8 | |
+| `max_viewers_per_tab` | 8 | |
+| `idle_close_ms` | 600 000 | a browser with no agent call, no human input and no viewer for this long is closed; its profile stays on disk |
+| `memory_hard_bytes` | 2 GiB | a browser past it is killed (`browser.exited {reason: "memory"}`) |
+| `max_download_bytes` | 500 MiB | per file; 2 GiB per profile |
+| `max_upload_bytes` | 100 MiB | per file |
+| `fps_cap` | 15 | live frames a second |
+
+The configuration's `limits` sets them. **Memory is measured as private memory**: the sum over the
+browser's processes of `RssAnon` and `RssShmem`. The sum of RSS counts Chromium's shared code once
+per process and read 1.1–2.6 GB for a browser whose cgroup held 0.2–0.56 GB (measured), so a limit
+against it would kill healthy browsers. Inside a container, the cgroup's own figure is in `machine`.
+
+## The network wall (*not yet*)
+
+The wall is an HTTP proxy inside the daemon, which Chromium is started against
+(`--proxy-server=http://127.0.0.1:<port>` and `--proxy-bypass-list=<-loopback>`, so loopback goes
+through it too). Its rules come from the host:
+
+`net.configure {deny_ports[{host, port}], services_ports[[lo, hi]], loopback_rewrite?, lan_allow[],
+egress_allow? []}` → `{}`
+
+Measured with the flags above and a logging proxy: page loads, subresources, `fetch`, WebSockets,
+service workers, DNS prefetch and preconnect all went through the proxy, and Chromium made no DNS
+lookup of its own for any page host. What left it without the proxy was WebRTC's STUN (closed by the
+switch above) and multicast DNS (gone with it), and connected-but-silent UDP sockets to public
+resolvers that Chromium opens to learn its own address, over which nothing is sent. Chromium's own
+services (sign-in, push messaging, updates) still ask the proxy for `accounts.google.com`,
+`android.clients.google.com`, `mtalk.google.com:5228` and `www.google.com`, which the wall may refuse.
+
+A refused top-level navigation is `1102 {host, reason}` for the agent's call, and `egress` for the
+host's log.
+
+## Measured
+
+On one machine (16 CPUs, load 7–13 from other work), Chromium for Testing 151, natively and in a
+container (Ubuntu 24.04 image, non-root, `seccomp=unconfined`); numbers are medians of 8–10 s runs.
+
+| | |
+|---|---|
+| Memory, one browser (the cgroup's figure) | empty 140 MB; 1 tab 200–220 MB; 4 tabs 295–340 MB; 8 tabs 445–560 MB (real sites: Wikipedia, GitHub, MDN, BBC, Stack Overflow, …) |
+| Memory, the headless shell instead | empty 74 MB; 1 tab 160 MB; 4 tabs 380 MB; 8 tabs 690 MB |
+| Start to the first reply on the pipe | 190–225 ms (container 135 ms); to a loaded local page 300–335 ms (container 210–230 ms); the same with a profile already on disk |
+| Live frame, 1280×800 at quality 60 | 20–25 KB (graphics), 55–100 KB (real pages scrolling), 300 KB (a screen of dense text) |
+| Live, paced to about 18 fps | 0.4–1.1 MB/s scrolling real pages; 5.3 MB/s worst case (dense text changing every frame); 0 when still |
+| Phone, 640×400 at quality 45 | 8–25 KB a frame; 0.1–0.3 MB/s scrolling, 1.2 MB/s worst case |
+| Thumbnail, 320×200 at quality 45 | 3.5–13 KB a frame |
+| Paint to the daemon (a clock on the page, decoded from the frame) | 15–50 ms paced (p95 18–46 ms, 142 ms once under load); 35–55 ms unpaced (p95 45–83 ms) |
+| CPU while watched | Chromium 0.15–0.3 CPU on real pages and 0.5–0.9 on animation, paced; the daemon's relay 0.02–0.05 CPU for typical frames, 0.2 at 9 MB/s |
+| Disk | full Chromium 389 MB against the shell's 262 MB; three more libraries (cups, cairo, pango) add 4 MB to the image |
+
+The latency a person sees adds the host's relay and the network: a frame is forwarded as it came,
+so on a LAN that is the round trip plus the frame's size over the link.

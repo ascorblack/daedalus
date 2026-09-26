@@ -15,13 +15,17 @@ import (
 )
 
 // The files of a run directory. The host is told only the directory; everything else it learns from
-// these.
+// these. The socket and the lock carry the daemon's name (SocketName, lockName), so a directory
+// handed to the wrong daemon is refused by the files it holds rather than silently shared.
 const (
-	EndpointFile = "endpoint"  // "unix:ptyd.sock" or "tcp:127.0.0.1:<port>", written last
-	TokenFile    = "token"     // 64 hex characters, 0600, new at every start
-	SocketFile   = "ptyd.sock" // 0600
-	LockFile     = "ptyd.lock"
+	EndpointFile = "endpoint" // "unix:<daemon>.sock" or "tcp:127.0.0.1:<port>", written last
+	TokenFile    = "token"    // 64 hex characters, 0600, new at every start
 )
+
+// SocketName is the socket file of the daemon called daemon ("ptyd", "browserd"), mode 0600.
+func SocketName(daemon string) string { return daemon + ".sock" }
+
+func lockName(daemon string) string { return daemon + ".lock" }
 
 // Endpoint is a listening socket with its run directory prepared.
 type Endpoint struct {
@@ -31,13 +35,28 @@ type Endpoint struct {
 	release  func()
 }
 
-// ErrHeld is returned when another daemon is serving the run directory.
-var ErrHeld = errors.New("another ptyd holds the run directory")
+// ErrHeld is what a HeldError matches: another daemon is serving the run directory.
+var ErrHeld = errors.New("another daemon holds the run directory")
 
-// Prepare claims runDir and listens. The order matters to a host that is watching the directory:
+// HeldError names the daemon and the directory, in the words the daemon exits with.
+type HeldError struct {
+	Daemon, Dir, Detail string
+}
+
+func (e *HeldError) Error() string {
+	msg := fmt.Sprintf("another %s holds the run directory %s", e.Daemon, e.Dir)
+	if e.Detail != "" {
+		msg += ": " + e.Detail
+	}
+	return msg
+}
+
+func (e *HeldError) Is(target error) bool { return target == ErrHeld }
+
+// Prepare claims runDir for the daemon called daemon and listens. The order matters to a host that is watching the directory:
 // the token is written before the endpoint, and the endpoint only once the socket accepts, so an
 // endpoint file that exists always leads to a daemon that is ready and a token that matches it.
-func Prepare(runDir, listen string) (*Endpoint, error) {
+func Prepare(runDir, listen, daemon string) (*Endpoint, error) {
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -48,9 +67,9 @@ func Prepare(runDir, listen string) (*Endpoint, error) {
 	if err := RestrictDir(runDir); err != nil {
 		return nil, err
 	}
-	unlock, err := lockDir(filepath.Join(runDir, LockFile))
+	unlock, err := lockDir(filepath.Join(runDir, lockName(daemon)))
 	if err != nil {
-		return nil, fmt.Errorf("%w %s: %v", ErrHeld, runDir, err)
+		return nil, &HeldError{Daemon: daemon, Dir: runDir, Detail: err.Error()}
 	}
 	ok := false
 	defer func() {
@@ -62,10 +81,10 @@ func Prepare(runDir, listen string) (*Endpoint, error) {
 	var ln net.Listener
 	var endpoint string
 	if listen == "unix" {
-		sock := filepath.Join(runDir, SocketFile)
+		sock := filepath.Join(runDir, SocketName(daemon))
 		if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
 			c.Close()
-			return nil, fmt.Errorf("%w %s", ErrHeld, runDir)
+			return nil, &HeldError{Daemon: daemon, Dir: runDir}
 		}
 		_ = os.Remove(filepath.Join(runDir, EndpointFile))
 		if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -84,7 +103,7 @@ func Prepare(runDir, listen string) (*Endpoint, error) {
 			ln.Close()
 			return nil, err
 		}
-		endpoint = "unix:" + SocketFile
+		endpoint = "unix:" + SocketName(daemon)
 	} else {
 		_ = os.Remove(filepath.Join(runDir, EndpointFile))
 		addr := strings.TrimPrefix(listen, "tcp:")
@@ -115,7 +134,7 @@ func Prepare(runDir, listen string) (*Endpoint, error) {
 		_ = os.Remove(filepath.Join(runDir, EndpointFile))
 		_ = os.Remove(filepath.Join(runDir, TokenFile))
 		if listen == "unix" {
-			_ = os.Remove(filepath.Join(runDir, SocketFile))
+			_ = os.Remove(filepath.Join(runDir, SocketName(daemon)))
 		}
 		unlock()
 	}

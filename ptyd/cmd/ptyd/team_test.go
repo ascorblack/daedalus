@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
 )
 
 // subcommand runs the test binary as `ptyd <args>` with a launch's environment.

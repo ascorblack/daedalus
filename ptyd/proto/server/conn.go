@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // handshakeTimeout is how long a new connection has to present the token.

@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // sandboxParams is `terminal.create {sandbox}`: the folders the program may write. Everything else

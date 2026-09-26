@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/hooks"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
 )
 
 // recorder stands in for the daemon's event log.

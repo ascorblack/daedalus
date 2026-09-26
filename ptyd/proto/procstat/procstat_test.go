@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/procstat/proctest"
+	"github.com/ascorblack/daedalus/ptyd/proto/procstat/proctest"
 )
 
 func TestTreeAndSampler(t *testing.T) {

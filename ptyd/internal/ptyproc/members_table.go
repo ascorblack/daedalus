@@ -6,7 +6,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
+	"github.com/ascorblack/daedalus/ptyd/proto/procstat"
 )
 
 // member is a process found to belong to a terminal, remembered with its start time so that a pid

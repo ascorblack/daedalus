@@ -18,17 +18,17 @@ import (
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/hooks"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/sidechan"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // TestMain lets the test binary stand in for `ptyd hook-post`: a launch's terminals are given this
@@ -92,7 +92,7 @@ func startSideWith(t *testing.T, box *sandbox.Prober) (*fixture, *rpc.Side) {
 	}
 	side := &rpc.Side{Exec: sidechan.NewExec(nil, os.Environ(), cfg.Home, log), FS: fsys,
 		Dialer: sidechan.NewDialer(launches), Launches: launches, Listen: hln.Addr().String(), StateDir: cfg.StateDir}
-	ep, err := server.Prepare(cfg.RunDir, "unix")
+	ep, err := server.Prepare(cfg.RunDir, "unix", "ptyd")
 	if err != nil {
 		t.Fatal(err)
 	}

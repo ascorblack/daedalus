@@ -11,6 +11,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	protowire "github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // Sink carries one client's browser frames to it: an attachment channel of the host's connection.
@@ -565,7 +566,7 @@ func (c *Client) snapshot(reason string) error {
 		if err != nil {
 			return err
 		}
-		if 13+len(vt) <= wire.MaxPayload {
+		if 13+len(vt) <= protowire.MaxPayload {
 			break
 		}
 		if lines == 0 {
