@@ -1764,7 +1764,8 @@ def run() -> int:
 def run_browser() -> int:
     """The agent's browser (``ONLY=browser``): the corner preview beside the chat, the Browser tab live
     with the agent's cursor, the operator driving, and the phone's sheet and takeover."""
-    from browser_stub import BrowserStub, render_scenes, wait_frames
+    from api_stub import terminal_load
+    from browser_stub import BrowserStub, browser_load, render_scenes, wait_frames
 
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1815,6 +1816,37 @@ def run_browser() -> int:
         print("wrote session-browser-giveback")
         page.locator(".bp-give button[type='submit']").click()
         page.wait_for_timeout(300)
+
+        # The recording: a keyframe per action, one of them replayed with its element framed.
+        page.locator(".panel .bp-toolbar button[aria-haspopup='menu']").last.click()
+        page.locator(".menu [role='menuitemcheckbox']").first.click()
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        added = bs.act("g1", "click", "add", name="Add to cart", element="the Add to cart button")
+        bs.act("g1", "click", "size", name="5 kg", element="the 5 kg size option")
+        page.wait_for_selector(f".panel .bp-log-row[data-action='{added['id']}'] .bp-log-frame", timeout=10000)
+        page.locator(f".panel .bp-log-row[data-action='{added['id']}']").click()
+        page.wait_for_selector(".panel .bp-replay .bp-replay-img", timeout=5000)
+        page.mouse.move(1300, 850)
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "session-browser-replay.png"))
+        print("wrote session-browser-replay")
+        page.locator(".panel .bp-replay-live").click()
+
+        # Settings → Browser: what runs, the profiles, the limits on the shared load bar.
+        bs.running = [{"env": "container", "id": "b1a2b3c4", "profile": f"project-{P1}", "started_at": ago(minutes=12), "rss_bytes": 318 << 20, "cpu_percent": 3.1, "tabs": 2,
+                       "memory_basis": "cgroup", "groups": [{"id": "g1", "owner": {"kind": "session", "id": S1, "label": "Bakery site"}, "url": "https://shop.example.com/", "title": "Rye flour"}]}]
+        bs.profiles = [
+            {"id": f"project-{P1}", "env": "container", "scope": "project", "project_id": P1, "session_id": None, "staff_id": None, "created_at": ago(days=6), "last_used_at": ago(minutes=2), "size_bytes": 21 << 20, "running": True},
+            {"id": f"project-{P2}", "env": "container", "scope": "project", "project_id": P2, "session_id": None, "staff_id": None, "created_at": ago(days=4), "last_used_at": ago(days=1), "size_bytes": 9 << 20, "running": False},
+        ]
+        page.route("**/api/workloads/load", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"terminals": terminal_load(), "browsers": browser_load(running=1), "together": None})))
+        page.goto(f"{BASE}/settings/browser?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".bs-running .bs-row", timeout=15000)
+        page.wait_for_selector(".bs-limits .loadbar.workloads", timeout=15000)
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "settings-browser.png"))
+        print("wrote settings-browser")
         desk.close()
 
         # The phone: a login the agent cannot do, so the button and the sheet are amber.

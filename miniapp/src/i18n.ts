@@ -3712,6 +3712,7 @@ Object.assign(DICT, {
   "browser.act.typedn": { en: "Typed {n} characters into “{what}”", ru: "Ввёл символов: {n}, в «{what}»" },
   "browser.act.press": { en: "Pressed {keys}", ru: "Нажал {keys}" },
   "browser.act.open": { en: "Opened {where}", ru: "Открыл {where}" },
+  "browser.act.close": { en: "The browser closed", ru: "Браузер закрылся" },
   "browser.act.back": { en: "Went back", ru: "Вернулся назад" },
   "browser.act.forward": { en: "Went forward", ru: "Перешёл вперёд" },
   "browser.act.reload": { en: "Reloaded the page", ru: "Обновил страницу" },

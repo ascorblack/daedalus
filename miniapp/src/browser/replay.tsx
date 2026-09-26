@@ -18,7 +18,10 @@ import { actionWords } from "./model";
 /** The keyframe of a row of the action log: the one its action left, when the recording has it. */
 export function frameOfRow(frames: BrowserFrame[], row: Pick<BrowserActionRow, "id" | "action_id">): number {
   const id = row.action_id || row.id;
-  return id ? frames.findIndex((f) => f.kind === "action" && f.action_id === id) : -1;
+  // The newest match: an action id belongs to one daemon's run, and a recording can outlive a run.
+  if (!id) return -1;
+  for (let i = frames.length - 1; i >= 0; i--) if (frames[i].kind === "action" && frames[i].action_id === id) return i;
+  return -1;
 }
 
 /** Where the logged box sits on a picture drawn at `rect`, for a page `viewportW` CSS pixels wide. */

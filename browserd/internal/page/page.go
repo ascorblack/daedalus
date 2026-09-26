@@ -6,7 +6,9 @@ package page
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -33,6 +35,10 @@ type Model struct {
 	lim      config.Limits
 	stateDir string
 
+	// run tells this daemon's actions from an earlier one's: a recording outlives the daemon, and its
+	// keyframes name the action they followed, so a restarted daemon counting from a1 again would
+	// have its new actions match the old keyframes.
+	run       string
 	mu        sync.Mutex
 	actions   int
 	downloads map[string]*Download
@@ -47,7 +53,9 @@ type Model struct {
 
 // New returns the page model.
 func New(m *browser.Manager, cfg *config.Config, log *slog.Logger) *Model {
-	return &Model{m: m, log: log, lim: cfg.Limits, stateDir: cfg.StateDir, downloads: map[string]*Download{},
+	raw := make([]byte, 3)
+	_, _ = rand.Read(raw)
+	return &Model{m: m, log: log, lim: cfg.Limits, run: hex.EncodeToString(raw), stateDir: cfg.StateDir, downloads: map[string]*Download{},
 		byGUID: map[string]*Download{}, uploads: map[string]*upload{}, asked: map[string]string{}}
 }
 

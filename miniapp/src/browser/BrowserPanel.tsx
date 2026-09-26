@@ -73,6 +73,9 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
   const [logOpen, setLogOpen] = useState(false);
   const recording = useRecording(group.id);
   const listed = useActions(group.id);
+  // The replay frames an action's element from its row: the listing's, or the live event's while the
+  // listing has not been read again since.
+  const rows = useMemo(() => mergeActions(listed, snap.recent.map(rowOfEvent)), [listed, snap.recent]);
   /** The keyframe on screen in place of the live picture, or null: live. */
   const [replay, setReplay] = useState<number | null>(null);
   const frames = recording.frames;
@@ -149,7 +152,7 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
       </BrowserViewer>
       {snap.dialog && <DialogChip group={group.id} tab={viewing?.id ?? null} dialog={snap.dialog} canAnswer={drive === "you"} toast={toast} />}
       {replaying && (
-        <ReplayStage group={group.id} viewportW={group.viewport.w} frames={frames} index={replay} rows={listed} agent={agent} onIndex={setReplay} onLive={() => setReplay(null)} />
+        <ReplayStage group={group.id} viewportW={group.viewport.w} frames={frames} index={replay} rows={rows} agent={agent} onIndex={setReplay} onLive={() => setReplay(null)} />
       )}
     </div>
   );
