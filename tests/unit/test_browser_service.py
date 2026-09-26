@@ -1,0 +1,268 @@
+"""The browser service against an in-process daemon: the mirror, the owners, reconcile, control and
+its one wake, the cap queue, the audit and the load."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import tempfile
+from collections.abc import AsyncIterator, Iterable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daedalus.browser.model import BrowserGone, EnvUnavailable, NotFound, OverCap, Owner, group_id, profile_id
+from daedalus.browser.service import Browsers
+from daedalus.config import BrowserConfig
+from daedalus.stores.database import Database
+from tests.support.fake_browserd import FakeBrowserd
+
+
+async def wait_until(check: Any, expected: Any, *, timeout: float = 30.0) -> None:
+    last = None
+    try:
+        async with asyncio.timeout(timeout):
+            while (last := await check()) != expected:
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        raise AssertionError(f"waited {timeout:.0f}s for {expected!r}; last saw {last!r}") from None
+
+
+class FakeOwners:
+    def __init__(self) -> None:
+        self.existing: dict[tuple[str, str], str] = {}
+
+    def add(self, owner: Owner, label: str = "") -> Owner:
+        self.existing[(owner.kind, owner.id)] = label or f"{owner.kind} {owner.id}"
+        return owner
+
+    async def exists(self, owner: Owner) -> bool:
+        return (owner.kind, owner.id) in self.existing
+
+    async def label(self, owner: Owner) -> str:
+        return self.existing.get((owner.kind, owner.id), owner.id)
+
+
+class FakeBus:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+    async def publish(self, event_type: str, payload: dict[str, Any], **ids: Any) -> None:
+        self.published.append((event_type, dict(payload), ids))
+
+    def of(self, event_type: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        return [(p, i) for t, p, i in self.published if t == event_type]
+
+
+@pytest.fixture
+def run_dir() -> Iterable[Path]:
+    # A unix socket path is limited to about a hundred bytes; pytest's temporary directories can pass it.
+    path = Path(tempfile.mkdtemp(prefix="bd-"))
+    yield path / "run"
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+async def daemon(run_dir: Path) -> AsyncIterator[FakeBrowserd]:
+    fake = await FakeBrowserd(run_dir).start()
+    yield fake
+    await fake.stop()
+
+
+@pytest.fixture
+def owners() -> FakeOwners:
+    return FakeOwners()
+
+
+@pytest.fixture
+def bus() -> FakeBus:
+    return FakeBus()
+
+
+@pytest.fixture
+def cfg() -> BrowserConfig:
+    return BrowserConfig(agent_wait_seconds=5, control_wait_seconds=0.2)
+
+
+@pytest.fixture
+def woken() -> list[tuple[Owner, str]]:
+    return []
+
+
+@pytest.fixture
+async def service(db: Database, run_dir: Path, owners: FakeOwners, bus: FakeBus, cfg: BrowserConfig, daemon: FakeBrowserd, woken: list[tuple[Owner, str]]) -> AsyncIterator[Browsers]:
+    async def wake(owner: Owner, text: str) -> None:
+        woken.append((owner, text))
+
+    made = Browsers(db, run_dirs={"container": run_dir, "host": None}, config=lambda: cfg, owners=owners, bus=bus, wake=wake)  # type: ignore[arg-type]
+    await made.start()
+    assert await made.wait_available("container")
+    yield made
+    await made.close()
+
+
+SESSION = Owner("session", "sess1", project_id="proj1", session_id="sess1")
+
+
+async def test_opening_mirrors_the_group_and_announces_it_once(service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION, "Research")
+    opened = await service.open(SESSION, url="https://example.test/", actor="agent:sess1")
+    group = opened["group"]
+    assert opened["created"] and group["id"] == "s-sess1" and group["profile"] == "project-proj1" and group["owner"]["label"] == "Research"
+    assert daemon.groups["s-sess1"].labels == {"owner_kind": "session", "owner_id": "sess1", "project_id": "proj1", "session_id": "sess1"}
+    # The same owner opening again gets the same group, and nobody is told twice.
+    again = await service.open(SESSION, actor="agent:sess1")
+    assert not again["created"] and again["group"]["id"] == group["id"]
+    announced = bus.of("browser.opened")
+    assert len(announced) == 1 and announced[0][1] == {"project_id": "proj1", "session_id": "sess1", "staff_id": None}
+    assert (await service.profiles())[0]["id"] == "project-proj1"
+    # A throwaway context is a second group with the reserved profile.
+    fresh = await service.open(SESSION, fresh=True, actor="agent:sess1")
+    assert fresh["group"]["id"] == "s-sess1-x" and fresh["group"]["profile"] == "ephemeral" and fresh["group"]["fresh"]
+    assert group_id(SESSION) == "s-sess1" and profile_id(Owner("staff", "m1")) == "staff-m1"
+
+
+async def test_an_unknown_owner_and_a_missing_environment_are_refused(service: Browsers, owners: FakeOwners, cfg: BrowserConfig) -> None:
+    with pytest.raises(NotFound):
+        await service.open(Owner("session", "ghost"), actor="agent:ghost")
+    owners.add(SESSION)
+    cfg.env = "host"
+    with pytest.raises(EnvUnavailable):
+        await service.open(SESSION, actor="agent:sess1")
+
+
+async def test_the_cap_makes_an_agent_wait_in_line_and_refuses_the_operator(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd, cfg: BrowserConfig) -> None:
+    daemon.max_browsers = 1
+    first, second = owners.add(Owner("session", "a1")), owners.add(Owner("session", "b2"))
+    await service.open(first, actor="agent:a1")
+    with pytest.raises(OverCap):
+        await service.open(second, actor="operator")
+    waiting = asyncio.create_task(service.open(second, actor="agent:b2"))
+    await wait_until(lambda: _async(len(service.queue())), 1)
+    await service.close_group("s-a1", actor="agent:a1")
+    opened = await asyncio.wait_for(waiting, 10)
+    assert opened["created"] and service.queue() == []
+    # Nobody closes a browser: the next one waits its whole wait and is told what to do.
+    cfg.agent_wait_seconds = 0.3
+    with pytest.raises(OverCap) as refused:
+        await service.open(first, actor="agent:a1")
+    assert "BrowserClose" in refused.value.message
+
+
+async def _async(value: Any) -> Any:
+    return value
+
+
+async def test_a_give_back_wakes_the_owner_exactly_once_with_the_note(service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd, woken: list[tuple[Owner, str]]) -> None:
+    owners.add(SESSION, "Research")
+    await service.open(SESSION, url="https://shop.test/", actor="agent:sess1")
+    await service.control("s-sess1", "human", client_id="v1")
+    await wait_until(lambda: _control(service), "human")
+    await service.control("s-sess1", "agent", note="I signed in; go on.")
+    await wait_until(lambda: _async(len(bus.of("browser.returned"))), 1)
+    await asyncio.sleep(0.1)
+    assert len(woken) == 1 and woken[0][0].session_id == "sess1"
+    assert "gave the browser back" in woken[0][1] and "I signed in; go on." in woken[0][1] and "shop.test" in woken[0][1]
+    assert bus.of("browser.returned")[0][0]["note"] == "I signed in; go on."
+    # The hold running out gives it back as well, and that too is told once.
+    daemon.set_control("s-sess1", "human", "v1")
+    await wait_until(lambda: _control(service), "human")
+    daemon.set_control("s-sess1", "agent")
+    await wait_until(lambda: _async(len(woken)), 2)
+    await asyncio.sleep(0.1)
+    assert len(woken) == 2 and "Their note" not in woken[1][1]
+    # Giving back what the agent already holds wakes nobody.
+    await service.control("s-sess1", "agent")
+    await asyncio.sleep(0.1)
+    assert len(woken) == 2
+    audit = [e["action"] for e in await service.audit_log("s-sess1")]
+    assert audit.count("take") == 1 and audit.count("give") == 2
+
+
+async def _control(service: Browsers) -> str:
+    return str((await service.get("s-sess1", live=False))["control"]["owner"])
+
+
+async def test_a_handoff_pauses_and_tells_the_operator(service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION, "Research")
+    await service.open(SESSION, url="https://github.test/login", actor="agent:sess1")
+    await service.handoff("s-sess1", "login", "sign in to github.test", actor="agent:sess1")
+    assert daemon.groups["s-sess1"].control["owner"] == "paused"
+    needs = bus.of("browser.needs_you")
+    assert needs and needs[0][0] == {"group_id": "s-sess1", "reason": "login", "what": "sign in to github.test", "url": "https://github.test/login", "title": "Research"}
+    # The daemon raises it on its own for a CAPTCHA, and the host retells it with the owner's ids.
+    daemon.needs_you("s-sess1", "captcha", "solve the CAPTCHA")
+    await wait_until(lambda: _async(len(bus.of("browser.needs_you"))), 2)
+    assert bus.of("browser.needs_you")[1][1]["session_id"] == "sess1"
+
+
+async def test_a_crash_closes_the_groups_and_the_next_call_says_how_to_go_on(service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION)
+    opened = await service.open(SESSION, actor="agent:sess1")
+    daemon.crash(opened["group"]["browser_id"])
+    await wait_until(lambda: _async(len(bus.of("browser.closed"))), 1)
+    assert bus.of("browser.closed")[0][0]["reason"] == "crashed"
+    with pytest.raises(BrowserGone) as gone:
+        await service.call("s-sess1", "tab.list", {"group_id": "s-sess1"}, what="listing")
+    assert "crashed" in gone.value.message and "BrowserOpen" in gone.value.message
+    reopened = await service.open(SESSION, actor="agent:sess1")
+    assert reopened["created"] and (await service.get("s-sess1", live=False))["status"] == "open"
+
+
+async def test_reconcile_after_a_daemon_restart_and_an_adoption_by_labels(db: Database, service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION)
+    staff = owners.add(Owner("staff", "m7", project_id="proj1", staff_id="m7"))
+    await service.open(SESSION, actor="agent:sess1")
+    await daemon.restart()
+    await wait_until(lambda: _status(db, "s-sess1"), "lost")
+    assert any(p["reason"] == "lost" for p, _ in bus.of("browser.closed"))
+    # A group this host has no row for is adopted from its labels; one whose owner is gone is closed.
+    daemon._open({"group_id": "m-m7", "profile": "project-proj1", "labels": staff.labels()})
+    daemon._open({"group_id": "s-gone", "profile": "session-gone", "labels": Owner("session", "gone").labels()})
+    link = service.links["container"]
+    await service._reconcile(link)
+    assert await _status(db, "m-m7") == "open"
+    assert "s-gone" not in daemon.groups
+
+
+async def _status(db: Database, group: str) -> str | None:
+    row = await db.fetchone("SELECT status FROM browser_groups WHERE id = ?", (group,))
+    return str(row["status"]) if row is not None else None
+
+
+async def test_the_audit_never_holds_what_anyone_typed_and_closing_the_owner_closes_its_browser(service: Browsers, owners: FakeOwners) -> None:
+    owners.add(SESSION)
+    await service.open(SESSION, actor="agent:sess1")
+    await service.audit("s-sess1", "container", "agent:sess1", "act", {"text_len": 16, "text_sha256": "ab" * 32})
+    assert "hunter2" not in json.dumps(await service.audit_log("s-sess1"))
+    assert await service.close_owned("session", "sess1") == 1
+    assert (await service.get("s-sess1", live=False))["close_reason"] == "owner_gone"
+
+
+async def test_the_load_counts_browsers_under_their_own_profile(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION)
+    await service.open(SESSION, actor="agent:sess1")
+    load = await service.load(cap=2)
+    assert load["running"] == 1 and load["used"]["rss_bytes"] == (250 << 20) + (20 << 20)
+    assert load["projection"]["cap"] == 2 and load["likely"]["basis"] in ("default", "running", "measured")
+    daemon.emit("browser.stats", {"supported": True, "browsers": [{"id": "b1", "rss_bytes": 300 << 20, "cpu_percent": 4.0}]})
+    await wait_until(lambda: _async(bool(service.costs.profiles())), True)
+    assert "browser" in service.costs.profiles()
+
+
+async def test_a_group_the_daemon_forgot_reads_as_closed_idle_and_a_missing_thing_in_it_does_not(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION)
+    opened = await service.open(SESSION, actor="agent:sess1")
+    tab = opened["tab"]["id"]
+    # Nothing is open to answer: the group stays open.
+    with pytest.raises(NotFound):
+        await service.call("s-sess1", "dialog.answer", {"tab_id": tab, "accept": True}, what="answering the dialog")
+    assert (await service.get("s-sess1", live=False))["status"] == "open"
+    # The daemon closed it without a word reaching this host (its idle close while the host was away).
+    del daemon.groups["s-sess1"]
+    with pytest.raises(BrowserGone) as gone:
+        await service.call("s-sess1", "tab.list", {"group_id": "s-sess1"}, what="listing")
+    assert "ten minutes" in gone.value.message
+    assert (await service.get("s-sess1", live=False))["close_reason"] == "idle"

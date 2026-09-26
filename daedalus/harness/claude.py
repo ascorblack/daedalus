@@ -274,7 +274,10 @@ class ClaudeCodeAdapter:
             # A question to the operator is answered through this held hook's reply; every other
             # tool's PreToolUse goes by the entry above and is never held.
             hooks["PreToolUse"].append({"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": f'"$DAEDALUS_PTYD_BIN" hook PreToolUse --wait-ms {permission_hold}', "timeout": permission_hold // 1000 + HOLD_SLACK_S}]})
-        settings: dict[str, Any] = {"hooks": hooks, "permissions": {"allow": list(TEAM_TOOLS)}}
+        # The team's tools and the tools of each set that only read are Claude's to run unasked; the
+        # others ask by the member's mode, and what the host judges sensitive is asked again there.
+        allow = [*TEAM_TOOLS, *(f"mcp__{tools.server}__{name}" for tools in spec.tool_sets for name in tools.read_only)]
+        settings: dict[str, Any] = {"hooks": hooks, "permissions": {"allow": allow}}
         if mode == "bypassPermissions":
             # The overlay's switch is honoured (measured): the warning would otherwise stop the launch.
             settings["skipDangerousModePermissionPrompt"] = True
@@ -289,7 +292,10 @@ class ClaudeCodeAdapter:
                 }
             }
         }
+        for tools in spec.tool_sets:
+            mcp["mcpServers"][tools.server] = {"command": "sh", "args": ["-c", tools.command()], "env": {"DAEDALUS_TOOLS_HOLD_MS": str(tools.hold_ms)}}
         files: dict[str, bytes] = {"settings.json": json.dumps(settings, indent=1).encode(), "mcp.json": json.dumps(mcp, indent=1).encode()}
+        files.update({tools.path: tools.file for tools in spec.tool_sets})
         argv: list[str] = ["claude", "--resume" if resume else "--session-id", session, "--settings", f"{LAUNCH_DIR}/settings.json"]
         if spec.team_block:
             files["system.md"] = spec.team_block.encode()
@@ -311,7 +317,7 @@ class ClaudeCodeAdapter:
         prompt = spec.first_prompt
         if prompt:
             argv += ["--", prompt]
-        env = {"MCP_TOOL_TIMEOUT": str(max(spec.ask_hold_ms, spec.report_hold_ms) + MCP_TIMEOUT_SLACK_MS)}
+        env = {"MCP_TOOL_TIMEOUT": str(max(spec.ask_hold_ms, spec.report_hold_ms, *(t.hold_ms for t in spec.tool_sets)) + MCP_TIMEOUT_SLACK_MS)}
         return LaunchPlan(
             argv=tuple(argv),
             env=env,

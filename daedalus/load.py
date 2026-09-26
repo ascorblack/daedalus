@@ -1,11 +1,12 @@
-"""What terminals cost the machine, and what the cap would cost if it were filled.
+"""What the machine's workloads cost it — terminals and browsers — and what a cap would cost if filled.
 
-The daemons measure every running terminal's process tree every ten seconds (resident memory, CPU).
-Nothing of that is stored per terminal: the host keeps, per *profile* — ``shell``, or the CLI a
-harness runs — the average cost of one terminal of that kind over its recent samples, because that
-is the number the question "what would twenty of them cost" needs, and it outlives the terminals it
-was measured on. The projection is arithmetic on it and is kept apart from the tracking, so it can be
-tested with numbers rather than processes.
+The daemons measure every running terminal's and every browser's process tree every ten seconds
+(memory, CPU). Nothing of that is stored per terminal or per browser: the host keeps, per *profile* —
+``shell``, the CLI a harness runs, or ``browser`` — the average cost of one of that kind over its
+recent samples, because that is the number the question "what would twenty of them cost" needs, and
+it outlives what it was measured on. The projection is arithmetic on it and is kept apart from the
+tracking, so it can be tested with numbers rather than processes. It lives outside both packages
+because both use it and neither owns it.
 """
 
 from __future__ import annotations

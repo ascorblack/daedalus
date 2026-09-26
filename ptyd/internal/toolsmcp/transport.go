@@ -1,4 +1,4 @@
-package teammcp
+package toolsmcp
 
 import (
 	"bytes"
@@ -33,15 +33,16 @@ type route interface {
 	call(ctx context.Context, req request, hold time.Duration) (text string, isErr bool)
 	// hello tells the host the CLI has started this server and read its tools: the proof that the
 	// team channel is up, before any call is made on it.
-	hello(ctx context.Context, fields map[string]any)
+	hello(ctx context.Context, source string, fields map[string]any)
 }
 
-// routeFrom picks the route from the launch's environment. The host's team route is used when the
-// launch names one (DAEDALUS_TEAM_URL): it reaches the host directly, which only works where the CLI
-// can reach the host's port. Otherwise the calls go to this daemon's hook listener, which every
-// launch can reach, and the host answers them as it answers a held hook.
-func routeFrom(env func(string) string) (route, error) {
-	if base := env("DAEDALUS_TEAM_URL"); base != "" {
+// routeFrom picks the route from the launch's environment. The host's team route is used for the
+// team's tools when the launch names one (DAEDALUS_TEAM_URL): it reaches the host directly, which only
+// works where the CLI can reach the host's port. Otherwise, and for every other set, the calls go to
+// this daemon's hook listener, which every launch can reach, and the host answers them as it answers
+// a held hook.
+func routeFrom(env func(string) string, team bool) (route, error) {
+	if base := env("DAEDALUS_TEAM_URL"); base != "" && team {
 		token := env("DAEDALUS_TEAM_TOKEN")
 		if token == "" {
 			return nil, errors.New("DAEDALUS_TEAM_URL is set without DAEDALUS_TEAM_TOKEN")
@@ -59,13 +60,14 @@ func routeFrom(env func(string) string) (route, error) {
 	return ingress{url: hookURL, token: token}, nil
 }
 
-// body is what either route is posted: the fields, and for the listener the operation's name.
+// body is what either route is posted: the fields, and for the team's listener posts the
+// operation's name.
 func body(req request, withTool bool) ([]byte, error) {
 	m := make(map[string]any, len(req.fields)+1)
 	for k, v := range req.fields {
 		m[k] = v
 	}
-	if withTool {
+	if withTool && req.withTool {
 		m["tool"] = req.op
 	}
 	b, err := json.Marshal(m)
@@ -78,7 +80,8 @@ func body(req request, withTool bool) ([]byte, error) {
 	return b, nil
 }
 
-// ingress posts to the launch's hook listener as `team`, held for the host's reply.
+// ingress posts to the launch's hook listener under the set's name (`team`, `tools`), held for the
+// host's reply.
 type ingress struct{ url, token string }
 
 func (r ingress) call(ctx context.Context, req request, hold time.Duration) (string, bool) {
@@ -86,14 +89,14 @@ func (r ingress) call(ctx context.Context, req request, hold time.Duration) (str
 	if err != nil {
 		return err.Error(), true
 	}
-	status, reply, err := hooks.Post(ctx, r.url, r.token, ingressSource, b, hold)
+	status, reply, err := hooks.Post(ctx, r.url, r.token, req.source, b, hold)
 	if err != nil {
 		return "the team could not be reached: " + plain(err), true
 	}
 	return outcome(req, status, reply)
 }
 
-func (r ingress) hello(ctx context.Context, fields map[string]any) {
+func (r ingress) hello(ctx context.Context, source string, fields map[string]any) {
 	fields["tool"] = "hello"
 	b, err := json.Marshal(fields)
 	if err != nil {
@@ -101,7 +104,7 @@ func (r ingress) hello(ctx context.Context, fields map[string]any) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, helloTimeout)
 	defer cancel()
-	_, _, _ = hooks.Post(ctx, r.url, r.token, ingressSource, b, 0)
+	_, _, _ = hooks.Post(ctx, r.url, r.token, source, b, 0)
 }
 
 // direct posts to the host's team route, `<base>/report` or `<base>/ask`.
@@ -136,7 +139,7 @@ func (r direct) call(ctx context.Context, req request, _ time.Duration) (string,
 
 // hello has nowhere to go on the host's own route, which has no such endpoint; the host learns of the
 // tools from the first call.
-func (r direct) hello(context.Context, map[string]any) {}
+func (r direct) hello(context.Context, string, map[string]any) {}
 
 // outcome turns the host's HTTP answer into the tool's result.
 func outcome(req request, status int, reply []byte) (string, bool) {
@@ -144,7 +147,7 @@ func outcome(req request, status int, reply []byte) (string, bool) {
 	switch {
 	case status >= 200 && status < 300:
 		if text == "" {
-			return req.fallback, false
+			return req.fallback, req.fallbackErr
 		}
 		return text, isErr
 	case status == http.StatusUnauthorized || status == http.StatusGone:

@@ -1,5 +1,5 @@
 // The load bar's arithmetic, checked against figures the host's own projection gives for the same
-// machine (daedalus/terminals/load.py, `project`): the page computes it while the cap is typed, and
+// machine (daedalus/load.py, `project`): the page computes it while the cap is typed, and
 // the two must never tell the operator different things.
 
 import { describe, expect, it } from "vitest";

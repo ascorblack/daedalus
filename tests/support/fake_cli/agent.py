@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 from typing import Any
@@ -257,6 +258,13 @@ class FakeAgent:
             tool_id = "toolu_" + new_id().replace("-", "")[:24]
             result = await self.team_tool(name, arguments, tool_id)
             await self.assistant(f"{name}: {result}")
+        elif kind == "mcp":
+            server, _, rest = arg.partition(":")
+            name, _, raw = rest.partition(":")
+            tool_id = "toolu_" + new_id().replace("-", "")[:24]
+            result = await self.mcp_tool(server, name, json.loads(raw or "{}"), tool_id)
+            self.log("mcp_result", server=server, tool=name, result=result)
+            await self.assistant(f"{name}: {result}")
 
     async def tool(self, name: str, tool_input: dict[str, Any], tool_id: str, *, output: str, duration: float = 0.2) -> None:
         self.tui.say(f"● {name}({summary_of(tool_input)})")
@@ -296,6 +304,10 @@ class FakeAgent:
     async def on_turn_cancelled(self) -> None: ...
 
     async def on_session_end(self) -> None: ...
+
+    async def mcp_tool(self, server: str, name: str, arguments: dict[str, Any], tool_id: str) -> str:
+        """Any MCP server's tool; a CLI that starts none has none."""
+        return f"error: no MCP server {server}"
 
     async def team_tool(self, name: str, arguments: dict[str, Any], tool_id: str) -> str:
         return "error: this CLI has no team tools"

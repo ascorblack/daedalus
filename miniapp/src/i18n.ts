@@ -2458,6 +2458,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "files.origin.orchestrator": { en: "from the orchestrator", ru: "от оркестратора" },
   "files.origin.folder": { en: "from a project folder", ru: "из папки проекта" },
   "files.origin.dispatcher": { en: "from the main orchestrator", ru: "от главного оркестратора" },
+  "files.origin.browser": { en: "from the agent's browser", ru: "из браузера агента" },
   "turn.artifact.open": { en: "Open in the panel", ru: "Открыть в панели" },
   "turn.link": { en: "Copy a link to this turn", ru: "Скопировать ссылку на этот ход" },
   "turn.link.copied": { en: "link copied", ru: "ссылка скопирована" },

@@ -1,4 +1,4 @@
-package teammcp
+package toolsmcp
 
 import (
 	"bytes"
@@ -101,12 +101,62 @@ func (e errInvalid) Error() string { return e.msg }
 
 // request is one call to the host: the operation and its fields, in the shape both routes take.
 type request struct {
-	op       string // "report" or "ask"
-	fields   map[string]any
-	fallback string // the result when the host stays silent
+	op          string // "report" or "ask" for the team; the tool's name for a file's set
+	fields      map[string]any
+	fallback    string // the result when the host stays silent
+	fallbackErr bool   // whether that result is an error
+	hold        time.Duration
+	source      string // the name the post carries at the hook listener
+	withTool    bool   // the listener's body names the operation as "tool" (the team's wire)
 }
 
-// decode checks a call's arguments and turns them into the request the host is sent. Optional
+// toolset is what one server offers: its name, its tools, how a call is checked and posted.
+type toolset interface {
+	name() string
+	instructions() string
+	list() []tool
+	decode(name string, raw json.RawMessage) (request, error)
+	source() string
+	hello() map[string]any
+	unreachable() string
+}
+
+// teamSet is the team's two tools, compiled in.
+type teamSet struct{ askHold, reportHold time.Duration }
+
+func newTeamSet(askHold, reportHold time.Duration) teamSet {
+	return teamSet{askHold: askHold, reportHold: reportHold}
+}
+
+func (teamSet) name() string { return ServerName }
+
+func (teamSet) instructions() string {
+	return "Report tells your project's orchestrator how your task stands; AskOrchestrator asks it " +
+		"something you cannot decide yourself."
+}
+
+func (t teamSet) list() []tool { return toolList(t.askHold) }
+
+func (teamSet) source() string { return ingressSource }
+
+func (teamSet) hello() map[string]any { return nil }
+
+func (teamSet) unreachable() string { return "the team is not available" }
+
+func (t teamSet) decode(name string, raw json.RawMessage) (request, error) {
+	req, err := decode(name, raw)
+	if err != nil {
+		return req, err
+	}
+	req.source, req.withTool = ingressSource, true
+	req.hold = t.reportHold
+	if req.op == "ask" {
+		req.hold = t.askHold
+	}
+	return req, nil
+}
+
+// decode checks a team call's arguments and turns them into the request the host is sent. Optional
 // strings are left out when empty and lists are always present, so the host reads one shape.
 func decode(name string, raw json.RawMessage) (request, error) {
 	switch name {

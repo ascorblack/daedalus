@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daedalus.terminals import load as load_math
+from daedalus import load as load_math
 from daedalus.terminals import wire
 from daedalus.terminals.client import Channel, PtydClient, Unavailable
 from daedalus.terminals.endpoint import remember_hook_port, remember_state_dir

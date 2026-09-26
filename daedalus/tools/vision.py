@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+from typing import Any
 
 from protocore.contracts.llm import LLMRequest
 from protocore.contracts.tools import ToolContext
@@ -38,26 +39,43 @@ async def image_view(context: ToolContext, path: str, task: str, detail: str = "
     size = target.stat().st_size
     if size > MAX_IMAGE_BYTES:
         return error(context, f"image is {size} bytes; downscale it first (limit {MAX_IMAGE_BYTES})")
-    vision = services.extra.get("vision")
+    try:
+        text, model = await look(services.extra.get("vision"), services.extra.get("manager"), target.read_bytes(), mime, task, detail=detail)
+    except VisionUnavailable as exc:
+        return error(context, str(exc))
+    return ok(context, text, model=model, image=str(target))
+
+
+class VisionUnavailable(Exception):
+    """No vision model can look now; the message says what to change."""
+
+
+async def look(vision: Any, manager: Any, data: bytes, mime: str, task: str, *, detail: str = "focused", instruction: str = "") -> tuple[str, str]:
+    """Ask the configured vision model about an image; returns its answer and the model's name.
+
+    The one path pixels take to a model: the image goes to a separate vision model and only its
+    words come back, so no agent's own context ever carries an image. ``ImageView`` and the browser's
+    ``BrowserLook`` both come through here. ``instruction`` replaces the opening words of the request
+    for a caller that must say more about what it shows (a web page is not to be obeyed).
+    """
     if not vision:
-        return error(context, "no vision model is configured (set OPENROUTER_API_KEY or [vision] in the config)")
+        raise VisionUnavailable("no vision model is configured (set OPENROUTER_API_KEY or [vision] in the config)")
     provider, model, blobs, tenant = vision
-    manager = services.extra.get("manager")
     max_out = int(getattr(getattr(getattr(manager, "config", None), "vision", None), "max_output_tokens", 2000))
     accepts = getattr(provider, "accepts_images", None)
     if accepts is None or not accepts(model):
-        return error(context, "the vision preset is not marked as image-capable; enable 'images' on it in Settings → Models")
-    meta = await blobs.put(tenant, target.read_bytes(), content_type=mime)
-    instruction = (
+        raise VisionUnavailable("the vision preset is not marked as image-capable; enable 'images' on it in Settings → Models")
+    meta = await blobs.put(tenant, data, content_type=mime)
+    text = instruction or (
         "You are the eyes of another AI agent. Look at the image and answer its request precisely. "
         "Quote text verbatim when asked to read; give numbers when asked about data; say clearly "
         "when something is not visible. "
     )
-    instruction += "Be exhaustive and structured." if detail == "full" else "Be concise and specific."
+    text += "Be exhaustive and structured." if detail == "full" else "Be concise and specific."
     request = LLMRequest(
         model=model,
         messages=[
-            Message(role=MessageRole.system, content_blocks=[TextBlock(text=instruction)]),
+            Message(role=MessageRole.system, content_blocks=[TextBlock(text=text)]),
             Message(
                 role=MessageRole.user,
                 content_blocks=[TextBlock(text=f"Request: {task}")],
@@ -70,11 +88,11 @@ async def image_view(context: ToolContext, path: str, task: str, detail: str = "
     try:
         response = await provider.complete_text(request)
     except Exception as exc:  # noqa: BLE001
-        return error(context, f"vision model failed: {exc}")
-    text = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
-    return ok(context, text or "(the vision model returned nothing)", model=model, image=str(target))
+        raise VisionUnavailable(f"vision model failed: {exc}") from exc
+    answer = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
+    return answer or "(the vision model returned nothing)", str(model)
 
 
 TOOLS = [image_view]
 
-__all__ = ["TOOLS"]
+__all__ = ["TOOLS", "VisionUnavailable", "look"]

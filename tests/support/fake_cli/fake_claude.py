@@ -542,8 +542,11 @@ class FakeClaude(FakeAgent):
         return answer
 
     async def team_tool(self, name: str, arguments: dict[str, Any], tool_id: str) -> str:
-        client = self.mcp.get("daedalus_team")
-        full = f"mcp__daedalus_team__{name}"
+        return await self.mcp_tool("daedalus_team", name, arguments, tool_id)
+
+    async def mcp_tool(self, server: str, name: str, arguments: dict[str, Any], tool_id: str) -> str:
+        client = self.mcp.get(server)
+        full = f"mcp__{server}__{name}"
         if client is None or name not in client.tools:
             return f"error: no tool {full}"
         decision = await self.permission(full, arguments, name, tool_id)

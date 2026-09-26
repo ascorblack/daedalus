@@ -2,7 +2,7 @@
 // behind the load bar, computed here from one `GET /api/terminals/load` so the bar follows the cap as
 // the operator types instead of asking the host on every keystroke.
 //
-// The arithmetic is the host's own (daedalus/terminals/load.py, `project`), repeated on purpose and
+// The arithmetic is the host's own (daedalus/load.py, `project`), repeated on purpose and
 // tested against the same figures: memory is judged for the whole machine, because a machine runs out
 // of memory for everyone and not for terminals alone.
 

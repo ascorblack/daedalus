@@ -70,7 +70,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _terminals, _components, _keyproxy, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _terminals, _browser, _components, _keyproxy, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -621,6 +621,51 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         # A terminal's socket is refused unless it comes from the app's own origin, and Telegram's
         # webview connects from the Mini App's address, which nothing but this setting names.
         out.append(Check("terminals in Telegram", False, "MINIAPP_PUBLIC_URL is empty, so a terminal opened inside Telegram is refused", "warn", "set MINIAPP_PUBLIC_URL to the address the bot's menu button opens"))
+    return out
+
+
+async def _browser(ctx: DoctorContext) -> list[Check]:
+    """Each configured browser environment: whether its daemon answers, which Chromium it runs, and
+    whether Chromium's sandbox works there. And the wall each variant has, said plainly: in compose the
+    browser's own network is a second wall behind its proxy; natively the proxy is the only one."""
+    run_dirs = {"container": ctx.settings.browser_container_dir, "host": ctx.settings.browser_host_dir}
+    if not any(run_dirs.values()):
+        return []
+    service = ctx.extensions.get("browser")
+    out = []
+    for env, run_dir in run_dirs.items():
+        if run_dir is None:
+            continue
+        name = f"browser ({env})"
+        if service is not None:
+            status = next(e for e in service.environments() if e["env"] == env)
+            available, reason, detail, info = status["available"], status["reason"], status["detail"], service.links[env].info
+        else:
+            client = PtydClient(env, run_dir, label="browser service", lock="browserd.lock")
+            try:
+                await client.connect()
+                info = await client.call("daemon.info", timeout=_timeout(ctx))
+                available, reason, detail = True, "", ""
+            except Unavailable as exc:
+                available, reason, detail, info = False, exc.reason, exc.detail, {}
+            except RpcError as exc:
+                available, reason, detail, info = False, "unreachable", exc.message, {}
+            finally:
+                await client.close()
+        if not available:
+            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
+            out.append(Check(name, False, f"{label}: {detail}", "warn", "the agent's browser tools refuse until it answers"))
+            continue
+        chromium = info.get("chromium") or {}
+        counts = info.get("counts") or {}
+        if chromium.get("kind") in (None, "", "none"):
+            out.append(Check(name, False, f"browserd {info.get('version')} runs, but has no Chromium: {chromium.get('error') or 'none found'}", "warn", "daedalus-desktop install browser natively, or the image's browser tag in compose"))
+            continue
+        wall = "its own network and its proxy" if env == "container" else "its proxy only (no container around it)"
+        out.append(Check(name, True, f"browserd {info.get('version')}, Chromium {chromium.get('version')} ({chromium.get('kind')}), {counts.get('browsers', 0)} running; walls: {wall}", "ok"))
+        sandbox = str((info.get("capabilities") or {}).get("sandbox") or "")
+        if sandbox not in ("ok", "unknown", ""):
+            out.append(Check(f"browser sandbox ({env})", False, f"Chromium's sandbox: {sandbox}", "warn", "see docs/architecture/browser.md, Which Chromium"))
     return out
 
 

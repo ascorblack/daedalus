@@ -188,6 +188,52 @@ class TerminalProgress(TypedDict):
     percent: NotRequired[int]
 
 
+class BrowserOpened(TypedDict):
+    """An agent's browser group opened (or came back after its browser had closed): the app's cue to
+    offer the Browser tab and the corner preview for its owner."""
+
+    group_id: str
+    env: str
+    profile: str
+    owner_kind: str
+    """session · staff"""
+    owner_id: str
+    url: str
+    fresh: bool
+    """A throwaway context whose cookies go with it."""
+
+
+class BrowserNeedsYou(TypedDict):
+    """The agent handed the browser to the operator, or the page asked for what only a person gives: a
+    password, a one-time code, a CAPTCHA, an HTTP sign-in."""
+
+    group_id: str
+    reason: str
+    """login · captcha · two_factor · payment · confirm · other · field_forbidden · basic_auth"""
+    what: str
+    url: str
+    title: str
+    """Who asks, as a person reads it: the session's title or the staff member's name."""
+
+
+class BrowserReturned(TypedDict):
+    """The operator gave the browser back; the owner is woken with where it now is."""
+
+    group_id: str
+    url: str
+    title: str
+    tabs: int
+    by: str
+    note: NotRequired[str]
+
+
+class BrowserClosed(TypedDict):
+    group_id: str
+    reason: str
+    """closed · idle · crashed · memory · shutdown · lost · owner_gone"""
+    by: str
+
+
 class StaffStatus(TypedDict):
     status: Literal["starting", "working", "turn_done_unseen", "idle", "question", "permission", "error", "exited", "no_signal"]
     previous: str | None
@@ -425,6 +471,10 @@ REGISTRY: dict[str, EventSpec] = {
     "terminal.notify": EventSpec(TerminalNotify),
     # Progress changes many times a second while a bar moves; only the latest value is worth anything.
     "terminal.progress": EventSpec(TerminalProgress, persist=False),
+    "browser.opened": EventSpec(BrowserOpened),
+    "browser.needs_you": EventSpec(BrowserNeedsYou),
+    "browser.returned": EventSpec(BrowserReturned),
+    "browser.closed": EventSpec(BrowserClosed),
     "staff.status": EventSpec(StaffStatus),
     "staff.report": EventSpec(StaffReport),
     "staff.message": EventSpec(StaffMessage),

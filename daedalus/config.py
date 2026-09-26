@@ -265,6 +265,13 @@ class Settings(BaseSettings):
     terminals_port_range: str = "8120-8139"
     """Ports a server started in a container terminal is published on; the compose file publishes the
     same range from the terminals service. The agent's own services use ``services_port_range``."""
+    browser_container_dir: Path | None = None
+    """The run directory of the browser daemon of the ``container`` environment (a volume this
+    container shares with the browser service): its endpoint, its token and its socket. Unset = no
+    browser on this installation's compose side."""
+    browser_host_dir: Path | None = None
+    """The same for the ``host`` environment: natively, the directory the launcher gives the browser
+    daemon it runs beside the terminal daemon. An empty directory reads as "not installed"."""
 
     usd_per_day: float = 20.0
     """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
@@ -362,9 +369,11 @@ class Settings(BaseSettings):
         The terminal daemons' run directories. Their token opens a shell — on the host environment,
         a shell on the operator's own machine, outside every wall the agent's container is — so
         unlike the rest of the sealed set, a container is no boundary for it: the directory is
-        mounted into this container precisely so the app can reach the daemon.
+        mounted into this container precisely so the app can reach the daemon. The browser daemons'
+        are the same kind of door: their token drives a browser holding the operator's logins, past
+        the policy that every agent's browser call is judged by.
         """
-        return tuple(p for p in (self.terminals_container_dir, self.terminals_host_dir) if p is not None)
+        return tuple(p for p in (self.terminals_container_dir, self.terminals_host_dir, self.browser_container_dir, self.browser_host_dir) if p is not None)
 
     @property
     def skills_dir(self) -> Path:
@@ -1411,6 +1420,40 @@ class TerminalsConfig(BaseModel):
     model — a password prompt's surroundings, another project's secrets."""
 
 
+class BrowserRuleConfig(BaseModel):
+    """An operator's rule about sensitive browser actions on one site: ``allow`` lets the kinds named
+    through without asking, ``deny`` refuses them, ``ask`` asks where nothing else would."""
+
+    domain: str = Field(min_length=1, max_length=253)
+    """A host (``shop.example.com``) or every host under one (``*.example.com``)."""
+    kinds: list[Literal["credentials", "purchase", "send", "destroy", "accept", "upload", "cross_origin_post"]] = Field(default_factory=list)
+    """Empty = every kind."""
+    action: Literal["allow", "ask", "deny"] = "deny"
+    note: str = ""
+
+
+class BrowserConfig(BaseModel):
+    """The agent's browser: Chromium run by a browser daemon per environment."""
+
+    env: Literal["auto", "container", "host"] = "auto"
+    """Where an agent's browser runs: ``auto`` is the container's browser service where there is one
+    and the operator's machine otherwise (a native installation)."""
+    running_cap: int = Field(default=2, ge=1, le=32)
+    """Browsers that may run at once in one environment: the daemon's own limit, which the load bar
+    projects against. Changing it here does not change the daemon's; its configuration does."""
+    agent_wait_seconds: float = Field(default=60.0, ge=0, le=600)
+    """How long an agent's BrowserOpen waits in line when every browser is busy before it gives up."""
+    control_wait_seconds: float = Field(default=20.0, ge=0, le=60)
+    """How long an agent's call waits for a person who holds the browser to give it back."""
+    ticket_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    audit_retention_days: int = Field(default=90, ge=1)
+    closed_retention_hours: int = Field(default=72, ge=1)
+    """How long a closed group's row stays listed."""
+    rules: list[BrowserRuleConfig] = Field(default_factory=list)
+    """The operator's rules about sensitive actions by site. A rule never allows ``credentials``:
+    typing into a sign-in is the operator's, however the site is trusted."""
+
+
 class HeartbeatConfig(BaseModel):
     """A periodic unattended check driven by the HEARTBEAT.md file on the state volume."""
 
@@ -1540,6 +1583,7 @@ class RuntimeConfig(BaseModel):
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

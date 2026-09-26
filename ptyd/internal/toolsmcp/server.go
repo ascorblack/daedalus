@@ -1,13 +1,13 @@
-// Package teammcp is `ptyd team-mcp`: a Model Context Protocol server on stdio that gives a
-// command-line staff member the two team tools, Report and AskOrchestrator, under the names a
-// Daedalus staff member has them.
+// Package toolsmcp is `ptyd tools-mcp`: a Model Context Protocol server on stdio that gives a
+// command-line staff member one set of Daedalus's tools — the team's own (`team`, also started as
+// `ptyd team-mcp`), or a set the host describes in a launch file, such as the browser's.
 //
 // The CLI starts it from its per-launch MCP configuration, so it inherits the launch's environment
 // and speaks for that launch alone. It lives in ptyd because ptyd is the one program present in
 // every environment a CLI runs in: the operator's machine has no Daedalus Python. It knows nothing
-// about staff, projects or orchestrators — it checks the arguments, posts them, and hands back what
-// the host answered.
-package teammcp
+// about staff, projects, browsers or orchestrators — it checks the arguments, posts them, and hands
+// back what the host answered.
+package toolsmcp
 
 import (
 	"bufio"
@@ -28,9 +28,12 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
 )
 
-// ServerName is the name the server gives itself; the tools appear to Claude Code as
+// ServerName is the name the team set's server gives itself; the tools appear to Claude Code as
 // `mcp__daedalus_team__Report`, because the launch's configuration names the server the same.
 const ServerName = "daedalus_team"
+
+// TeamSet is the team's own tools, compiled in: their wire is the one `ptyd team-mcp` always spoke.
+const TeamSet = "team"
 
 // knownVersions are the protocol revisions this server answers in, newest first. The tools use
 // nothing any revision changed, so a client's own is echoed whenever it is one of these; an unknown
@@ -61,14 +64,32 @@ const (
 	codeInvalidParams  = -32602
 )
 
-// Serve answers MCP messages from in on out until in ends or ctx is done. Log lines go to logw (the
-// CLI shows a server's stderr in its MCP diagnostics). Calls still waiting when the client goes are
-// abandoned, which releases their held posts at the listener.
+// Serve is `ptyd team-mcp`: the team set, as ServeSet serves it.
 func Serve(ctx context.Context, env func(string) string, in io.Reader, out io.Writer, logw io.Writer) error {
-	s := &server{out: out, logw: logw, calls: map[string]context.CancelFunc{}, callPrefix: callPrefix(env("DAEDALUS_LAUNCH_ID"))}
-	s.askHold = holdFrom(env, "DAEDALUS_ASK_HOLD_MS", DefaultAskHold, s.logf)
-	s.reportHold = holdFrom(env, "DAEDALUS_REPORT_HOLD_MS", DefaultReportHold, s.logf)
-	route, err := routeFrom(env)
+	return ServeSet(ctx, TeamSet, env, in, out, logw)
+}
+
+// ServeSet answers MCP messages from in on out until in ends or ctx is done, with the tools of one
+// set. Log lines go to logw (the CLI shows a server's stderr in its MCP diagnostics). Calls still
+// waiting when the client goes are abandoned, which releases their held posts at the listener.
+func ServeSet(ctx context.Context, set string, env func(string) string, in io.Reader, out io.Writer, logw io.Writer) error {
+	s := &server{out: out, logw: logw, calls: map[string]context.CancelFunc{}, callPrefix: callPrefix(env("DAEDALUS_LAUNCH_ID")), logPrefix: "ptyd team-mcp"}
+	if set != TeamSet {
+		s.logPrefix = "ptyd tools-mcp --set " + set
+	}
+	var err error
+	if set == TeamSet {
+		s.set = newTeamSet(holdFrom(env, "DAEDALUS_ASK_HOLD_MS", DefaultAskHold, s.logf), holdFrom(env, "DAEDALUS_REPORT_HOLD_MS", DefaultReportHold, s.logf))
+	} else {
+		// A set whose file cannot be read still serves, with no tools: the CLI's diagnostics show the
+		// server and this log line, rather than a server that would not start.
+		s.set, err = loadFileSet(set, env, s.logf)
+		if err != nil {
+			s.logf("%v", err)
+			s.setErr = err
+		}
+	}
+	route, err := routeFrom(env, set == TeamSet)
 	if err != nil {
 		// The server still starts and lists its tools, so the CLI shows why a call fails instead of a
 		// server that would not start.
@@ -106,12 +127,13 @@ func Serve(ctx context.Context, env func(string) string, in io.Reader, out io.Wr
 }
 
 type server struct {
-	out        io.Writer
-	logw       io.Writer
-	route      route
-	routeErr   error
-	askHold    time.Duration
-	reportHold time.Duration
+	out       io.Writer
+	logw      io.Writer
+	logPrefix string
+	set       toolset
+	setErr    error
+	route     route
+	routeErr  error
 
 	wmu     sync.Mutex
 	wfailed bool
@@ -177,7 +199,7 @@ func (s *server) handle(ctx context.Context, line []byte) {
 	case "ping":
 		s.reply(m.ID, struct{}{}, nil)
 	case "tools/list":
-		s.reply(m.ID, map[string]any{"tools": toolList(s.askHold)}, nil)
+		s.reply(m.ID, map[string]any{"tools": s.set.list()}, nil)
 		s.announce(ctx, "tools/list", nil)
 	case "tools/call":
 		s.startCall(ctx, m)
@@ -196,10 +218,14 @@ func (s *server) announce(ctx context.Context, stage string, client map[string]a
 	if client != nil {
 		fields["client"] = client
 	}
+	source := s.set.source()
+	for k, v := range s.set.hello() {
+		fields[k] = v
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.route.hello(ctx, fields)
+		s.route.hello(ctx, source, fields)
 	}()
 }
 
@@ -222,14 +248,14 @@ func (s *server) initialize(params json.RawMessage) (map[string]any, map[string]
 	return map[string]any{
 		"protocolVersion": answer,
 		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-		"serverInfo":      map[string]any{"name": ServerName, "version": version.Version},
-		"instructions": "Report tells your project's orchestrator how your task stands; AskOrchestrator asks it " +
-			"something you cannot decide yourself.",
+		"serverInfo":      map[string]any{"name": s.set.name(), "version": version.Version},
+		"instructions":    s.set.instructions(),
 	}, client
 }
 
-// startCall runs a tools/call on its own, because AskOrchestrator waits minutes and the client may
-// send pings, other calls or a cancellation meanwhile.
+// startCall runs a tools/call on its own, because AskOrchestrator waits minutes (and a browser's
+// action waits for the operator's approval) and the client may send pings, other calls or a
+// cancellation meanwhile.
 func (s *server) startCall(ctx context.Context, m message) {
 	var p struct {
 		Name      string          `json:"name"`
@@ -239,7 +265,11 @@ func (s *server) startCall(ctx context.Context, m message) {
 		s.reply(m.ID, nil, &rpcError{Code: codeInvalidParams, Message: "tools/call needs a name"})
 		return
 	}
-	req, err := decode(p.Name, p.Arguments)
+	if s.setErr != nil {
+		s.reply(m.ID, toolResult("these tools are not available in this launch: "+s.setErr.Error(), true), nil)
+		return
+	}
+	req, err := s.set.decode(p.Name, p.Arguments)
 	if errors.Is(err, errUnknownTool) {
 		s.reply(m.ID, nil, &rpcError{Code: codeInvalidParams, Message: "no tool " + strconv.Quote(p.Name)})
 		return
@@ -249,7 +279,7 @@ func (s *server) startCall(ctx context.Context, m message) {
 		return
 	}
 	if s.route == nil {
-		s.reply(m.ID, toolResult("the team is not available: "+s.routeErr.Error(), true), nil)
+		s.reply(m.ID, toolResult(s.set.unreachable()+": "+s.routeErr.Error(), true), nil)
 		return
 	}
 	req.fields["call_id"] = s.callPrefix + ":" + strconv.FormatInt(s.seq.Add(1), 10)
@@ -266,10 +296,7 @@ func (s *server) startCall(ctx context.Context, m message) {
 	s.wg.Add(1)
 	s.mu.Unlock()
 
-	hold := s.reportHold
-	if req.op == "ask" {
-		hold = s.askHold
-	}
+	hold := req.hold
 	go func() {
 		defer s.wg.Done()
 		defer func() {
@@ -340,7 +367,7 @@ func (s *server) writeFailed() bool {
 
 func (s *server) logf(format string, args ...any) {
 	if s.logw != nil {
-		fmt.Fprintf(s.logw, "ptyd team-mcp: "+format+"\n", args...)
+		fmt.Fprintf(s.logw, s.logPrefix+": "+format+"\n", args...)
 	}
 }
 

@@ -189,6 +189,11 @@ class PiAdapter:
             # so it never begins with "@", which pi would read as a file to attach.
             argv.append(prompt)
         env = {"DAEDALUS_ASK_HOLD_MS": str(spec.ask_hold_ms), "DAEDALUS_REPORT_HOLD_MS": str(spec.report_hold_ms)}
+        if spec.tool_sets:
+            # pi has no MCP: its bridge reads each set's file from the launch and registers the tools.
+            files.update({tools.path: tools.file for tools in spec.tool_sets})
+            env["DAEDALUS_TOOL_SETS"] = ",".join(tools.name for tools in spec.tool_sets)
+            env["DAEDALUS_TOOLS_HOLD_MS"] = str(max(tools.hold_ms for tools in spec.tool_sets))
         return LaunchPlan(argv=tuple(argv), env=env, cwd=spec.cwd, files=files, session_ref=session, first_prompt=prompt, first_prompt_via="argv", hooks=HookSpec(sources=(HOOK_SOURCE,)))
 
     def readiness(self, screen: str) -> ReadyStep:

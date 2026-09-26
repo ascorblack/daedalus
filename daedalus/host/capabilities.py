@@ -74,6 +74,30 @@ class SelfDev:
 
 
 @dataclass(frozen=True, slots=True)
+class Browser:
+    """Whether this installation has a browser for its agents: a browser daemon's run directory it was
+    told of, in either environment. Decided at startup like the rest, because the browser's tools are
+    registered then; whether the daemon answers at this moment is the browser service's to say."""
+
+    envs: tuple[str, ...] = ()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.envs)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"configured": self.configured, "envs": list(self.envs)}
+
+
+BROWSER_TOOL_PREFIX = "Browser"
+"""Every browser tool's name starts with it; an installation without a browser registers none."""
+
+
+def resolve_browser(settings: Settings) -> Browser:
+    return Browser(envs=tuple(env for env, run_dir in (("container", settings.browser_container_dir), ("host", settings.browser_host_dir)) if run_dir is not None))
+
+
+@dataclass(frozen=True, slots=True)
 class Capabilities:
     """Everything the app tells its surfaces about what this installation can do.
 
@@ -83,6 +107,7 @@ class Capabilities:
     """
 
     selfdev: SelfDev
+    browser: Browser = field(default_factory=Browser)
     restart_required: dict[str, Any] | None = None
     """The change committed to the checkout and waiting for a restart, or ``None``."""
     last_change: dict[str, Any] | None = None
@@ -90,7 +115,7 @@ class Capabilities:
     not boot. What the app shows once the restart is over."""
 
     def as_dict(self) -> dict[str, Any]:
-        return {"selfdev": self.selfdev.as_dict(), "restart_required": self.restart_required, "last_change": self.last_change}
+        return {"selfdev": self.selfdev.as_dict(), "browser": self.browser.as_dict(), "restart_required": self.restart_required, "last_change": self.last_change}
 
 
 # -- prerequisite probes ------------------------------------------------------------------
@@ -237,14 +262,16 @@ def resolve_selfdev(settings: Settings, config: RuntimeConfig) -> SelfDev:
 
 
 def resolve(settings: Settings, config: RuntimeConfig) -> Capabilities:
-    return Capabilities(selfdev=resolve_selfdev(settings, config))
+    return Capabilities(selfdev=resolve_selfdev(settings, config), browser=resolve_browser(settings))
 
 
 __all__ = [
     "ALL_SELFDEV_TOOLS",
+    "BROWSER_TOOL_PREFIX",
     "PUBLISHED_FILE",
     "SELFDEV_MODES",
     "SELFDEV_TOOLS",
+    "Browser",
     "Capabilities",
     "SelfDev",
     "SelfDevMode",
@@ -252,6 +279,7 @@ __all__ = [
     "publish",
     "rebuild_channel",
     "resolve",
+    "resolve_browser",
     "resolve_selfdev",
     "writable_checkout",
 ]

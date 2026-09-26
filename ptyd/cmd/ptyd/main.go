@@ -34,6 +34,7 @@ const usage = `usage:
   ptyd hook-post <name> [--wait-ms N] < body   (inside a launch: post a hook, print the reply)
   ptyd hook <source> [--wait-ms N] < body      (a CLI's command hook: the same, and always exit 0)
   ptyd team-mcp                                (inside a launch: the team tools' MCP server on stdio)
+  ptyd tools-mcp --set <name>                  (inside a launch: a set of Daedalus's tools, from tools/<name>.json)
 
 serve flags:
   --listen unix|tcp:127.0.0.1:<port>   where to listen (default unix: <run-dir>/ptyd.sock)
@@ -67,6 +68,8 @@ func main() {
 		os.Exit(hook(os.Args[2:]))
 	case "team-mcp":
 		os.Exit(teamMCP())
+	case "tools-mcp":
+		os.Exit(toolsMCP(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:

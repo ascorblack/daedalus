@@ -141,7 +141,7 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
 Role = Literal["agent", "voice", "orchestrator", "dispatcher"]
 
 
-def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str, notify: bool) -> tuple[str, ...]:
+def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str, notify: bool, browser: bool = False) -> tuple[str, ...]:
     return (
         prompts.PERSONA,
         prompts.rules_section(config.prompt.rules),
@@ -152,6 +152,7 @@ def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig
         prompts.BOARD,
         prompts.SCHEDULING,
         prompts.NOTIFY if notify else "",
+        prompts.BROWSER if browser else "",
         (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
         prompts.environment_section(
             workspace=workspace,
@@ -206,8 +207,11 @@ def build_engine(
         # Only where the tool can be called: a subagent or a staff member told how to notify the
         # operator would try, be refused, and spend a turn learning that its leader speaks for it.
         notify = "Notify" in all_tools and (tool_visibility_policy is None or "Notify" not in tool_visibility_policy.blocked)
+        # The browser's rules only where its tools are: a static section, so the prompt's cache holds
+        # for every session of an installation that has a browser.
+        browser = "BrowserOpen" in all_tools and (tool_visibility_policy is None or "BrowserOpen" not in tool_visibility_policy.blocked)
         sections = _agent_sections(
-            deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project, notify=notify,
+            deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project, notify=notify, browser=browser,
         )
     engine_config = QueryEngineConfig(
         run_id=run_id,

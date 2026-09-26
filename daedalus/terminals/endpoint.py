@@ -42,7 +42,7 @@ class Endpoint:
     token: bytes
 
 
-def permission_detail(path: Path, exc: OSError) -> str:
+def permission_detail(path: Path, exc: OSError, label: str = "terminal service") -> str:
     """Why this process may not open a daemon's file, in terms the operator can act on.
 
     The host daemon's directory belongs to the operator, mode 0700, and the agent's container reads it
@@ -53,19 +53,22 @@ def permission_detail(path: Path, exc: OSError) -> str:
     # Windows has no uid; there the access list of the run directory is the whole story.
     who = f"uid {os.getuid()}" if hasattr(os, "getuid") else "this user"
     return (
-        f"{path}: {exc.strerror or exc} — this process runs as {who} and may not open the terminal service's files; "
+        f"{path}: {exc.strerror or exc} — this process runs as {who} and may not open the {label}'s files; "
         "with rootless Docker or userns-remap, root in the container is not root on the host"
     )
 
 
-def read_endpoint(run_dir: Path) -> Endpoint:
-    """What to connect to and what to say first; raises ``EndpointMissing`` with the reason."""
+def read_endpoint(run_dir: Path, *, label: str = "terminal service", lock: str = "ptyd.lock") -> Endpoint:
+    """What to connect to and what to say first; raises ``EndpointMissing`` with the reason.
+
+    ``label`` names the daemon in the reasons and ``lock`` is its lock file: the browser daemon keeps
+    its run directory the same way under its own names."""
     if not run_dir.is_dir():
         raise EndpointMissing("not_installed", f"{run_dir} does not exist")
     try:
         text = (run_dir / ENDPOINT_FILE).read_text(encoding="utf-8").strip()
     except PermissionError as exc:
-        raise EndpointMissing("permission_denied", permission_detail(run_dir / ENDPOINT_FILE, exc)) from None
+        raise EndpointMissing("permission_denied", permission_detail(run_dir / ENDPOINT_FILE, exc, label)) from None
     except FileNotFoundError:
         # An empty directory is what setup leaves whether or not the service was installed, so it
         # reads as not installed. One a daemon has used (its lock, its token) held a daemon that
@@ -74,16 +77,16 @@ def read_endpoint(run_dir: Path) -> Endpoint:
         note = run_dir / UNAVAILABLE_FILE
         if note.is_file():
             with contextlib.suppress(OSError):
-                raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or "the terminal service is not available") from None
-        if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock")):
-            raise EndpointMissing("not_running", f"the terminal service in {run_dir} is not running") from None
-        raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}{owned_by_root(run_dir)}") from None
+                raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or f"the {label} is not available") from None
+        if any((run_dir / name).exists() for name in (TOKEN_FILE, lock)):
+            raise EndpointMissing("not_running", f"the {label} in {run_dir} is not running") from None
+        raise EndpointMissing("not_installed", f"no {label} has run in {run_dir}{owned_by_root(run_dir)}") from None
     except OSError as exc:
         raise EndpointMissing("unreachable", f"{run_dir / ENDPOINT_FILE}: {exc}") from exc
     try:
         token = (run_dir / TOKEN_FILE).read_bytes().strip()
     except PermissionError as exc:
-        raise EndpointMissing("permission_denied", permission_detail(run_dir / TOKEN_FILE, exc)) from None
+        raise EndpointMissing("permission_denied", permission_detail(run_dir / TOKEN_FILE, exc, label)) from None
     except OSError as exc:
         raise EndpointMissing("unreachable", f"{run_dir / TOKEN_FILE}: {exc}") from exc
     kind, _, rest = text.partition(":")
