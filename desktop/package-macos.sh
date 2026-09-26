@@ -17,7 +17,10 @@
 #
 # PTYD_AMD64 and PTYD_ARM64, when both are set, are the terminal daemon's two slices; they are joined
 # into Contents/MacOS/ptyd, beside the launcher, which is where it looks for them. A bundle without
-# them runs, and says host terminals are unavailable.
+# them runs, and says host terminals are unavailable. BROWSERD_AMD64 and BROWSERD_ARM64 are the
+# browser daemon's, joined into Contents/MacOS/browserd the same way; without them the agent's
+# browser is unavailable. Chromium itself is not in the bundle: `install browser` downloads it into
+# the data folder.
 #
 # Signing and notarization happen when all five of these are set; without them the bundle is signed
 # ad-hoc and the script says so, so that a release is never held up by a missing secret:
@@ -68,6 +71,13 @@ if [ -n "${PTYD_AMD64:-}" ] && [ -n "${PTYD_ARM64:-}" ]; then
   lipo -create -output "$ptyd" "$PTYD_AMD64" "$PTYD_ARM64"
   chmod +x "$ptyd"
   lipo -info "$ptyd"
+fi
+browserd=""
+if [ -n "${BROWSERD_AMD64:-}" ] && [ -n "${BROWSERD_ARM64:-}" ]; then
+  browserd="$app/Contents/MacOS/browserd"
+  lipo -create -output "$browserd" "$BROWSERD_AMD64" "$BROWSERD_ARM64"
+  chmod +x "$browserd"
+  lipo -info "$browserd"
 fi
 
 # The Mini App travels in the bundle's Resources, where the launcher looks for it. Without it a
@@ -172,6 +182,9 @@ if [ "$signed" = "developer-id" ]; then
   # says to get one.
   if [ -n "$ptyd" ]; then
     codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$ptyd"
+  fi
+  if [ -n "$browserd" ]; then
+    codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$browserd"
   fi
   codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$executable"
   codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$app"

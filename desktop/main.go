@@ -55,8 +55,8 @@ commands:
   pair        print a fresh pairing link for signing in to the app
   uninstall   remove the containers, networks and volumes
   install X   native mode only: fetch a runtime extra — "node" for the skills that
-              shell out to npx and for rebuilding the app, "browser" for the headless
-              Chromium the browser skills drive, "speech" for the engine that runs a
+              shell out to npx and for rebuilding the app, "browser" for the Chromium
+              the agent's browser and the browser skills drive, "speech" for the engine that runs a
               speech model on this machine. None of the three is part of a first run,
               and Settings → Components in the app installs them without a terminal.
   restart     native mode only: stop the agent and start it again, so a component

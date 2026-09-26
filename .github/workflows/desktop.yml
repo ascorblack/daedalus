@@ -16,6 +16,10 @@
 # built by ptyd/release.sh rather than by `go build` alone: Linux and Windows cross-compiled from one
 # Linux runner with the pinned Zig as the C compiler (Linux fully static against musl, so it starts
 # on any distribution), the Mac on the Mac runner with Apple's compiler.
+#
+# And browserd, the browser daemon a native installation runs for the agent's browser. It is plain
+# Go, so browserd/release.sh cross-compiles all six from the Linux runner; the Mac's two slices are
+# joined and signed in the bundle beside ptyd's.
 name: desktop
 
 # `test` and `window` run on every change to the launcher, not only on a tag: `window` is the only
@@ -26,9 +30,9 @@ on:
   push:
     tags: ["desktop-v*"]
     branches: [main]
-    paths: ["desktop/**", "ptyd/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "ptyd/**", "browserd/**", ".github/workflows/desktop.yml"]
   pull_request:
-    paths: ["desktop/**", "ptyd/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "ptyd/**", "browserd/**", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 
 permissions:
@@ -148,6 +152,46 @@ jobs:
           path: ptyd-dist
           retention-days: 1
 
+  # The browser daemon: its tests on every change, and on a tag its six release builds. The tests
+  # that drive a real Chromium are skipped here (they need BROWSERD_TEST_CHROMIUM); its Windows and
+  # macOS halves are vetted, which is where a platform file that does not compile shows first.
+  browserd:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: browserd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: browserd/go.mod
+          cache-dependency-path: browserd/go.sum
+      - name: Test
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test ./...
+          GOOS=windows go vet ./...
+          GOOS=darwin go vet ./...
+      - name: Build
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        run: |
+          mkdir -p ../browserd-dist
+          for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            goos=${t%/*} goarch=${t#*/}
+            out="$PWD/../browserd-dist/browserd-$goos-$goarch"
+            case "$goos" in windows) out="$out.exe";; esac
+            ./release.sh "$goos" "$goarch" "$out"
+          done
+          ls -l ../browserd-dist
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        with:
+          name: browserd
+          path: browserd-dist
+          retention-days: 1
+
   binaries:
     needs: [test, window]
     if: startsWith(github.ref, 'refs/tags/desktop-v')
@@ -220,7 +264,7 @@ jobs:
   # notarytool. It is the last job, so it is also the one that publishes: the checksums have to
   # cover every archive, including its own.
   package:
-    needs: [binaries, ptyd]
+    needs: [binaries, ptyd, browserd]
     if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: macos-latest
     steps:
@@ -237,6 +281,11 @@ jobs:
           pattern: ptyd-*
           merge-multiple: true
           path: desktop/dist/ptyd
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: browserd
+          path: desktop/dist/browserd
 
       # The app itself, built once and put in every archive. A native installation has no image to
       # bake it into and may have no node to build it with, so without this the launcher would fetch
@@ -258,18 +307,20 @@ jobs:
           # The tarball keeps the executable's mode, which is the whole point of shipping one: the
           # file comes out of it runnable, with nothing to chmod first. An artifact does not keep
           # that mode, so it is set again here.
-          # ptyd goes beside the launcher, where it looks for it.
+          # ptyd and browserd go beside the launcher, where it looks for them.
           cp -R ../miniapp/dist stage/miniapp-dist
           for arch in amd64 arm64; do
             cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
             cp "dist/ptyd/ptyd-linux-$arch" stage/ptyd
-            chmod +x stage/daedalus-desktop stage/ptyd
-            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop ptyd miniapp-dist
-            rm stage/daedalus-desktop stage/ptyd
+            cp "dist/browserd/browserd-linux-$arch" stage/browserd
+            chmod +x stage/daedalus-desktop stage/ptyd stage/browserd
+            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop ptyd browserd miniapp-dist
+            rm stage/daedalus-desktop stage/ptyd stage/browserd
           done
           cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
           cp dist/ptyd/ptyd-windows-amd64.exe stage/ptyd.exe
-          (cd stage && zip -qr ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe ptyd.exe miniapp-dist)
+          cp dist/browserd/browserd-windows-amd64.exe stage/browserd.exe
+          (cd stage && zip -qr ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe ptyd.exe browserd.exe miniapp-dist)
           rm -rf stage
           ls -l dist/archives
 
@@ -282,8 +333,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          chmod +x dist/bin/daedalus-desktop-darwin-* dist/ptyd/ptyd-darwin-*
+          chmod +x dist/bin/daedalus-desktop-darwin-* dist/ptyd/ptyd-darwin-* dist/browserd/browserd-darwin-*
           export PTYD_AMD64=dist/ptyd/ptyd-darwin-amd64 PTYD_ARM64=dist/ptyd/ptyd-darwin-arm64
+          export BROWSERD_AMD64=dist/browserd/browserd-darwin-amd64 BROWSERD_ARM64=dist/browserd/browserd-darwin-arm64
           MINIAPP_DIST=../miniapp/dist ./package-macos.sh "${{ github.ref_name }}" \
             dist/bin/daedalus-desktop-darwin-amd64 \
             dist/bin/daedalus-desktop-darwin-arm64 \

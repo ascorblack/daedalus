@@ -332,16 +332,16 @@ type recorded struct {
 func (r recorded) Start(context.Context) { *r.log = append(*r.log, "start "+r.name) }
 func (r recorded) Stop(context.Context)  { *r.log = append(*r.log, "stop "+r.name) }
 
-// The agent detaches from its terminals before the daemon goes, and the key proxy it needed until
-// then goes last; all three are forgotten, so the next start reads the env file again.
+// The agent detaches from its terminals and browsers before the daemons go, and the key proxy it
+// needed until then goes last; all four are forgotten, so the next start reads the env file again.
 func TestStoppingTheAgentComesBeforeItsTerminals(t *testing.T) {
 	var log []string
-	n := &Native{supervisor: recorded{"supervisor", &log}, ptyd: recorded{"ptyd", &log}, keyproxy: recorded{"keyproxy", &log}}
+	n := &Native{supervisor: recorded{"supervisor", &log}, browserd: recorded{"browserd", &log}, ptyd: recorded{"ptyd", &log}, keyproxy: recorded{"keyproxy", &log}}
 	n.Stop(context.Background())
-	if got := strings.Join(log, ", "); got != "stop supervisor, stop ptyd, stop keyproxy" {
+	if got := strings.Join(log, ", "); got != "stop supervisor, stop browserd, stop ptyd, stop keyproxy" {
 		t.Fatalf("stopped in the order %s", got)
 	}
-	if n.supervisor != nil || n.ptyd != nil || n.keyproxy != nil {
+	if n.supervisor != nil || n.ptyd != nil || n.keyproxy != nil || n.browserd != nil {
 		t.Fatal("a stopped process was kept for the next start")
 	}
 	// A build without a daemon has none to stop.

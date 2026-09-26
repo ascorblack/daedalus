@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -26,6 +27,10 @@ const defaultImageOwner = "ascorblack"
 // mismatch nothing would report. A fork that publishes no image has nothing to pull, and the start
 // falls back to building, which is what happens on a platform without a published image anyway.
 func agentImage() string { return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus:latest" }
+
+// browserImage is the published image of the browser service: the agent's image with both Chromium
+// builds in it, from the same owner.
+func browserImage() string { return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus:browser" }
 
 // imageOwner is the owner segment of a git remote — github.com/<owner>/<repo> — in the lowercase a
 // registry namespace has to be, whatever case the account is written in.
@@ -208,6 +213,10 @@ func DockerVersion(ctx context.Context) string {
 // compose resolves its relative mounts against the checkout, and the desktop override follows to
 // name the published images. The telegram profile is passed only when a bot token is set: without
 // one the local Bot API server has nothing to do.
+//
+// The profiles the env file names in COMPOSE_PROFILES (the browser's, most often) are passed as
+// flags as well: compose reads that variable only when no --profile is on the command line, so the
+// telegram flag alone would silently switch them off.
 func composeArgs(p Paths, telegram bool, args ...string) []string {
 	out := []string{
 		"compose",
@@ -216,8 +225,18 @@ func composeArgs(p Paths, telegram bool, args ...string) []string {
 		"--env-file", p.Env,
 		"--project-name", projectName,
 	}
+	profiles := []string{}
 	if telegram {
-		out = append(out, "--profile", "telegram")
+		profiles = append(profiles, "telegram")
+	}
+	for _, name := range strings.Split(readEnv(readFile(p.Env))["COMPOSE_PROFILES"], ",") {
+		name = strings.TrimSpace(name)
+		if name != "" && !slices.Contains(profiles, name) {
+			profiles = append(profiles, name)
+		}
+	}
+	for _, name := range profiles {
+		out = append(out, "--profile", name)
 	}
 	return append(out, args...)
 }

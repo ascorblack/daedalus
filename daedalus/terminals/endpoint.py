@@ -75,7 +75,8 @@ def read_endpoint(run_dir: Path) -> Endpoint:
         if note.is_file():
             with contextlib.suppress(OSError):
                 raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or "the terminal service is not available") from None
-        if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock")):
+        # The browser daemon keeps its run directory the same way, under its own lock's name.
+        if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock", "browserd.lock")):
             raise EndpointMissing("not_running", f"the terminal service in {run_dir} is not running") from None
         raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}{owned_by_root(run_dir)}") from None
     except OSError as exc:

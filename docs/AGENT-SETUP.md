@@ -92,6 +92,7 @@ ones the operator's answers in section 1 asked for:
 | `telegram` | the local Bot API server — files up to 2 GB instead of Telegram's 20 MB | ~66 MB | they want Telegram **and** gave you `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` |
 | `search` | a self-hosted SearXNG | ~382 MB | they asked for one. Without it `WebSearch` goes to DuckDuckGo directly and SearXNG is only the fallback it cannot reach |
 | `selfdev` | the rebuilder, the only container that can reach Docker | ~237 MB | self-development is to resolve to `server` (section 7), which needs a way to build a new image |
+| `browser` | the agent's browser: `browserd` and Chromium from the image's `browser` target, on a network of its own with no route to the key proxy or the agent | the `:browser` tag | they want the agent to browse and to watch it in the app. Put `COMPOSE_PROFILES=browser` in `.env` rather than passing the flag, so every later compose command (the rebuilder's too) keeps it |
 
 The browser skills — driving a page with Playwright, drawing with Pillow — are not in the default
 image: they are two thirds of one and most sessions never open a page. A server that needs them runs
@@ -276,7 +277,9 @@ That last command also recreates the `terminals` service whenever the image chan
 container terminal. To update the agent and leave the terminals running, name the agent's service:
 `docker compose … up -d --build daedalus`. The terminals' daemon is then updated separately and only
 when the operator chooses: the app offers it (with the count of terminals it ends), or `docker compose
-… up -d terminals`. An installation that predates the `terminals` service needs one `docker compose … up
+… up -d terminals`. The `browser` service is the same: a deploy never recreates it, and recreating it
+(`docker compose … up -d --build browser`, or the app's update) closes every open browser, though the
+profiles and their logins stay. An installation that predates the `terminals` service needs one `docker compose … up
 -d --build` to create it — restarting the agent's container does not, and the image has to be rebuilt
 because an older one carries no daemon. In `server`
 mode never edit files inside the `daedalus` checkout on the server: the supervisor resets it to
@@ -307,6 +310,7 @@ whether this installation is finished. The lines worth reading back to the opera
 | `isolation` | on a server, nothing: the agent is in a container. It appears only on a native desktop installation, where it says there is no container boundary |
 | `terminals (container)` | the terminal daemon answers, its version and how many terminals run. "not installed" on a stack started before the service existed: run `docker compose … up -d --build`. `terminals update (container)` means the image holds a newer daemon than the one running |
 | `terminals (host)` | the host terminal (optional). "not installed" is information, not a fault: install it only if the operator asked for a shell on the server, with `bash deploy/host-terminal.sh install` run **as the operator, not with sudo**, after the stack is built. "permission denied" means Docker is rootless or uses userns-remap, where it cannot work |
+| `browser (container)` | the browser daemon answers, its version and its Chromium. "not installed" when the `browser` profile is off, which is correct unless the operator asked for the agent's browser. `browser walls` says what a page is behind; `browser sandbox` appears only when Chromium's sandbox is off, which in a container means the service lost its `seccomp=unconfined` |
 | `container image`, `image rebuild channel`, `published ports` | the container-only checks. On a native installation each says "not applicable (native)" rather than being left out |
 
 ## 8. What to report back

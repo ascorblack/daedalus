@@ -14,7 +14,7 @@ needs on a page of its own, writes the environment files, and then runs the agen
 | **First run downloads** | **103 MB** measured on Linux x86-64; ~96 MB on macOS (CPython is half the size there), ~148 MB on Windows (MinGit) | **114 MB** to pull the runtime image — 478 MB once unpacked — plus Docker itself, which is a ~600 MB application with a multi-gigabyte VM disk behind it |
 | **On disk** | 245 MB of `data/runtime/` (73 MB of it a wheel cache you can delete), 390 MB for the whole installation | 478 MB of image, plus the volumes |
 | **Start to app** | 26 s from an empty folder, **4.3 s** warm | the image pull, then seconds; Docker Desktop itself must be up first |
-| **Browser skills** | `daedalus-desktop install browser` — ~100 MB into `data/runtime/browsers/` | the `:browser` tag of the same image, +~550 MB, sharing every layer below the last |
+| **Browser** | `daedalus-desktop install browser` — both Chromium builds into `data/runtime/browsers/` ([the agent's browser](#the-agents-browser)) | `COMPOSE_PROFILES=browser`: the `browser` service from the `:browser` tag of the same image, sharing every layer below the last |
 | **Isolation** | **no container boundary** — `Exec` runs as you, behind the policy rules ([the isolation, honestly](#the-isolation-honestly)) | a command that goes wrong stops at the container's edge |
 
 Neither is the "real" one. Docker buys a wall; native buys weight and speed, and
@@ -452,7 +452,7 @@ Optional, fetched only when something asks for them — `daedalus-desktop instal
 | | Download | What needs it |
 |---|---|---|
 | Node 24.21.0 | 58 MB (Linux x86-64) | four skills that shell out to `npx`, and rebuilding the Mini App |
-| headless Chromium | ~100 MB | the browser skills and `ImageView`'s screenshots |
+| Chromium, full and headless shell | 316 MB (Linux x86-64: 193 MB full, 120 MB shell); 656 MB on disk | the agent's browser (the full build, under `browserd`), the browser skills and `ImageView`'s screenshots (the shell) |
 
 Against Docker mode that is roughly four times lighter to download, and it does not need Docker
 Desktop — a ~600 MB application with a multi-gigabyte VM disk behind it — at all.
@@ -546,6 +546,40 @@ again with the supervisor's backoff; the terminals it held are gone, and the app
 - Docker mode on a desktop has container terminals only (the `terminals` service); the launcher starts
   nothing for them.
 
+### The agent's browser
+
+The agent's browser natively is `browserd`, the browser daemon, which each release archive carries
+beside `ptyd` (`browserd`, `browserd.exe`, or `Contents/MacOS/browserd` in the Mac bundle). The
+launcher starts it after the terminal daemon, as another child of its own, so applying a change or
+restarting the agent leaves every browser open; **quitting the launcher closes them**. Chromium is
+not in the archive: `daedalus-desktop install browser` fetches Playwright's pinned builds into
+`data/runtime/browsers/` — the full Chromium the daemon runs, and the headless shell the browser
+skills drive (Playwright's headless launch looks for that one and does not start without it).
+
+- **The wall.** There is no container here. Every connection a page makes goes through the daemon's
+  own proxy, which refuses your LAN, cloud metadata addresses and the installation's own ports (the
+  app's API, the key proxy, the daemons' hook ports, the launcher's page), on loopback and on your
+  machine's other addresses alike. Your other local ports are a question you answer once; the
+  services the agent starts are open. **That proxy is the only wall** between a page and your
+  machine: `daedalus doctor` says so under "browser walls (host)".
+- **The sandbox.** Chromium's own sandbox is always on. On Ubuntu 23.10 and later a downloaded
+  Chromium cannot make the user namespaces it sandboxes with, so the launcher hands it the setuid
+  helper of a Chrome or Chromium installed on the system (`/opt/google/chrome/chrome-sandbox` and
+  the like) when there is one. With none, the browser does not start, and the doctor names the fix;
+  the daemon never turns the sandbox off by itself.
+- **Memory.** On Linux the daemon and every Chromium it starts run in a systemd scope of yours
+  capped at 3 GB (`systemd-run --user --scope -p MemoryMax=3G`), when your session has a user
+  manager to ask; without one they run uncapped and the launcher's log says so.
+- **Profiles**, which hold the logins you make for the agent, live in `data/runtime/browserd/state/`,
+  and the run directory in `data/runtime/browserd/run/`; both are inside the runtime directory the
+  agent's policy seals whole. `DAEDALUS_BROWSERD=/path/to/browserd` names a daemon built by hand
+  (`browserd/release.sh`); a build without one shows the browser unavailable with "this build
+  carries no browserd".
+- Docker mode on a desktop runs the `browser` compose service instead when `COMPOSE_PROFILES=browser`
+  is in the data folder's `.env`, from the published `:browser` image.
+- **Not yet proven:** the Mac's Gatekeeper on a Chromium downloaded into the data folder, and the
+  whole of it on Windows, where it is cross-compiled but has not run.
+
 ### Windows
 
 Implemented and cross-compiled, with the path and argument logic under tests of its own, but **not
@@ -574,7 +608,7 @@ limitation, not a choice, and it is stated here rather than hidden.
 
 In **native mode** there are no images at all: `data/runtime/` is 245 MB after a first start (73 MB
 of it uv's wheel cache, safe to delete at any time) and the whole installation is about 390 MB with
-both checkouts in it. `install node` adds 58 MB of download, `install browser` about 100 MB.
+both checkouts in it. `install node` adds 58 MB of download, `install browser` 316 MB (656 MB on disk).
 
 In **Docker mode**, one image, and the key proxy is a second container from it:
 

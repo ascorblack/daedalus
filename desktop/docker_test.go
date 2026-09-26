@@ -70,6 +70,8 @@ func TestOverrideNamesThePublishedImagesAndFreesTelegram(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		agentImage(),
+		// The browser service is the image's other target, published under its own tag.
+		"  browser:\n    image: " + browserImage(),
 		`profiles: ["telegram"]`,
 		// Without required:false the whole project refuses to load while the profile is off,
 		// because daedalus depends on a service that is not in the project.
@@ -78,6 +80,29 @@ func TestOverrideNamesThePublishedImagesAndFreesTelegram(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the override is missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// A profile the env file names survives the telegram flag: compose reads COMPOSE_PROFILES only
+// when no --profile is given, so the launcher passes each one itself.
+func TestComposeArgsCarryTheProfilesTheEnvFileNames(t *testing.T) {
+	paths, err := NewPaths(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.Env), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Env, []byte("API_PORT=8765\nCOMPOSE_PROFILES= browser, telegram ,,search\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	with := strings.Join(composeArgs(paths, true, "up"), " ")
+	if !strings.Contains(with, "--profile telegram --profile browser --profile search up") {
+		t.Fatalf("with a token: %s", with)
+	}
+	without := strings.Join(composeArgs(paths, false, "up"), " ")
+	if !strings.Contains(without, "--profile browser --profile telegram --profile search up") {
+		t.Fatalf("without a token: %s", without)
 	}
 }
 
