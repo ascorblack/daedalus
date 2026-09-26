@@ -149,4 +149,39 @@ def project(*, cap: int, running: int, used_rss: int, used_cpu: float, machine: 
     }
 
 
-__all__ = ["DEFAULT_COST", "Cost", "ProfileCosts", "effective_cpus", "effective_memory", "level", "likely_cost", "project"]
+def project_workloads(*, machine: Mapping[str, Any], kinds: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Several kinds of workload on one machine, each filled to its own cap: terminals and browsers.
+
+    ``kinds`` maps a name to ``{cap, running, used_rss, cost}``. Each kind's extra is its own
+    ``cap − running`` of its own likely cost; the machine is judged with all of them at once, since
+    both fill the same memory — a projection per kind would call a machine with room for twenty
+    terminals and two browsers "fine" twice while the two together did not fit.
+    """
+    total, available = effective_memory(machine)
+    now = max(0, total - available) if total else 0
+    out: dict[str, Any] = {}
+    extra_all = 0.0
+    extra_cpu = 0.0
+    cpus = effective_cpus(machine)
+    for name, kind in kinds.items():
+        cost: Cost = kind["cost"]
+        extra = max(0, int(kind["cap"]) - int(kind["running"]))
+        extra_rss = extra * cost.rss_bytes
+        extra_all += extra_rss
+        extra_cpu += extra * cost.cpu_percent / cpus if cpus else 0.0
+        out[name] = {"cap": int(kind["cap"]), "extra": extra, "rss_bytes": int(kind["used_rss"]), "at_cap_rss_bytes": int(kind["used_rss"] + extra_rss)}
+    machine_used = now + extra_all if total else 0
+    mem_percent = 100.0 * machine_used / total if total else 0.0
+    cpu_percent = float(machine.get("cpu_percent") or 0.0) + extra_cpu
+    return {
+        "kinds": out,
+        "machine_used_bytes": int(machine_used),
+        "mem_total_bytes": total,
+        "mem_percent": round(mem_percent, 1),
+        "cpu_percent": round(cpu_percent, 1),
+        "level": level(mem_percent),
+        "cpu_level": level(cpu_percent),
+    }
+
+
+__all__ = ["DEFAULT_COST", "Cost", "ProfileCosts", "effective_cpus", "effective_memory", "level", "likely_cost", "project", "project_workloads"]

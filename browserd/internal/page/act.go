@@ -142,7 +142,7 @@ func (p *Model) Act(ctx context.Context, t *browser.Tab, ap ActParams) (*ActResu
 	}
 	p.mu.Lock()
 	p.actions++
-	id := "a" + strconv.Itoa(p.actions)
+	id := "a" + p.run + "-" + strconv.Itoa(p.actions)
 	p.mu.Unlock()
 	res := &ActResult{ActionID: id, Effects: map[string]any{}}
 
@@ -280,6 +280,9 @@ func (p *Model) Act(ctx context.Context, t *browser.Tab, ap ActParams) (*ActResu
 	res.OK = true
 	done["effects"] = res.Effects
 	p.m.Publish("action_done", done)
+	if p.AfterAction != nil {
+		p.AfterAction(t, id)
+	}
 	return res, nil
 }
 

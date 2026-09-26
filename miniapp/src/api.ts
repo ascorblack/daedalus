@@ -134,6 +134,12 @@ export const api = {
   /** A single-use pass for one browser group's live view (`/ws/browsers/{group}`), as for a terminal. */
   browserTicket: (group: string, tier: "live" | "thumb", readOnly: boolean) =>
     call<{ ticket: string; expires_in: number }>("POST", `/api/browsers/${encodeURIComponent(group)}/ticket`, { tier, read_only: readOnly }),
+  /** A recorded keyframe as a blob URL: an <img> cannot send the auth header. The caller revokes it. */
+  browserFrame: async (group: string, no: number): Promise<string> => {
+    const res = await fetch(`/api/browsers/${encodeURIComponent(group)}/frames/${no}`, { headers: authHeaders() });
+    if (!res.ok) throw new ApiError(res.status, res.status === 404 ? "no such keyframe" : `could not load the keyframe (${res.status})`);
+    return URL.createObjectURL(await res.blob());
+  },
   /** A new terminal. At the machine's cap the host answers 409 `over_cap`; `confirm` is the operator's "open it anyway". */
   createTerminal: (body: TerminalCreate) => call<TerminalView>("POST", "/api/terminals", body),
   terminal: (id: string) => call<TerminalView>("GET", `/api/terminals/${encodeURIComponent(id)}`),
@@ -263,6 +269,67 @@ export type BrowserActionRow = {
   sensitive?: { kinds: string[]; decision: "allowed_once" | "allowed" | "denied" | "asked" } | null;
   needs?: { reason: string; what: string } | null;
   download?: { id: string; name: string; size: number } | null;
+  /** The daemon's id of the action, which its keyframe names. */
+  action_id?: string;
+};
+
+/** One keyframe of a group's recording (`GET /api/browsers/{group}/recording`): after an action, when the
+ *  page changed, or when the recording started. `w`×`h` is the picture; its secret fields were masked. */
+export type BrowserFrame = { no: number; at: number; tab: string; url: string; kind: "action" | "change" | "start"; action_id?: string; w: number; h: number; bytes: number };
+
+export type BrowserRecording = { recording: { frames: boolean; human: boolean }; frames: BrowserFrame[] };
+
+/** A browser a daemon runs now (`GET /api/browsers/running`), for Settings → Browser. */
+export type RunningBrowser = {
+  env: string;
+  id: string;
+  profile: string;
+  started_at: string | null;
+  rss_bytes: number;
+  cpu_percent: number;
+  tabs: number;
+  memory_basis: string;
+  groups: { id: string; owner: { kind: string; id: string; label: string }; url: string; title: string }[];
+};
+
+/** A profile the host asked a daemon for (`GET /api/browsers/profiles`): its logins live in it. */
+export type BrowserProfile = { id: string; env: string; scope: "project" | "session" | "staff" | "ephemeral"; project_id: string | null; session_id: string | null; staff_id: string | null; created_at: string; last_used_at: string; size_bytes: number; running: boolean };
+
+/** One environment's browser daemon as `GET /api/browsers` describes it. */
+export type BrowserEnv = {
+  env: string;
+  configured: boolean;
+  available: boolean;
+  reason: string;
+  detail: string;
+  version: string;
+  chromium: { version: string; kind: string; error: string } | null;
+  sandbox: string;
+  limits: Record<string, number>;
+  counts: Record<string, number>;
+  image_version: string;
+  update_available: boolean;
+};
+
+/** The recordings on disk per environment (`GET /api/browsers/recordings`). */
+export type BrowserRecordings = { envs: { env: string; groups: { group_id: string; frames: number; bytes: number; first_at: number; last_at: number }[]; bytes: number; max_bytes: number; retention_ms: number }[] };
+
+/** `[browser]` as Settings reads and writes it. */
+export type BrowserSettings = {
+  env: "auto" | "container" | "host";
+  running_cap: number;
+  idle_close_minutes: number;
+  agent_wait_seconds: number;
+  control_wait_seconds: number;
+  lan_allow: string[];
+  record_frames: boolean;
+  record_takeover: boolean;
+  record_retention_days: number;
+  record_max_mb: number;
+  watch_mode: boolean;
+  watch_domains: string[];
+  injection_monitor: boolean;
+  injection_monitor_preset: string;
 };
 
 export type TerminalView = {
@@ -314,6 +381,28 @@ export type TerminalActivity = {
 };
 
 export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
+
+/** `GET /api/browsers/load`: the browsers' cost, in the terminals' shape where the two are alike. */
+export type BrowserLoad = Omit<TerminalLoad, "profiles" | "envs"> & {
+  memory_basis?: string;
+  envs: { env: string; supported: boolean; browsers: number; rss_bytes: number; cpu_percent: number; mem_total_bytes: number; mem_available_bytes: number }[];
+};
+
+/** `GET /api/workloads/load`: terminals and browsers on one machine, each to its own cap, and the two
+ *  together, which is how the machine is judged. */
+export type WorkloadsLoad = {
+  terminals: TerminalLoad | null;
+  browsers: BrowserLoad | null;
+  together: {
+    kinds: Partial<Record<"terminals" | "browsers", { cap: number; extra: number; rss_bytes: number; at_cap_rss_bytes: number }>>;
+    machine_used_bytes: number;
+    mem_total_bytes: number;
+    mem_percent: number;
+    cpu_percent: number;
+    level: "ok" | "warn" | "bad";
+    cpu_level: "ok" | "warn" | "bad";
+  } | null;
+};
 
 /** One kind of terminal's average cost, as the host has measured it. `cpu_percent` is of one CPU. */
 export type TerminalCost = { rss_bytes: number; cpu_percent: number; samples: number };
@@ -1049,6 +1138,7 @@ export type Settings = {
   scheduler: { topic_mode: string; catch_up_missed: boolean };
   compaction: { auto_ratio: number; keep_recent_messages: number; max_words: number; chunk_tokens: number; min_messages: number; core_trigger_ratio: number };
   terminals?: { running_cap: number };
+  browser?: BrowserSettings;
   telegram: {
     mode: "topics" | "private" | null;
     forum_chat_id: number;

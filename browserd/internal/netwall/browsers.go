@@ -71,6 +71,9 @@ func (b *Browsers) Navigation(ctx context.Context, browserID, url string) error 
 	return e
 }
 
+// Allowlist reports whether the operator's rules carry an allowlist.
+func (b *Browsers) Allowlist() bool { return b.Wall.current().hasEgress }
+
 // Grant opens an asked destination for one browser; see Proxy.Grant.
 func (b *Browsers) Grant(browserID, host string, port int, ttl time.Duration) bool {
 	p := b.Proxy(browserID)

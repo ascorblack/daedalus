@@ -210,14 +210,17 @@ func (c *cast) frame(params json.RawMessage) {
 
 // scheduleAck acknowledges a frame to Chromium no sooner than the pace allows. Chromium sends the
 // next frame only after an acknowledgement, and keeps two or three in flight; delaying the
-// acknowledgement is what bounds its rate (measured: 133 ms gives 18–20 frames a second, where an
-// immediate one gives 50–60 and costs well over a CPU). The clients' own pace is kept separately.
+// acknowledgement is what bounds its rate (measured: an immediate one gives 50–60 frames a second
+// and costs well over a CPU). The clients' own pace is kept separately.
 func (c *cast) scheduleAck(session int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	interval := 2 * time.Second
+	// One acknowledgement, one frame: measured through the host with the app as the viewer, twice
+	// the frame's interval here gave half the rate (7.5 live frames a second against a cap of 15,
+	// and a thumbnail every two seconds), not the two frames in flight this was written for.
+	interval := ThumbEvery
 	if c.liveNow {
-		interval = 2 * time.Second / time.Duration(c.hub.fps)
+		interval = time.Second / time.Duration(c.hub.fps)
 	}
 	now := time.Now()
 	at := c.lastAck.Add(interval)

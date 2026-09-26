@@ -13,9 +13,11 @@ from typing import Any
 
 import pytest
 
+from daedalus.browser.gateway import check_frame
 from daedalus.browser.model import BrowserGone, EnvUnavailable, NotFound, OverCap, Owner, group_id, profile_id
 from daedalus.browser.service import Browsers
 from daedalus.config import BrowserConfig
+from daedalus.gateway import RelayResult
 from daedalus.stores.database import Database
 from tests.support.fake_browserd import FakeBrowserd
 
@@ -320,3 +322,91 @@ async def _reason(service: Browsers) -> str | None:
 
 async def _acting(service: Browsers) -> bool:
     return bool((await service.get("s-sess1"))["acting"])
+
+
+async def test_the_daemon_gets_the_operators_limits_and_again_when_they_change(service: Browsers, daemon: FakeBrowserd, cfg: BrowserConfig) -> None:
+    await wait_until(lambda: asyncio.sleep(0, daemon.limits), {"max_browsers": 2, "idle_close_ms": 600_000, "record_max_bytes": 500 << 20, "record_retention_ms": 7 * 86_400_000})
+    cfg.running_cap = 3
+    cfg.idle_close_minutes = 0
+    await wait_until(lambda: asyncio.sleep(0, (daemon.limits.get("max_browsers"), daemon.limits.get("idle_close_ms"))), (3, 0), timeout=10)
+    sent = len([c for c in daemon.calls if c[0] == "limits.set"])
+    await asyncio.sleep(2.5)
+    assert len([c for c in daemon.calls if c[0] == "limits.set"]) == sent, "an unchanged setting is not sent again"
+
+
+async def test_recording_is_the_operators_switch_and_its_frames_are_read_back(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd, cfg: BrowserConfig) -> None:
+    owners.add(SESSION)
+    cfg.record_frames = True
+    opened = await service.open(SESSION, actor="agent:sess1")
+    gid = opened["group"]["id"]
+    # The Settings default switched it on for the new browser: its first frame is taken.
+    listed = await service.recording(gid)
+    assert listed["recording"]["frames"] is True and [f["kind"] for f in listed["frames"]] == ["start"]
+    await service.set_recording(gid, frames=False)
+    assert (await service.recording(gid))["recording"]["frames"] is False
+    meta, data = await service.frame(gid, 1)
+    assert meta["no"] == 1 and data == daemon.screenshot
+    envs = await service.recordings()
+    assert envs[0]["env"] == "container" and envs[0]["groups"][0]["group_id"] == gid and envs[0]["max_bytes"] == 500 << 20
+    # A closed browser's recording is still there to replay.
+    await service.close_group(gid, actor="operator")
+    assert len((await service.recording(gid))["frames"]) == 1
+    await service.delete_recording(gid)
+    assert (await service.recording(gid))["frames"] == []
+
+
+async def test_the_running_browsers_and_the_load_name_their_figures(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION, "Research")
+    await service.open(SESSION, actor="agent:sess1")
+    running = await service.running_browsers()
+    assert len(running) == 1 and running[0]["rss_bytes"] == 250 << 20 and running[0]["memory_basis"] == "cgroup"
+    assert running[0]["groups"][0]["owner"]["label"] == "Research"
+    load = await service.load()
+    assert load["memory_basis"] == "cgroup" and load["used"]["daemon_rss_bytes"] == 20 << 20 and load["used"]["machine_cpu_percent"] == 10.0
+    await service.close_browser("container", running[0]["id"])
+    assert not daemon.browsers
+
+
+def test_the_gateway_hears_whether_a_view_is_in_view() -> None:
+    seen: list[dict[str, Any]] = []
+    check = check_frame(False, seen.append)
+    result = RelayResult(code=1000, reason="", ended_by="app")
+    assert check(b"\x30" + json.dumps({"tier": "live", "max_w": 640, "max_h": 400}).encode(), result) is not None
+    assert check(b"\x32" + json.dumps({"hidden": True}).encode(), result) is not None
+    assert seen == [{"tier": "live", "max_w": 640, "max_h": 400}, {"hidden": True}]
+
+
+async def test_watchers_count_only_views_in_view(service: Browsers) -> None:
+    a = service.watch("g1")
+    b = service.watch("g1")
+    assert service.watched("g1")
+    service.set_watch("g1", a, False)
+    assert service.watched("g1")
+    service.set_watch("g1", b, False)
+    assert not service.watched("g1")
+    service.set_watch("g1", b, True)
+    service.unwatch("g1", b)
+    assert not service.watched("g1")
+    service.unwatch("g1", a)
+    assert not service.watched("other")
+
+
+def test_terminals_and_browsers_are_projected_on_one_machine() -> None:
+    """The figures the app's workloads bar must repeat (machineload.test.ts, the same machine)."""
+    from daedalus import load
+
+    gib, mib = 1 << 30, 1 << 20
+    machine = {"mem_total_bytes": 64 * gib, "mem_available_bytes": 40 * gib, "cpus": 16, "cpu_percent": 12.0}
+    out = load.project_workloads(machine=machine, kinds={
+        "terminals": {"cap": 20, "running": 3, "used_rss": 3 * gib + 40 * mib, "cost": load.Cost(700 * mib, 4.0, 10)},
+        "browsers": {"cap": 2, "running": 1, "used_rss": 300 * mib, "cost": load.Cost(260 * mib, 15.0, 10)},
+    })
+    assert out["kinds"]["terminals"] == {"cap": 20, "extra": 17, "rss_bytes": 3 * gib + 40 * mib, "at_cap_rss_bytes": 3 * gib + 40 * mib + 17 * 700 * mib}
+    assert out["kinds"]["browsers"]["at_cap_rss_bytes"] == 560 * mib
+    assert out["machine_used_bytes"] == 38520487936 and out["mem_percent"] == 56.1 and out["cpu_percent"] == 17.2 and out["level"] == "ok"
+    # A browser cap the machine cannot carry beside the terminals: judged together, it is "bad".
+    heavy = load.project_workloads(machine=machine, kinds={
+        "terminals": {"cap": 45, "running": 3, "used_rss": 3 * gib, "cost": load.Cost(700 * mib, 4.0, 10)},
+        "browsers": {"cap": 32, "running": 1, "used_rss": 300 * mib, "cost": load.Cost(260 * mib, 15.0, 10)},
+    })
+    assert heavy["level"] == "bad"

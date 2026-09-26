@@ -102,7 +102,13 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 	m.tabSeq++
 	t := &Tab{ID: "t" + strconv.Itoa(m.tabSeq), Group: g, TargetID: info.TargetID, Session: session, Opener: opener,
 		CreatedAt: time.Now().UTC(), url: info.URL, title: info.Title, life: map[string]bool{}, wake: make(chan struct{})}
+	m.settingUp[session] = t
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.settingUp, session)
+		m.mu.Unlock()
+	}()
 	// The page's size is its window's: in the pinned Chromium the screencast shows the window whatever
 	// Emulation says, so an emulated viewport would put every click beside what the frame shows.
 	m.sizeWindow(ctx, b, info.TargetID, g.Viewport)
@@ -118,11 +124,19 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 		// no bodies are kept.
 		{"Network.enable", map[string]any{"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}},
 		{"Emulation.setUserAgentOverride", map[string]any{"userAgent": b.userAgent, "userAgentMetadata": b.uaMetadata}},
-		{"Runtime.runIfWaitingForDebugger", nil},
 	} {
 		replies = append(replies, b.conn.Send(ctx, session, call.method, call.params))
 		methods = append(methods, call.method)
 	}
+	// Before the page runs, so its first navigation (a popup's) meets the guard too.
+	guarded := false
+	if method, params, ok := m.guardSetup(); ok {
+		replies = append(replies, b.conn.Send(ctx, session, method, params))
+		methods = append(methods, method)
+		guarded = true
+	}
+	replies = append(replies, b.conn.Send(ctx, session, "Runtime.runIfWaitingForDebugger", nil))
+	methods = append(methods, "Runtime.runIfWaitingForDebugger")
 	for i, r := range replies {
 		if err := <-r; err != nil {
 			m.log.Warn("page setup", "method", methods[i], "error", err.Error())
@@ -133,6 +147,9 @@ func (m *Manager) setupTab(g *Group, session string, info targetInfo, opener str
 	if _, ok := m.groups[g.ID]; !ok {
 		m.mu.Unlock()
 		return nil
+	}
+	if guarded {
+		t.values = map[any]any{guardKey{}: true}
 	}
 	m.tabs[t.ID] = t
 	m.bySession[session] = t

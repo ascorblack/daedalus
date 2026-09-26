@@ -9,14 +9,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { BrowserActionRow, BrowserGroup } from "../api";
+import type { BrowserActionRow, BrowserFrame, BrowserGroup } from "../api";
 import { OverflowMenu, Popover, type MenuItem } from "../dialogs";
 import { clock } from "../format";
 import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { navigate, pathFor } from "../router";
 import { confirmAsync, errorText, haptic } from "../ui";
-import { answerDialog, closeBrowser, consumeTake, deviceSaving, setControl, takeHandoff, useActions, useLiveSnapshot, useLiveView } from "./data";
+import { answerDialog, closeBrowser, consumeTake, deleteRecording, deviceSaving, recordingMoved, setControl, setRecording, takeHandoff, useActions, useLiveSnapshot, useLiveView, useRecording } from "./data";
+import { frameOfRow, ReplayStage } from "./replay";
 import type { LiveSnapshot, LiveView } from "./live";
 import { actionWords, agentName, domainOf, driveState, mergeActions, needsOf, needWords, rowOfEvent, secure, type DriveState } from "./model";
 import type { ActionEvent } from "./protocol";
@@ -70,6 +71,21 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
   const viewing = snap.tabs.find((tab) => tab.id === (snap.viewing ?? snap.active)) ?? group.tabs.find((tab) => tab.active) ?? group.tabs[0] ?? null;
   const url = viewing?.url ?? "";
   const [logOpen, setLogOpen] = useState(false);
+  const recording = useRecording(group.id);
+  const listed = useActions(group.id);
+  // The replay frames an action's element from its row: the listing's, or the live event's while the
+  // listing has not been read again since.
+  const rows = useMemo(() => mergeActions(listed, snap.recent.map(rowOfEvent)), [listed, snap.recent]);
+  /** The keyframe on screen in place of the live picture, or null: live. */
+  const [replay, setReplay] = useState<number | null>(null);
+  const frames = recording.frames;
+  const replaying = replay !== null && frames.length > 0;
+  // While recording, every action the live view reports has a keyframe coming: its row gets it.
+  const latestAction = snap.recent[0]?.id;
+  const recordingOn = recording.recording.frames;
+  useEffect(() => {
+    if (latestAction && recordingOn) recordingMoved(group.id);
+  }, [latestAction, recordingOn, group.id]);
 
   // The corner preview grows into this picture: the stage starts where the card was and settles here.
   useEffect(() => {
@@ -135,6 +151,9 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
         )}
       </BrowserViewer>
       {snap.dialog && <DialogChip group={group.id} tab={viewing?.id ?? null} dialog={snap.dialog} canAnswer={drive === "you"} toast={toast} />}
+      {replaying && (
+        <ReplayStage group={group.id} viewportW={group.viewport.w} frames={frames} index={replay} rows={rows} agent={agent} onIndex={setReplay} onLive={() => setReplay(null)} />
+      )}
     </div>
   );
 
@@ -143,12 +162,14 @@ export function BrowserPanel({ group, groups = [group], onGroup, toast, phone = 
       {phone ? (
         <PhoneBar group={group} url={url} tabs={tabs.length} control={control} />
       ) : (
-        <Toolbar group={group} groups={groups} onGroup={onGroup} live={live} snap={snap} url={url} tabs={tabs} viewing={viewing?.id ?? null} drive={drive} control={control} toast={toast} full={full} />
+        <Toolbar group={group} groups={groups} onGroup={onGroup} live={live} snap={snap} url={url} tabs={tabs} viewing={viewing?.id ?? null} drive={drive} control={control} toast={toast} full={full}
+          recording={recording.recording.frames} frames={frames} onReplay={() => setReplay(frames.length - 1)} />
       )}
       <div className="bp-main">
         {viewer}
         {/* A phone's sheet is taller than the page's picture: the log fills what is left under it. */}
-        <ActionLog group={group.id} recent={snap.recent} open={phone || logOpen} onToggle={() => setLogOpen((o) => !o)} onFocus={(a) => live?.focus(a)} agent={agent} page={phone} />
+        <ActionLog group={group.id} recent={snap.recent} open={phone || logOpen} onToggle={() => setLogOpen((o) => !o)} onFocus={(a) => live?.focus(a)} agent={agent} page={phone}
+          frames={frames} onReplay={(i) => setReplay(i)} />
       </div>
       {phone && drive === "you" && live && (
         createPortal(<PhoneDrive group={group} live={live} snap={snap} agent={agent} url={url} saving={saving} onGiveBack={(note) => void control.giveBack(note)} />, document.body)
@@ -283,7 +304,7 @@ function GiveBack({ anchor, onClose, onGive }: { anchor: HTMLElement; onClose: (
 
 // ── the toolbar ──────────────────────────────────────────────────────────────────────────────
 
-function Toolbar({ group, groups, onGroup, live, snap, url, tabs, viewing, drive, control, toast, full }: {
+function Toolbar({ group, groups, onGroup, live, snap, url, tabs, viewing, drive, control, toast, full, recording, frames, onReplay }: {
   group: BrowserGroup;
   groups: BrowserGroup[];
   onGroup?: (id: string) => void;
@@ -296,12 +317,39 @@ function Toolbar({ group, groups, onGroup, live, snap, url, tabs, viewing, drive
   control: ControlApi;
   toast: (text: string) => void;
   full: boolean;
+  recording: boolean;
+  frames: BrowserFrame[];
+  onReplay: () => void;
 }) {
   const driving = drive === "you";
+  const record = async (on: boolean) => {
+    try {
+      await setRecording(group.id, on);
+      toast(t(on ? "browser.record.on" : "browser.record.off"));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  };
   const nav = (action: "back" | "forward" | "reload") => live?.input({ t: "nav", action });
   const items: MenuItem[] = [
     ...(drive === "paused" ? [] : drive === "you" ? [] : [{ label: t("browser.pause"), icon: "pause" as IconName, onSelect: () => void control.pause() }]),
     ...(full ? [] : [{ label: t("browser.window"), icon: "external" as IconName, onSelect: () => window.open(pathFor("browser", group.id), "_blank", "noopener") }]),
+    // The recording is the operator's alone: the agent has no tool that switches it.
+    { label: t(recording ? "browser.record.stop" : "browser.record.start"), icon: "dot" as IconName, checked: recording, onSelect: () => void record(!recording) },
+    ...(frames.length ? [
+      { label: t("browser.replay.open", { n: frames.length }), icon: "image" as IconName, onSelect: onReplay },
+      {
+        label: t("browser.record.delete"), icon: "trash" as IconName,
+        onSelect: async () => {
+          if (!(await confirmAsync(t("browser.record.delete.title"), { body: t("browser.record.delete.body"), action: t("browser.record.delete") }))) return;
+          try {
+            await deleteRecording(group.id);
+          } catch (e) {
+            toast(errorText(e));
+          }
+        },
+      },
+    ] : []),
     ...(groups.length > 1 && onGroup ? ["-" as const, ...groups.map((g) => ({ label: `${domainOf(g.tabs.find((x) => x.active)?.url ?? "")} · ${g.profile}`, icon: "globe" as IconName, checked: g.id === group.id, onSelect: () => onGroup(g.id) }))] : []),
     "-",
     {
@@ -470,15 +518,18 @@ function DialogChip({ group, tab, dialog, canAnswer, toast }: { group: string; t
 
 // ── the action log ───────────────────────────────────────────────────────────────────────────
 
-const ACTOR_ICON: Record<string, IconName> = { agent: "bolt", operator: "user", page: "globe" };
+const ACTOR_ICON: Record<string, IconName> = { agent: "bolt", operator: "user", page: "globe", system: "shield" };
 
-export function ActionLog({ group, recent, open, onToggle, onFocus, agent, page = false }: { group: string; recent: ActionEvent[]; open: boolean; onToggle: () => void; onFocus: (a: ActionEvent) => void; agent: string; page?: boolean }) {
+export function ActionLog({ group, recent, open, onToggle, onFocus, agent, page = false, frames = [], onReplay }: { group: string; recent: ActionEvent[]; open: boolean; onToggle: () => void; onFocus: (a: ActionEvent) => void; agent: string; page?: boolean; frames?: BrowserFrame[]; onReplay?: (index: number) => void }) {
   const listed = useActions(group);
   const rows = useMemo(() => mergeActions(listed, recent.map(rowOfEvent)), [listed, recent]);
   const latest = rows[0];
   const [focused, setFocused] = useState<string | null>(null);
   const pick = (row: BrowserActionRow) => {
     setFocused(row.id);
+    // With a recording, a row opens the picture its action left, the element framed on it.
+    const kept = frameOfRow(frames, row);
+    if (kept >= 0 && onReplay) return onReplay(kept);
     if (!row.point && !row.box) return;
     onFocus({ type: "action", id: row.id, group, tab: row.tab, actor: row.actor === "operator" ? "operator" : "agent", kind: row.kind, point: row.point ?? null, box: row.box ?? null, name: row.name, element: row.element, at: Date.parse(row.at) });
   };
@@ -509,6 +560,7 @@ export function ActionLog({ group, recent, open, onToggle, onFocus, agent, page 
               <span className="bp-log-time">{clock(row.at)}</span>
               <span className={`bp-log-actor ${row.actor}`} title={row.actor === "operator" ? t("browser.actor.you") : row.actor === "page" ? t("browser.actor.page") : agent}><Icon name={ACTOR_ICON[row.actor] ?? "bolt"} size={12} /></span>
               <span className="bp-log-text"><ActionText row={row} agent={agent} /></span>
+              {frameOfRow(frames, row) >= 0 && <span className="bp-log-frame" title={t("browser.replay.row")}><Icon name="image" size={12} /></span>}
               {row.sensitive && <span className={`bp-log-flag ${row.sensitive.decision}`}>{t(`browser.sensitive.${row.sensitive.decision}`)}</span>}
             </button>
           </li>

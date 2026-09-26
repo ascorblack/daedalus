@@ -64,6 +64,9 @@ type View struct {
 	MaxH    int     `json:"max_h,omitempty"`
 	DPR     float64 `json:"dpr,omitempty"`
 	Quality int     `json:"quality,omitempty"`
+	// Hidden says the client's page went out of view (true) or came back (false): a hidden client
+	// is sent no frames, its mailbox keeping the newest for when it is back.
+	Hidden *bool `json:"hidden,omitempty"`
 }
 
 // Input is an INPUT frame. Which fields mean something depends on T; coordinates are CSS pixels of

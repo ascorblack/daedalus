@@ -91,6 +91,20 @@ def terminal_load(*, running: int = 3, cap: int = 20, total: int = 62 * GIB, ava
         "thresholds": {"warn": 70.0, "bad": 90.0},
     }
 
+def browser_load(*, running: int = 1, cap: int = 2, total: int = 62 * GIB, available: int = 38 * GIB, each: int = 260 * MIB) -> dict[str, object]:
+    """``GET /api/browsers/load`` for the same machine: browsers of about 260 MB (browser_stub's twin)."""
+    daemon = 12 * MIB
+    used = running * each + daemon
+    return {
+        "cap": cap, "running": running, "queued": [], "memory_basis": "cgroup",
+        "used": {"rss_bytes": used, "daemon_rss_bytes": daemon, "cpu_percent": 4.0, "cpus": 16, "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": 14.0},
+        "likely": {"rss_bytes": each, "cpu_percent": 12.0, "samples": 30, "basis": "measured"},
+        "projection": {"cap": cap, "sessions": max(cap, running), "terminals_rss_bytes": used, "machine_used_bytes": total - available, "mem_total_bytes": total, "mem_percent": 40.0, "cpu_percent": 15.0, "level": "ok", "cpu_level": "ok"},
+        "envs": [{"env": "container", "supported": True, "browsers": running, "rss_bytes": running * each, "cpu_percent": 4.0, "mem_total_bytes": total, "mem_available_bytes": available}],
+        "thresholds": {"warn": 70.0, "bad": 90.0},
+    }
+
+
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
     "/api/conversation-search/settings": {"mode": "off", "paused": False, "reason": "off", "busy": False, "indexed": 0, "pending": 0, "label": "Multilingual E5 Small", "size_bytes": 135429554, "licence": "MIT", "installed": False},
@@ -145,6 +159,13 @@ GATES: dict[str, object] = {
     # has a browser. A harness that opens one installs `browser_stub.BrowserStub`, which answers the rest
     # of `/api/browsers*` and the live view's WebSocket.
     "/api/browsers": {"available": True, "reason": "", "groups": []},
+    # Settings → Browser and the load bars read these; a harness with a browser installs the stub's.
+    "/api/browsers/load": browser_load(running=0),
+    "/api/browsers/running": {"browsers": []},
+    "/api/browsers/profiles": {"profiles": []},
+    "/api/browsers/recordings": {"envs": []},
+    # Without a browser installed, the workloads are the terminals alone: their own bar.
+    "/api/workloads/load": {"terminals": terminal_load(), "browsers": None, "together": None},
     # Terminal environments and the terminals in them: a container environment that works, a host
     # one that is not installed, and no terminals yet. Every session screen lists its terminals (with
     # `?owner_kind=session&owner_id=…`, answered here by path). A harness that opens terminals installs

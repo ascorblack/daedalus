@@ -5,9 +5,9 @@
 // knows what else will run on that machine, the estimate only knows what ran so far.
 
 import { useEffect, useState } from "react";
-import type { Settings, TerminalLoad } from "../api";
+import type { Settings, WorkloadsLoad } from "../api";
 import { plural, t } from "../i18n";
-import { LoadBar } from "../loadbar";
+import { WorkloadsBar } from "../loadbar";
 import { useQuery } from "../store";
 
 export const DEFAULT_CAP = 20;
@@ -23,7 +23,9 @@ export function TerminalCap({ s, save }: { s: Settings; save: (patch: Partial<Se
   const [draft, setDraft] = useState(String(configured));
   useEffect(() => setDraft(String(configured)), [configured]);
   // Every ten seconds, the daemon's own measuring period: polling faster shows the same numbers.
-  const load = useQuery<TerminalLoad>("/api/terminals/load", { pollMs: 10000 });
+  // Terminals and browsers share the machine: where there are browsers too, the bar is both, each
+  // filled to its own cap and judged together (WorkloadsBar); without them it is the terminals' own.
+  const load = useQuery<WorkloadsLoad>("/api/workloads/load", { pollMs: 10000 });
   const value = capValue(draft);
 
   function commit() {
@@ -55,11 +57,11 @@ export function TerminalCap({ s, save }: { s: Settings; save: (patch: Partial<Se
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
         />
-        <span className="sub">{load.data ? plural("settings.cap.running", load.data.running) : ""}</span>
+        <span className="sub">{load.data?.terminals ? plural("settings.cap.running", load.data.terminals.running) : ""}</span>
       </div>
       {value === null && <div className="sub push-error">{t("settings.cap.invalid")}</div>}
-      {load.data ? (
-        <LoadBar load={load.data} cap={value ?? configured} />
+      {load.data?.terminals ? (
+        <WorkloadsBar load={load.data} caps={{ terminals: value ?? configured }} />
       ) : load.error ? (
         <div className="sub">{t("settings.cap.noload", { reason: load.error })}</div>
       ) : (

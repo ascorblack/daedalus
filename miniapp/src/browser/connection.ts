@@ -44,6 +44,10 @@ export type ViewDeps = {
   base: () => string;
   wake: (callback: () => void) => () => void;
   random: () => number;
+  /** Whether the page is out of sight now, and a way to hear when that changes. A hidden view is sent
+   *  no frames, and watch mode does not count it as someone watching. */
+  hidden?: () => boolean;
+  visibility?: (callback: (hidden: boolean) => void) => () => void;
 };
 
 /** Where frames go: the viewer's canvas, or a fake in tests. `draw` settles once the picture is shown. */
@@ -85,6 +89,12 @@ export function browserViewDeps(): ViewDeps {
       };
     },
     random: Math.random,
+    hidden: () => document.visibilityState === "hidden",
+    visibility: (callback) => {
+      const changed = () => callback(document.visibilityState === "hidden");
+      document.addEventListener("visibilitychange", changed);
+      return () => document.removeEventListener("visibilitychange", changed);
+    },
   };
 }
 
@@ -101,6 +111,8 @@ export class BrowserConnection {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private lastFrameAt = 0;
   private unwake: () => void;
+  private unvisible: () => void;
+  private hidden = false;
   private drawing = false;
   private waiting: Frame | null = null;
   private tier: Tier;
@@ -116,6 +128,7 @@ export class BrowserConnection {
     this.tier = options.tier;
     this.tab = options.tab;
     this.unwake = deps.wake(() => this.wake());
+    this.unvisible = deps.visibility?.((hidden) => this.setHidden(hidden)) ?? (() => undefined);
     void this.connect();
   }
 
@@ -128,6 +141,13 @@ export class BrowserConnection {
     if (change.tier) this.tier = change.tier;
     if (change.tab) this.tab = change.tab;
     if (this.isLive()) this.socket!.send(encodeView(change));
+  }
+
+  /** The page went out of sight or came back: the daemon stops or resumes sending frames. */
+  private setHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return;
+    this.hidden = hidden;
+    if (this.socket && this.socket.readyState === OPEN) this.socket.send(encodeView({ hidden }));
   }
 
   /** Send the operator's input. False when there is nowhere to send it: not live, or read-only. */
@@ -145,6 +165,7 @@ export class BrowserConnection {
     if (this.closed) return;
     this.closed = true;
     this.unwake();
+    this.unvisible();
     this.clearTimers();
     this.dropSocket();
   }
@@ -195,6 +216,8 @@ export class BrowserConnection {
       this.drawing = false;
       this.waiting = null;
       socket.send(encodeAttach({ tier: this.tier, ...(this.tab ? { tab: this.tab } : {}), ...this.options.box() }));
+      this.hidden = !!this.deps.hidden?.();
+      if (this.hidden) socket.send(encodeView({ hidden: true }));
       this.startTimers();
     };
     socket.onmessage = (event) => {

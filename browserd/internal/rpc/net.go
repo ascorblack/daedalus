@@ -28,6 +28,8 @@ func (d *Daemon) netConfigure(ctx context.Context, c *server.Conn, params json.R
 	if err := d.Net.Wall.Configure(cfg); err != nil {
 		return nil, wire.Errorf(wire.CodeInvalidParams, "params: %v", err)
 	}
+	// Open pages start or stop judging their own navigations with the allowlist.
+	d.Manager.SyncGuard(ctx)
 	d.Log.Info("network wall configured", "sealed_ports", len(cfg.SealedPorts), "services_ranges", len(cfg.ServicesPorts),
 		"loopback_rewrite", cfg.LoopbackRewrite, "ask_loopback", cfg.AskLoopback, "lan_allow", len(cfg.LANAllow), "allowlist", cfg.EgressAllow != nil)
 	return map[string]any{}, nil

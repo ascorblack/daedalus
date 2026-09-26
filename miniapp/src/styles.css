@@ -2934,6 +2934,15 @@ button.staff-row:hover { background: var(--surface-2); }
 .loadbar[data-level="bad"] .loadbar-percent { color: var(--bad); }
 .loadbar-cpu[data-level="warn"] { color: var(--warn); }
 .loadbar-cpu[data-level="bad"] { color: var(--bad); }
+/* Browsers share the track with terminals: the accent, so the two kinds read apart whatever the level. */
+.loadbar-browsers { background: var(--accent); }
+.loadbar-browsers-extra { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--accent) 55%, transparent) 0 4px, color-mix(in srgb, var(--accent) 28%, transparent) 4px 8px); }
+.loadbar-kind { display: flex; align-items: baseline; gap: 6px; }
+.loadbar-kind i { flex: none; width: 8px; height: 8px; border-radius: 2px; transform: translateY(-1px); }
+.loadbar-kind.terminals i { background: var(--ok); }
+.loadbar[data-level="warn"] .loadbar-kind.terminals i { background: var(--warn); }
+.loadbar[data-level="bad"] .loadbar-kind.terminals i { background: var(--bad); }
+.loadbar-kind.browsers i { background: var(--accent); }
 .loadbar-warning { margin-top: 4px; padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bad) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 35%, transparent); color: var(--fg); font-size: var(--fs-13); line-height: var(--lh-ui); }
 
 /* ── a terminal on a phone (terminal/mobile.tsx) ─────────────────────────────────────────────
@@ -3563,3 +3572,45 @@ button.staff-row:hover { background: var(--surface-2); }
 .browser-full .bp { border-top: 1px solid var(--line); }
 .staff-panel.with-browser { display: flex; flex-direction: column; height: 100%; }
 .staff-panel-body.tab-browser { padding: 0; display: flex; flex-direction: column; overflow: hidden; flex: 1; min-height: 0; }
+
+/* Settings → Browser. Rows of the running browsers and the profiles: what it is, whose it is, its
+   size, and the buttons that end or wipe it, which never shrink under the text. */
+.bs { display: grid; gap: 12px; }
+.bs .card { margin: 0; }
+.bs-code { display: inline-block; margin-top: 8px; padding: 4px 8px; border-radius: var(--radius-sm); background: var(--surface-3); font-family: var(--mono); font-size: var(--fs-13); }
+.bs-env + .bs-env { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.bs-env-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; min-width: 0; }
+.bs-env-head .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bs-warn { color: var(--warn); }
+.bs-rows { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
+.bs-row { display: flex; align-items: center; gap: 10px; min-height: var(--row-h); padding: 4px 0; min-width: 0; }
+.bs-row > svg { flex: none; color: var(--fg-2); }
+.bs-row-main { display: grid; flex: 1; min-width: 0; }
+.bs-row-main b { font-weight: 600; font-size: var(--fs-14); }
+.bs-row-figure { flex: none; color: var(--fg-2); font-size: var(--fs-13); font-variant-numeric: tabular-nums; }
+.bs-row .btn { flex: none; }
+.bs-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.bs-pair label.field { display: grid; gap: 4px; }
+.bs-pair input.field { margin: 0; }
+.bs-list { width: 100%; font-family: var(--mono); font-size: var(--fs-13); resize: vertical; }
+.bs-rec-used { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+@media (max-width: 600px) {
+  .bs-row { flex-wrap: wrap; }
+  .bs-row-main { flex-basis: calc(100% - 30px); }
+  .bs-row-figure { margin-left: 26px; margin-right: auto; }
+}
+
+/* The recording played back: a layer over the live picture, which keeps running underneath. */
+.bp-replay { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: var(--term-bg); }
+.bp-replay-bar { flex: none; display: flex; align-items: center; gap: 8px; min-height: var(--row-h); padding: 4px 10px; background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); border-bottom: 1px solid var(--line); font-size: var(--fs-13); }
+.bp-replay-bar > svg { flex: none; color: var(--accent); }
+.bp-replay-when { flex: none; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.bp-replay-scrub { flex: 1; min-width: 60px; accent-color: var(--accent); }
+.bp-replay-live { flex: none; }
+.bp-replay-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.bp-replay-img { position: absolute; display: block; user-select: none; }
+.bp-replay-gone { position: absolute; inset: 0; display: grid; place-items: center; }
+.bp-replay-box { position: absolute; border: 2px solid var(--accent); border-radius: 3px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg) 60%, transparent); pointer-events: none; }
+.bp-replay-label { position: absolute; left: -2px; bottom: calc(100% + 4px); max-width: 280px; padding: 2px 6px; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-fg, #fff); font-size: var(--fs-12); white-space: nowrap; }
+.bp-replay-point { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); pointer-events: none; }
+.bp-log-frame { flex: none; color: var(--accent); display: inline-flex; }

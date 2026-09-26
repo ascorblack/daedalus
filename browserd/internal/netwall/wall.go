@@ -85,6 +85,11 @@ func New(opts Options) *Wall {
 	return w
 }
 
+// SetTestRedirect is for the tests of other packages that browse through the wall: it dials a
+// fixture on loopback in place of the address a fake resolver gave a name, after the wall has judged
+// that address. A daemon never calls it.
+func (w *Wall) SetTestRedirect(f func(netip.AddrPort) netip.AddrPort) { w.redirect = f }
+
 // Configure replaces the rules. A tunnel already open stays open (a page's WebSocket is not cut by
 // a settings change); every new connection is judged by the new rules.
 func (w *Wall) Configure(c Config) error {

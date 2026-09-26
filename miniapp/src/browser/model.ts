@@ -72,7 +72,7 @@ export function secure(url: string): boolean {
 }
 
 /** A row of the action log in words: an i18n key and what fills it. */
-export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "name" | "text" | "text_len" | "keys" | "url" | "needs" | "download">): { key: string; vars: Record<string, string | number> } {
+export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "name" | "text" | "text_len" | "keys" | "url" | "needs" | "download"> & { ok?: boolean }): { key: string; vars: Record<string, string | number> } {
   const what = row.name || row.element || "";
   switch (row.kind) {
     case "click":
@@ -105,6 +105,14 @@ export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "na
     case "give":
     case "pause":
       return { key: `browser.act.${row.kind}`, vars: {} };
+    case "close":
+      return { key: "browser.act.close", vars: {} };
+    case "blocked":
+      return { key: "browser.act.blocked", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
+    case "watch":
+      return { key: "browser.act.watch", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
+    case "monitor":
+      return { key: row.ok === false ? "browser.act.monitor.hit" : "browser.act.monitor.clean", vars: { where: domainOf(row.url ?? "") || row.url || "" } };
     default:
       return { key: "browser.act.other", vars: { kind: row.kind, what } };
   }
@@ -114,6 +122,7 @@ export function actionWords(row: Pick<BrowserActionRow, "kind" | "element" | "na
 export function rowOfEvent(e: ActionEvent): BrowserActionRow {
   return {
     id: e.id,
+    action_id: e.id,
     at: new Date(e.at).toISOString(),
     actor: e.actor,
     kind: e.kind,
@@ -129,8 +138,11 @@ export function rowOfEvent(e: ActionEvent): BrowserActionRow {
 
 /** The listing's rows and the live ones merged by id, newest first, the listing winning on detail. */
 export function mergeActions(listed: BrowserActionRow[], live: BrowserActionRow[], max = 200): BrowserActionRow[] {
+  // The host's rows are numbered by its audit and name the daemon's action they were; a live row is
+  // the daemon's action itself. One action is one row, whichever came first.
   const byId = new Map<string, BrowserActionRow>();
-  for (const r of live) byId.set(r.id, r);
+  const listedActions = new Set(listed.map((r) => r.action_id).filter(Boolean));
+  for (const r of live) if (!listedActions.has(r.id)) byId.set(r.id, r);
   for (const r of listed) byId.set(r.id, { ...byId.get(r.id), ...r });
   return [...byId.values()].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, max);
 }

@@ -157,3 +157,12 @@ describe("a request in words", () => {
     expect(needWords(null)).toBe("");
   });
 });
+
+describe("the action log's rows", () => {
+  it("are one row per action when the host's listing and the live event both have it", () => {
+    const live = { id: "a3f-7", at: "2026-09-26T10:00:01Z", actor: "agent", kind: "click", element: "the button", name: "Buy", tab: "t1" };
+    const listed = { ...live, id: "412", action_id: "a3f-7" };
+    const rows = mergeActions([listed], [live]);
+    expect(rows.map((r) => r.id)).toEqual(["412"]);
+  });
+});

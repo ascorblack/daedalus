@@ -17,12 +17,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
+from protocore.contracts.types import Message, MessageRole, TextBlock
+
 from daedalus.browser.agent import BrowserAgent
 from daedalus.browser.cli import TOOL_SET, StaffBrowser
 from daedalus.browser.model import Owner
+from daedalus.browser.monitor import TIMEOUT_SECONDS, InjectionMonitor
 from daedalus.browser.owners import DatabaseOwners
 from daedalus.browser.service import Browsers
 from daedalus.config import keyproxy_base
+from daedalus.host.engine_factory import TENANT
 from daedalus.terminals.update import DaemonUpdate
 
 IMAGE_BINARY = Path("/usr/local/bin/browserd")
@@ -103,7 +108,26 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     manager = app.manager
     assert manager is not None
     service = build(app)
-    agent = BrowserAgent(service)
+
+    async def classify(text: str) -> str:
+        """The injection monitor's model: the preset named for it, else a middle one of the table."""
+        config = app.config
+        preset = config.browser.injection_monitor_preset
+        if preset not in config.presets:
+            preset = config.middle_preset() or ""
+        provider, model = manager.providers.rungs_for(config, preset or None)[0]
+        request = LLMRequest(
+            model=model,
+            messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=text)])],
+            max_tokens=120,
+            temperature=0.0,
+            extra={"enable_thinking": False},
+            observability=LLMObservabilityContext(tenant_id=TENANT, call_purpose="browser_injection_monitor", call_category="browser"),
+        )
+        response = await asyncio.wait_for(provider.complete_text(request), timeout=TIMEOUT_SECONDS)
+        return "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock))
+
+    agent = BrowserAgent(service, InjectionMonitor(classify))
     app.extensions["browser"] = service
     app.extensions["browser_agent"] = agent
     manager.service_hooks["browser"] = agent
