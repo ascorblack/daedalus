@@ -38,7 +38,9 @@ USAGE_CACHE_SECONDS = 60
 MODELS_CACHE_SECONDS = 300
 # The usage table names only models already called. Astra is the CLI's current default and
 # was missing from this list, so a usage call that failed hid it.
-CODEX_FALLBACK_MODELS = ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+# The models ``codex debug models`` offered with visibility "list" on 0.157.1. The usage table
+# names only models that have already been called, so a new one stays invisible until it is here.
+CODEX_FALLBACK_MODELS = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
 
 
 class SubscriptionError(RuntimeError):

@@ -11,6 +11,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import (
     apply_provider_patch,
     build_app,
+    extend_model_list,
     lookup_openai_models,
     mask_provider_keys,
     model_entry,
@@ -19,6 +20,14 @@ from daedalus.providers.registry import ProviderRegistry
 from tests.support.models import model_config
 
 # -- pure helpers ---------------------------------------------------------------------------
+
+
+def test_extend_model_list_appends_ids_the_endpoint_did_not_name() -> None:
+    result = {"models": ["gpt-6-astra"], "entries": [{"id": "gpt-6-astra", "context_length": 1}]}
+    extend_model_list(result, ["gpt-6-astra", " gpt-6-sol ", "", "gpt-5.5"])
+    assert result["models"] == ["gpt-6-astra", "gpt-6-sol", "gpt-5.5"]
+    assert result["entries"][0] == {"id": "gpt-6-astra", "context_length": 1}
+    assert result["entries"][1:] == [{"id": "gpt-6-sol"}, {"id": "gpt-5.5"}]
 
 
 def test_apply_provider_patch_merges_partials_and_creates_new_entries() -> None:

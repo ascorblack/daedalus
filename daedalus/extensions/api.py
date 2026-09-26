@@ -869,6 +869,28 @@ async def lookup_openai_models(
     raise ValueError("; ".join(errors[:3]) or "no response")
 
 
+def extend_model_list(result: dict[str, Any], extra: list[str]) -> dict[str, Any]:
+    """Append ids the endpoint did not name, after its own and without repeating one.
+
+    The Codex proxy's ``/models`` is a short fallback plus whatever its usage table has already
+    metered, so a model the CLI lists and nobody has called yet never arrives. The harness check
+    already stored that list; this is where Add a model hears about it.
+    """
+    have = set(result.get("models") or [])
+    models = list(result.get("models") or [])
+    entries = list(result.get("entries") or [])
+    for model in extra:
+        name = str(model or "").strip()
+        if not name or name in have:
+            continue
+        have.add(name)
+        models.append(name)
+        entries.append({"id": name})
+    result["models"] = models
+    result["entries"] = entries
+    return result
+
+
 def apply_provider_patch(providers: dict[str, Any], provider_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Merge a partial patch into a config-style ``providers`` dict (in place; returns it).
 
@@ -5366,11 +5388,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 "discovery": discovered.as_dict(),
             }
         try:
-            return await lookup_openai_models(base_url, api_key)
+            found = await lookup_openai_models(base_url, api_key)
         except ValueError as exc:
             message = str(exc)
             status = 400 if message.startswith("base_url") else 502
             raise HTTPException(status, message) from exc
+        if is_keyproxy_url(base_url) and keyproxy_upstream(base_url) == "codex":
+            manager = app.extensions.get("harness")
+            store = getattr(manager, "store", None)
+            if store is not None:
+                rows = await store.catalog_rows()
+                extend_model_list(found, [model for row in rows if row.harness == "codex" for model in row.models])
+        return found
 
     # -- model presets -------------------------------------------------------------------
 

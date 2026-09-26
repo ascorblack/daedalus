@@ -604,7 +604,11 @@ input.field, select.field, textarea.field {
 
 
 /* ── the composer: one pill, one circle ─────────────────────────────────────────────────── */
-.composer { flex:none; display:flex; flex-direction:column; gap:6px; padding:6px 10px calc(10px + env(safe-area-inset-bottom)); background:var(--bg); }
+/* Transparent on purpose. The page behind a conversation is the theme's wash and the column beside
+   it is --bg; painting the composer with --bg drew a full-width slab of the column colour around
+   the field whenever those two differed. The scroll area ends above the composer, so nothing
+   passes behind it that an opaque bar would have to hide. */
+.composer { flex:none; display:flex; flex-direction:column; gap:6px; padding:6px 10px calc(10px + env(safe-area-inset-bottom)); background:transparent; }
 .composer-box { display:flex; flex-direction:column; gap:2px; background:var(--surface-1); border:1px solid var(--line-strong); border-radius:24px; padding:3px 5px; transition:border-radius var(--t-fast) var(--ease-out); }
 .composer-box.two { border-radius:var(--radius-lg); }
 .composer-box:focus-within { border-color:color-mix(in srgb, var(--fg) 30%, var(--line-strong)); }
