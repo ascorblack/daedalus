@@ -137,6 +137,15 @@ Wake = Callable[[Owner, str], Awaitable[None]]
 """How an owner is told something without being asked: a message into its session, or to its CLI."""
 
 
+def _count(tabs: Any) -> int:
+    """A group's tabs as the daemon gives them: their number, or the list of them."""
+    if isinstance(tabs, bool):
+        return 0
+    if isinstance(tabs, int):
+        return max(0, tabs)
+    return len(tabs) if isinstance(tabs, list) else 0
+
+
 def _stamp_after(hours: float = 0, days: float = 0) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours, days=days)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -530,7 +539,7 @@ class Browsers:
                 (
                     group, env, profile, str(group_info.get("browser_id") or ""), owner.kind, owner.id, owner.project_id, owner.session_id, owner.staff_id, int(fresh),
                     self._control_owner(group_info), str((group_info.get("control") or {}).get("reason") or ""),
-                    str(tab.get("url") or url or ""), str(tab.get("title") or ""), len(group_info.get("tabs") or []) or 1, link.instance, actor, now, now,
+                    str(tab.get("url") or url or ""), str(tab.get("title") or ""), _count(group_info.get("tabs")) or 1, link.instance, actor, now, now,
                 ),
             )
             await self.db.execute(
@@ -793,7 +802,7 @@ class Browsers:
                 continue
             await self.db.execute(
                 "UPDATE browser_groups SET daemon_instance = ?, browser_id = ?, tabs = ?, control_owner = ?, control_reason = ? WHERE id = ?",
-                (instance, str(info.get("browser_id") or row["browser_id"]), len(info.get("tabs") or []), self._control_owner(info), str((info.get("control") or {}).get("reason") or ""), row["id"]),
+                (instance, str(info.get("browser_id") or row["browser_id"]), _count(info.get("tabs")), self._control_owner(info), str((info.get("control") or {}).get("reason") or ""), row["id"]),
             )
         known = {r["id"] for r in await self.db.fetchall("SELECT id FROM browser_groups WHERE env = ? AND status = 'open'", (link.env,))}
         for gid, info in listed.items():
@@ -824,7 +833,7 @@ class Browsers:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, 'system', ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET status = 'open', close_reason = '', closed_at = NULL, env = excluded.env, browser_id = excluded.browser_id, daemon_instance = excluded.daemon_instance",
             (gid, link.env, str(info.get("profile") or ""), str(info.get("browser_id") or ""), owner.kind, owner.id, owner.project_id, owner.session_id, owner.staff_id,
-             int(str(info.get("profile") or "") == EPHEMERAL), self._control_owner(info), len(info.get("tabs") or []), link.instance, now, now),
+             int(str(info.get("profile") or "") == EPHEMERAL), self._control_owner(info), _count(info.get("tabs")), link.instance, now, now),
         )
         await self.audit(gid, link.env, "system", "open", {"adopted": True})
         logger.warning("browser group %s in %s had no row and was adopted for %s %s", gid, link.env, owner.kind, owner.id)

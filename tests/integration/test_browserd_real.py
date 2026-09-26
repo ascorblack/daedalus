@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from daedalus.browser import wire
+from daedalus.browser.agent import BrowserAgent, Caller, SensitiveAsk
 from daedalus.browser.model import Owner
 from daedalus.browser.service import Browsers
 from daedalus.config import BrowserConfig
@@ -123,6 +124,18 @@ async def test_open_read_click_and_watch_through_the_host(db: Database, daemon: 
         text = await service.call(group, "page.text", {"tab_id": tab}, what="reading", timeout=30)
         assert "added" in text["text"]
         await attachment.channel.close()
+
+        # The agent's own path over the same browser: the outline fenced, a click by ref.
+        agent = BrowserAgent(service)
+
+        async def gate(ask: SensitiveAsk) -> tuple[bool, str]:
+            return False, "asked"
+
+        caller = Caller(owner=owner, actor="agent:real1", gate=gate, files=None)  # type: ignore[arg-type]
+        text, failed = await agent.run("BrowserSnapshot", {}, caller)
+        assert not failed and "[page content from http://127.0.0.1:" in text and 'heading "Fixture shop"' in text
+        text, failed = await agent.run("BrowserAct", {"action": "click", "ref": ref, "element": "the Add to cart button"}, caller)
+        assert not failed and "Done: click" in text, text
         await service.close_group(group, actor="agent:real1")
     finally:
         await service.close()
