@@ -60,10 +60,10 @@ func TestOpenNavigateAndTabs(t *testing.T) {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
-	// A navigation that fails is a result, not an error.
-	h.must("page.navigate", map[string]any{"tab_id": o.Tab.ID, "url": "http://127.0.0.1:1/"}, &nav)
-	if nav.Error == "" {
-		t.Fatalf("an unreachable page loaded: %+v", nav)
+	// A port of this machine outside the services range is the network wall's to refuse, before
+	// Chromium is asked: the agent gets 1102 with the reason, not a page that failed to load.
+	if err := h.call("page.navigate", map[string]any{"tab_id": o.Tab.ID, "url": "http://127.0.0.1:1/"}, nil); code(err) != 1102 {
+		t.Fatalf("a port outside the services range: %v", err)
 	}
 	var closed map[string]any
 	h.must("group.close", map[string]any{"group_id": "g1"}, &closed)

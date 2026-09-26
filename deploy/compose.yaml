@@ -33,6 +33,11 @@
 #   terminals-state       -> /var/lib/ptyd (terminals only)  the daemon's journal, launches, logs
 #   ../../daedalus-host-terminals -> /run/daedalus-host-terminals  the host terminal's socket and
 #                                                       token (DAEDALUS_HOST_TERMINALS_DIR overrides it)
+#   browser-run           -> /run/daedalus-browser      the browser daemon's socket and token, shared
+#                                                       by the agent and the browser service
+#   browser-state         -> /var/lib/browserd (browser only)  the agent's browser profiles (its
+#                                                       logins), downloads, uploads. Never mounted
+#                                                       into the agent.
 #
 # Host terminal (optional). `bash deploy/setup.sh` can install `ptyd` on the server itself as a
 # systemd user unit of the operator's (deploy/ptyd/daedalus-ptyd.service): a shell on the server as
@@ -43,7 +48,8 @@
 # as the operator; left to Docker, it would be created as root and the unit could not write to it.
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG),
-# "terminals" (the terminals service's own way out, with no route to the key proxy or SearXNG).
+# "terminals" (the terminals service's own way out, with no route to the key proxy or SearXNG),
+# "browser" (the browser service's own way out, with no route to anything else in this file).
 #
 # Terminals. The `terminals` service is the same image started as `ptyd`, the daemon that owns the
 # container terminals of the app. It is a service of its own so that the terminals outlive the agent:
@@ -66,6 +72,10 @@
 #   --profile selfdev    the rebuilder, which is the only container that can reach Docker. It exists
 #                        to build a new agent image when the agent changes one; an installation that
 #                        does not develop itself never needs it.
+#   --profile browser    the agent's browser: browserd and Chromium from the `browser` target of the
+#                        image (the `:browser` tag), which the agent drives and the app shows live.
+#                        Without it the browser tools are not offered. `COMPOSE_PROFILES=browser` in
+#                        .env keeps it on for every command, the rebuilder's included.
 services:
   daedalus:
     stop_grace_period: 40s  # the supervisor drains the bot for 25 s before killing it; Docker must wait longer
@@ -104,6 +114,8 @@ services:
       # The host terminal's run directory: empty until the systemd user unit is installed on the host.
       TERMINALS_HOST_DIR: /run/daedalus-host-terminals
       TERMINALS_PORT_RANGE: ${TERMINALS_PORT_RANGE:-8120-8139}
+      # The browser service's run directory (the browser-run volume): empty until that service runs.
+      BROWSER_CONTAINER_DIR: /run/daedalus-browser
       GITHUB_DAEDALUS_TOKEN: ${GITHUB_DAEDALUS_TOKEN:-}
       DAEDALUS_GITHUB_ORG: ${DAEDALUS_GITHUB_ORG:-}
       # Provider keys live in the key proxy, not here (see the note at the top of this file).
@@ -135,6 +147,9 @@ services:
       # The host terminal's socket and token, from the server itself. Sealed the same way: its token
       # opens a shell on the server as the operator.
       - ${DAEDALUS_HOST_TERMINALS_DIR:-../../daedalus-host-terminals}:/run/daedalus-host-terminals
+      # The browser daemon's socket and token. Sealed from the agent's commands like the terminal
+      # daemons': the token drives a browser that holds the operator's logins for a project.
+      - browser-run:/run/daedalus-browser
     ports:
       - "127.0.0.1:${API_PORT:-8765}:${API_PORT:-8765}"
       # Services the agent hosts (ServiceStart) listen in this range; published on every interface so the
@@ -204,6 +219,66 @@ services:
       - "${TERMINALS_PORT_RANGE:-8120-8139}:${TERMINALS_PORT_RANGE:-8120-8139}"
     # Its own network, for the way out: a terminal has no business with the key proxy or SearXNG.
     networks: [terminals]
+
+  # The agent's browser: browserd, owning Chromium on the agent's profiles, from the `browser` target
+  # of the agent's own image. A service of its own and on a network of its own, because a page is
+  # the least trusted thing this installation runs: the agent's container is on the "keys" network,
+  # where a page could spend the provider keys through the key proxy, and the terminals' container
+  # holds root shells and the CLIs' logins. Here it reaches the internet and the services ranges
+  # published on the Docker host, and nothing else in this file — whatever the browser's own
+  # network wall (docs/architecture/browser.md) says, which is the second wall, not the only one.
+  #
+  # Like `terminals` it outlives the agent: a restart or a rebuild of the agent never touches it.
+  # Recreating it ends every browser (their profiles, and so their logins, stay in browser-state);
+  # the app asks the operator, with the count, before it asks the rebuilder to.
+  browser:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: browser
+    image: daedalus:local-browser
+    profiles: [browser]
+    restart: unless-stopped
+    # Reaps Chromium's helpers if one is ever orphaned; browserd is not an init.
+    init: true
+    # Not root: Chromium runs its own sandbox, which as an ordinary user needs only that Docker's
+    # seccomp profile let it create user namespaces. Measured on an Ubuntu 24.04 host: every renderer
+    # gets its own user and PID namespaces and a seccomp filter with this and nothing more — no added
+    # capability, and Docker's AppArmor profile left in place (with apparmor=unconfined the host's
+    # restriction on unprivileged user namespaces applies instead, and the sandbox fails).
+    user: "1001:1001"
+    security_opt: ["seccomp=unconfined", "no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    entrypoint: ["/usr/local/bin/browserd"]
+    command: ["serve", "--env", "container", "--run-dir", "/run/daedalus-browser",
+              "--state-dir", "/var/lib/browserd"]
+    # browserd asks every browser to close and kills what is left three seconds later.
+    stop_grace_period: 10s
+    environment:
+      HOME: /var/lib/browserd
+    # Two browsers with eight tabs each measured under 1.2 GB; the rest is room for heavy pages.
+    mem_limit: ${BROWSER_MEMORY_LIMIT:-3g}
+    # Chromium keeps rendered pages in shared memory, and Docker's 64 MB default crashes a tab on a
+    # long page. It counts against mem_limit, so this is room, not an allocation.
+    shm_size: 1gb
+    pids_limit: 2048
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/daedalus-browser/browserd.sock"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+    volumes:
+      - browser-run:/run/daedalus-browser
+      # Profiles (the agent's logins, per project), downloads, uploads. No workspace, no project
+      # folder: a file reaches a page, or leaves one, only through the host and its walls.
+      - browser-state:/var/lib/browserd
+    # The agent's services and the terminals' servers are published on the Docker host; the wall
+    # sends a page's http://127.0.0.1:<services port> there, and refuses the host's other ports.
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [browser]
 
   # A metasearch over Bing, Brave, DuckDuckGo, Google (CSE), Mojeek and Wikipedia with a JSON API,
   # reachable only from the agent container. Settings in deploy/searxng/settings.yml. Behind the
@@ -319,6 +394,7 @@ networks:
   keys:
   search:
   terminals:
+  browser:
 
 volumes:
   daedalus-state:
@@ -331,3 +407,5 @@ volumes:
   terminal-run:
   terminals-home:
   terminals-state:
+  browser-run:
+  browser-state:

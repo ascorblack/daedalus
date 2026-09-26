@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ascorblack/daedalus/browserd/internal/cdp"
+	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 )
 
 // Flags are the switches every browser starts with (the contract's Which Chromium explains each).
@@ -73,8 +74,9 @@ func Args(opts Options) []string {
 	a := append([]string{}, Flags...)
 	a = append(a, "--user-data-dir="+opts.ProfileDir)
 	if opts.Proxy != "" {
-		// <-loopback> sends loopback through the proxy as well: the wall judges it like any address.
-		a = append(a, "--proxy-server=http://"+opts.Proxy, "--proxy-bypass-list=<-loopback>")
+		// The wall's own switches: the proxy, loopback and link-local sent through it too, no name
+		// resolved by Chromium itself, no QUIC (netwall.ChromiumArgs says why each).
+		a = append(a, netwall.ChromiumArgs(opts.Proxy)...)
 	}
 	if opts.NoSandbox {
 		a = append(a, "--no-sandbox")

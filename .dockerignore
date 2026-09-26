@@ -10,3 +10,6 @@ miniapp/node_modules
 ptyd/.cache
 ptyd/ptyd
 ptyd/*.test
+browserd/browserd
+browserd/**/*.test
+browserd/.cache

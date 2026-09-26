@@ -4,8 +4,9 @@
 # command, so it is not published separately any more.
 #
 # Two tags out of one Dockerfile: ":latest" is the environment and nothing else, ":browser" adds
-# Playwright and a headless Chromium for the skills that drive a page. They share every layer but the
-# last, so publishing both costs the difference rather than twice the image.
+# Playwright, the headless Chromium the skills that drive a page use, and the full Chromium the
+# `browser` compose service runs under browserd. They share every layer but the last, so publishing
+# both costs the difference rather than twice the image.
 name: images
 
 on:
@@ -16,6 +17,9 @@ on:
       - daedalus/**
       - launcher/**
       - miniapp/**
+      # The two daemons the image carries: a change to either is a change to what the image runs.
+      - ptyd/**
+      - browserd/**
       - pyproject.toml
       - uv.lock
   workflow_dispatch:
@@ -39,7 +43,7 @@ jobs:
 
       - name: Make room for the image
         if: matrix.target == 'browser'
-        # The browser image carries a headless Chromium, twice over here (both architectures under
+        # The browser image carries two Chromium builds, twice over here (both architectures under
         # emulation), and the runner's default free space is not enough for it.
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup

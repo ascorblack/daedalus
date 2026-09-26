@@ -201,6 +201,8 @@ func addMounts(p Paths, roots []string) ([]string, error) {
 
 // mountedServices are the services a project folder is mounted into: the agent, and the terminals
 // service, whose shells and CLIs work in the same folders and must find them at the same paths.
+// Never the browser service: a renderer exploit there would have every project folder, so a file
+// reaches a page, or leaves one, only through the host and the session's walls.
 var mountedServices = []string{"daedalus", "terminals"}
 
 // withProjectMounts puts the mount list into the override the launcher writes. It is spliced into

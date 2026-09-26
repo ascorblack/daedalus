@@ -105,7 +105,7 @@ CATALOGUE: dict[str, Component] = {
     SPEECH: Component(SPEECH, ("stt", "tts", "voicenotes"), 15 * 1024 * 1024, requires_restart=False),
     STT_MODELS: Component(STT_MODELS, ("stt",), 0, requires_restart=False),
     TTS_VOICES: Component(TTS_VOICES, ("tts",), 0, requires_restart=False),
-    BROWSER: Component(BROWSER, ("skills.browser", "screenshots"), 100 * 1024 * 1024, requires_restart=True),
+    BROWSER: Component(BROWSER, ("skills.browser", "screenshots"), 316 * 1024 * 1024, requires_restart=True),
     NODE: Component(NODE, ("skills.node", "npx"), 58 * 1024 * 1024, requires_restart=True),
     GIT: Component(GIT, ("selfdev", "projects"), 0, requires_restart=False),
     RIPGREP: Component(RIPGREP, ("search",), 0, requires_restart=False),
@@ -361,7 +361,7 @@ class Registry:
         if self.settings.native:
             return Status(BROWSER, "missing", "the browser extra and the headless shell are not in this installation",
                           detail_key="comp.detail.browser.missing", installable=True, how="launcher",
-                          fix="uv sync --extra browser && python -m playwright install chromium-headless-shell")
+                          fix="uv sync --extra browser && python -m playwright install chromium")
         return Status(BROWSER, "missing", "this image tag leaves the browser out", detail_key="comp.detail.browser.image",
                       fix="run the :browser tag of the agent image")
 

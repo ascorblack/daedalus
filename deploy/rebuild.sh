@@ -76,6 +76,30 @@ while true; do
         cat "$trigger/terminals-$job.log"
         printf '%s\n' "$result" > "$trigger/terminals-$job.pending"
         mv "$trigger/terminals-$job.pending" "$trigger/terminals-$job.result"
+    elif [ -f "$trigger/browser-request" ]; then
+        # The operator's update of the browser daemon: the browser service is recreated, which ends
+        # every browser (their profiles stay on their volume). Unlike the terminals service it is
+        # built first: it runs the image's `browser` target, which the agent's own rebuild never
+        # builds, so without this the service would come back as the build it already was. The
+        # layers it shares with the agent's image are already there; only the difference builds.
+        job=$(cat "$trigger/browser-request")
+        rm -f "$trigger/browser-request"
+        case "$job" in
+            ''|*[!a-f0-9]*) continue ;;
+        esac
+        if [ "${#job}" -ne 32 ]; then
+            continue
+        fi
+        if ! docker compose --progress plain -f "$COMPOSE_FILE" --env-file .env build browser > "$trigger/browser-$job.log" 2>&1; then
+            result='the browser image was not built; the running browser service was left as it was; inspect rebuilder logs'
+        elif docker compose -f "$COMPOSE_FILE" --env-file .env up -d --no-build --no-deps browser >> "$trigger/browser-$job.log" 2>&1; then
+            result=completed
+        else
+            result='the browser service was not recreated; inspect rebuilder logs'
+        fi
+        cat "$trigger/browser-$job.log"
+        printf '%s\n' "$result" > "$trigger/browser-$job.pending"
+        mv "$trigger/browser-$job.pending" "$trigger/browser-$job.result"
     elif [ -f "$trigger/rebuild" ]; then
         rm -f "$trigger/rebuild"
         docker compose -f "$COMPOSE_FILE" --env-file .env up -d --build --no-deps daedalus || echo 'rebuild failed'

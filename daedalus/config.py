@@ -265,6 +265,13 @@ class Settings(BaseSettings):
     terminals_port_range: str = "8120-8139"
     """Ports a server started in a container terminal is published on; the compose file publishes the
     same range from the terminals service. The agent's own services use ``services_port_range``."""
+    browser_container_dir: Path | None = None
+    """The run directory of the browser daemon of the ``container`` environment (a volume this
+    container shares with the ``browser`` compose service): its endpoint, its token and its socket.
+    Unset = no container browser; an empty directory = the service is not running."""
+    browser_host_dir: Path | None = None
+    """The same for the ``host`` environment: natively, a directory the launcher gives the browser
+    daemon it starts beside the agent."""
 
     usd_per_day: float = 20.0
     """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
@@ -359,12 +366,15 @@ class Settings(BaseSettings):
     def sealed_everywhere(self) -> tuple[Path, ...]:
         """The part of the sealed set a command may not name even inside a container.
 
-        The terminal daemons' run directories. Their token opens a shell — on the host environment,
-        a shell on the operator's own machine, outside every wall the agent's container is — so
-        unlike the rest of the sealed set, a container is no boundary for it: the directory is
-        mounted into this container precisely so the app can reach the daemon.
+        The terminal daemons' and the browser daemons' run directories. A terminal daemon's token
+        opens a shell — on the host environment, a shell on the operator's own machine, outside every
+        wall the agent's container is. A browser daemon's token drives browsers holding the logins
+        made in them, with none of the policy's confirmations, and reads what any of them shows. So
+        unlike the rest of the sealed set, a container is no boundary for them: the directories are
+        mounted into this container precisely so the app can reach the daemons.
         """
-        return tuple(p for p in (self.terminals_container_dir, self.terminals_host_dir) if p is not None)
+        dirs = (self.terminals_container_dir, self.terminals_host_dir, self.browser_container_dir, self.browser_host_dir)
+        return tuple(p for p in dirs if p is not None)
 
     @property
     def skills_dir(self) -> Path:

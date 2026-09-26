@@ -254,6 +254,13 @@ func (m *Manager) Navigate(ctx context.Context, t *Tab, url string, timeout time
 	if d := t.Dialog(); d != nil {
 		return NavResult{}, ErrDialogOpen(d)
 	}
+	// Judged before the navigation is made, so a refusal is the agent's 1102 with its reason rather
+	// than the proxy's error page. The proxy refuses the same destinations on its own either way.
+	if m.deps.Wall != nil {
+		if err := m.deps.Wall.Navigation(ctx, t.Group.Browser.ID, url); err != nil {
+			return NavResult{}, err
+		}
+	}
 	var r struct {
 		LoaderID  string `json:"loaderId"`
 		ErrorText string `json:"errorText"`
