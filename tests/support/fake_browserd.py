@@ -64,6 +64,9 @@ class Element:
     opens_dialog: dict[str, Any] | None = None
     downloads: tuple[str, bytes] | None = None
     """A click on it downloads this file."""
+    covered_by: str = ""
+    """What a page put over it: a click is refused ``1004 {ref, covered_by}``, as the daemon refuses one."""
+    checked: bool = False
 
     @property
     def secret(self) -> bool:
@@ -265,7 +268,7 @@ class FakeBrowserd:
 
     def needs_you(self, group_id: str, reason: str, what: str) -> None:
         tab = self.tab_of(group_id)
-        self.emit("needs_you", {"group_id": group_id, "tab_id": tab.id, "reason": reason, "what": what, "url": tab.page.url})
+        self.emit("needs_you", {"group_id": group_id, "tab_id": tab.id, "reason": reason, "what": what, "url": tab.page.url, "by": "daemon"})
 
     def add_download(self, group_id: str, name: str, data: bytes) -> dict[str, Any]:
         self._next["download"] += 1
@@ -633,12 +636,13 @@ class FakeBrowserd:
         tab = self._new_tab(group, str(params.get("url") or "about:blank"))
         return {"group": group.view(), "tab": tab.view(True), "created": True}
 
-    def _sensitive(self, group: Group, tab: Tab, element: Element, action: str) -> dict[str, Any]:
+    def _sensitive(self, group: Group, tab: Tab, element: Element, action: str, keys: str = "") -> dict[str, Any]:
         kinds: list[str] = []
         words: list[str] = []
         name = element.name.lower()
         fields = [e for e in tab.page.elements.values() if e.secret]
-        if action in ("click", "press") and element.role == "button" and fields:
+        # A submit, or Enter, in a form with a secret field sends it.
+        if fields and ((action == "click" and element.role == "button") or (action == "press" and "Enter" in keys)):
             kinds.append("credentials")
         for kind, table in SENSITIVE_WORDS.items():
             hit = [w for w in table if w in name]
@@ -663,14 +667,18 @@ class FakeBrowserd:
             raise _Fail(1103, f"{ref} is not on the page any more", {"ref": ref})
         box = dict(element.box) if element is not None else {"x": 0.0, "y": 0.0, "w": 1280.0, "h": 800.0}
         point = {"x": box["x"] + box["w"] / 2, "y": box["y"] + box["h"] / 2}
-        sensitive = self._sensitive(group, tab, element, action) if element is not None else {"kinds": [], "evidence": {}}
+        sensitive = self._sensitive(group, tab, element, action, str(params.get("keys") or "")) if element is not None else {"kinds": [], "evidence": {}}
+        described = {"role": element.role, "name": element.name, "tag": element.tag, "type": element.type, "autocomplete": element.autocomplete, "href": element.href, "form_action": element.form_action,
+                     "secret": element.secret, "secret_kind": element.field_kind() if element.secret else "", "disabled": False, "checked": element.checked, "file": element.type == "file", "select": element.tag == "select"} if element is not None else {}
         if params.get("dry_run"):
-            assert element is not None
-            return {"element": {"role": element.role, "name": element.name, "tag": element.tag, "type": element.type, "autocomplete": element.autocomplete, "href": element.href, "form_action": element.form_action},
-                    "point": point, "box": box, "sensitive": sensitive}
-        if element is not None and action in ("type", "press", "select") and (element.secret or element.ref in self.human_typed):
-            self.emit("needs_you", {"group_id": group.id, "tab_id": tab.id, "reason": "field_forbidden", "what": f"type into {element.name}", "url": tab.page.url})
+            return {"action_id": "", "ok": True, "effects": {}, "element": described, "point": point, "box": box, "sensitive": sensitive}
+        keys = str(params.get("keys") or "")
+        typing = action in ("type", "select") or (action == "press" and keys not in ("Enter", "Tab"))
+        if element is not None and typing and (element.secret or element.ref in self.human_typed):
+            self.emit("needs_you", {"group_id": group.id, "tab_id": tab.id, "reason": "field_forbidden", "what": f"type into {element.name}", "url": tab.page.url, "by": "daemon"})
             raise _Fail(1105, "this is a secret field", {"ref": ref, "field": element.field_kind()})
+        if element is not None and element.covered_by and action in ("click", "double_click", "right_click", "check", "uncheck"):
+            raise _Fail(1004, f"{ref} is covered by {element.covered_by}", {"ref": ref, "covered_by": element.covered_by})
         self._next["action"] += 1
         action_id = f"a{self._next['action']}"
         text = str(params.get("text") or "")
@@ -682,8 +690,13 @@ class FakeBrowserd:
             event["keys"] = params["keys"]
         self.emit("action", event)
         effects: dict[str, Any] = {}
+        before = tab.page.outline()
         if action == "type" and element is not None:
             element.value = text
+        if action in ("check", "uncheck") and element is not None:
+            if element.checked == (action == "check"):
+                effects["unchanged"] = True
+            element.checked = action == "check"
         if action == "upload":
             names = [self.uploads[u]["name"] for u in params.get("upload_ids") or [] if u in self.uploads]
             effects["uploaded"] = names
@@ -701,8 +714,14 @@ class FakeBrowserd:
                 download = self.add_download(group.id, *element.downloads)
                 effects["download"] = {"id": download["id"], "name": download["name"], "size": download["size"]}
         self.emit("action_done", {"action_id": action_id, "group_id": group.id, "tab_id": tab.id, "ok": True, "effects": effects})
-        diff = tab.page.outline()[:2000] if effects.get("navigated") else (element.line() if element is not None else "")
-        return {"action_id": action_id, "ok": True, "effects": effects, "point": point, "box": box, "diff": diff, "sensitive": sensitive}
+        reply: dict[str, Any] = {"action_id": action_id, "ok": True, "effects": effects, "point": point, "box": box, "element": described, "sensitive": sensitive}
+        if not effects.get("navigated"):
+            # What the action changed in the outline, as lines that came and went; none after a navigation.
+            old_lines, new_lines = before.splitlines(), tab.page.outline().splitlines()
+            changed = [f"- {line}" for line in old_lines if line not in new_lines] + [f"+ {line}" for line in new_lines if line not in old_lines]
+            if changed:
+                reply["diff"] = "\n".join(changed)[:2000]
+        return reply
 
 
 __all__ = ["Element", "FakeBrowserd", "Page", "ViewChannel"]

@@ -167,6 +167,10 @@ def explain(exc: BrowserError) -> str:
         return f"There is no tab {exc.details.get('tab_id') or ''} in your browser; BrowserTabs(action='list') lists them."
     if isinstance(exc, Blocked):
         return f"The browser's network wall refused {exc.details.get('host') or 'that address'}: {exc.details.get('reason') or exc.message}. It is not reachable from the agent's browser."
+    if isinstance(exc, Forbidden) and exc.details.get("covered_by"):
+        # A page may put something over an element to catch the click meant for it; the daemon
+        # refuses rather than clicking whatever is on top.
+        return f"{exc.details.get('ref') or 'That element'} is covered by {exc.details['covered_by']}, so the click was not made. Deal with what covers it first (close it, scroll), take a new BrowserSnapshot, and try again."
     if isinstance(exc, EnvUnavailable):
         return f"The browser is not available now: {exc.message}"
     return exc.message
@@ -350,8 +354,13 @@ class BrowserAgent:
         name = ""
         grant = ""
         kinds: list[str] = []
-        if ref:
-            preflight = await self.service.call(group["id"], "page.act", {**base, "dry_run": True}, what="looking at the element", timeout=40.0)
+        if ref or action == "press":
+            # A press without a ref goes to the focused field, and Enter there may send a sign-in: the
+            # preflight is asked for it too, and a daemon that needs a ref for one says so.
+            try:
+                preflight = await self.service.call(group["id"], "page.act", {**base, "dry_run": True}, what="looking at the element", timeout=40.0)
+            except InvalidRequest:
+                preflight = {}
             info = preflight.get("element") or {}
             name = str(info.get("name") or "")
             sensitive = preflight.get("sensitive") or {}
@@ -396,9 +405,12 @@ class BrowserAgent:
 
     def _act_text(self, action: str, tab: dict[str, Any], result: dict[str, Any], name: str) -> str:
         effects = result.get("effects") or {}
+        name = name or str((result.get("element") or {}).get("name") or "")
         said = [f"Done: {action}" + (f" on \"{name[:120]}\"" if name else "") + "."]
+        if effects.get("unchanged"):
+            said.append("It was already so; nothing changed.")
         if effects.get("navigated"):
-            said.append(f"The tab went to {effects.get('url') or 'another page'}.")
+            said.append(f"The tab went to {effects.get('url') or 'another page'}; take a BrowserSnapshot to see it.")
         if effects.get("new_tab"):
             new = effects["new_tab"]
             said.append(f"It opened a new tab {new.get('id') if isinstance(new, dict) else new}; BrowserTabs(action='select') switches to it.")
@@ -411,7 +423,7 @@ class BrowserAgent:
         diff = str(result.get("diff") or "").strip()
         if diff:
             url = str(effects.get("url") or tab.get("url") or "")
-            said.append("What changed near it:\n" + fenced(origin_of(url), diff[:2000]))
+            said.append("What changed on the page (+ appeared, - went):\n" + fenced(origin_of(url), diff[:2000]))
         return "\n".join(said)
 
     async def _thumbnail(self, group: dict[str, Any], tab: dict[str, Any], ref: str, key: str) -> str:

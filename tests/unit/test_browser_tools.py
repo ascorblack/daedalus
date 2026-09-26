@@ -47,6 +47,10 @@ def shop(daemon: FakeBrowserd) -> None:
         "e22": Element("e22", "button", "Remove item", opens_dialog={"type": "confirm", "message": "Remove it?"}),
         "e23": Element("e23", "button", "Attach receipt", tag="input", type="file"),
     })
+    daemon.page("https://shop.test/extras", title="Extras", elements={
+        "e24": Element("e24", "button", "Apply coupon", covered_by='dialog "Subscribe to our newsletter"'),
+        "e25": Element("e25", "checkbox", "Gift wrap", tag="input", type="checkbox", checked=True),
+    })
     daemon.page("https://login.test/", title="Sign in", elements={
         "e30": Element("e30", "textbox", "Email", tag="input", type="email"),
         "e31": Element("e31", "textbox", "Password", tag="input", type="password"),
@@ -357,3 +361,18 @@ async def test_a_scripted_model_shops_to_the_payment_and_stops_there(settings: S
             task.cancel()
         await app.extensions["browser"].close()
         await manager.close()
+
+
+async def test_what_the_daemon_refuses_or_leaves_as_it_was_is_said_in_words_to_act_on(rig: Rig) -> None:
+    sid = await rig.session()
+    await rig.call(sid, "BrowserOpen", url="https://shop.test/extras")
+    text, failed = await rig.call(sid, "BrowserAct", action="click", ref="e24", element="the Apply coupon button")
+    assert failed and 'covered by dialog "Subscribe to our newsletter"' in text and "BrowserSnapshot" in text
+    text, failed = await rig.call(sid, "BrowserAct", action="check", ref="e25", element="gift wrap")
+    assert not failed and "already so" in text
+    await rig.call(sid, "BrowserNavigate", url="https://login.test/")
+    # A character pressed into the password is typing it; Enter there sends a sign-in, which is asked.
+    text, failed = await rig.call(sid, "BrowserAct", action="press", ref="e31", keys="a", element="the password field")
+    assert failed and "BrowserHandoff" in text
+    text, failed = await rig.call(sid, "BrowserAct", action="press", ref="e31", keys="Enter", element="the password field")
+    assert failed and "submit a sign-in" in text and "Approval key" in text
