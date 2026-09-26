@@ -1713,7 +1713,8 @@ def run() -> int:
         shot(page, "usage", "usage", settle=1500)
         shot(page, "memory", "memory")
         # The settings index, because the language switch is its first row.
-        shot(page, "settings", "settings")
+        # Settings is a centred stage of its own now, with no `.screen` to wait for.
+        shot(page, "settings", "settings", wait=".settings-stage")
         shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
         shot(page, "settings-notifications", "settings/notifications", wait=".nmatrix", settle=600)
         shot(page, "settings-terminals", "settings/terminals", wait=".loadbar-track", settle=600)
@@ -1802,7 +1803,8 @@ def run_browser() -> int:
 
         page.locator(".panel .bp-control.take").click()
         page.wait_for_selector(".panel .bv.driving", timeout=5000)
-        page.mouse.move(10, 10)
+        # Out of the way of every tooltip: the empty foot of the panel's stage.
+        page.mouse.move(1300, 800)
         page.wait_for_timeout(500)
         page.screenshot(path=str(OUT / "session-browser-takeover.png"))
         print("wrote session-browser-takeover")

@@ -31,8 +31,9 @@ export const CursorOverlay = memo(function CursorOverlay({ action, meta, rect, p
   const at = pageToView(meta, rect, point);
   const box = action.box ? boxToView(meta, rect, action.box) : null;
   const cursorStyle: CSSProperties = { transform: `translate3d(${at.x}px, ${at.y}px, 0)` };
-  const typing = action.kind === "type" && !compact;
-  const pressing = action.kind === "press" && !!action.keys && !compact;
+  // A person driving makes the agent's last keystrokes history: the chips go, the waiting tag stays.
+  const typing = action.kind === "type" && !compact && !parked;
+  const pressing = action.kind === "press" && !!action.keys && !compact && !parked;
   return (
     <div className={`bv-overlay ${compact ? "compact" : ""} ${parked ? "parked" : ""}`} aria-hidden="true" data-action={action.id} data-kind={action.kind}>
       {box && (
