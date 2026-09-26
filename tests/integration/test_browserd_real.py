@@ -91,7 +91,11 @@ async def daemon() -> AsyncIterator[Path]:
 
 
 async def test_open_read_click_and_watch_through_the_host(db: Database, daemon: Path, site: str) -> None:
-    service = Browsers(db, run_dirs={"container": daemon, "host": None}, config=lambda: BrowserConfig(), owners=Everyone())  # type: ignore[arg-type]
+    port = int(site.rsplit(":", 1)[1].strip("/"))
+    # The fixture is on this machine's loopback: the wall lets it through as one of the services,
+    # and asks about any other port of this machine, as it does natively.
+    rules = {"sealed_ports": [], "services_ports": [[port, port]], "ask_loopback": True, "lan_allow": []}
+    service = Browsers(db, run_dirs={"container": daemon, "host": None}, config=lambda: BrowserConfig(), owners=Everyone(), wall=lambda env: rules)  # type: ignore[arg-type]
     await service.start()
     try:
         assert await service.wait_available("container", timeout=20)
@@ -136,6 +140,9 @@ async def test_open_read_click_and_watch_through_the_host(db: Database, daemon: 
         assert not failed and "[page content from http://127.0.0.1:" in text and 'heading "Fixture shop"' in text
         text, failed = await agent.run("BrowserAct", {"action": "click", "ref": ref, "element": "the Add to cart button"}, caller)
         assert not failed and "Done: click" in text, text
+        # Another port of this machine: the wall asks; the gate here says no, so nothing is loaded.
+        text, failed = await agent.run("BrowserNavigate", {"url": f"http://127.0.0.1:{port + 1}/"}, caller)
+        assert failed and text == "asked", text
         await service.close_group(group, actor="agent:real1")
     finally:
         await service.close()

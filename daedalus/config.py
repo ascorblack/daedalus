@@ -1421,6 +1421,43 @@ class TerminalsConfig(BaseModel):
     model — a password prompt's surroundings, another project's secrets."""
 
 
+class BrowserRuleConfig(BaseModel):
+    """An operator's rule about sensitive browser actions on one site: ``allow`` lets the kinds named
+    through without asking, ``deny`` refuses them, ``ask`` asks where nothing else would."""
+
+    domain: str = Field(min_length=1, max_length=253)
+    """A host (``shop.example.com``) or every host under one (``*.example.com``)."""
+    kinds: list[Literal["credentials", "purchase", "send", "destroy", "accept", "upload", "cross_origin_post"]] = Field(default_factory=list)
+    """Empty = every kind."""
+    action: Literal["allow", "ask", "deny"] = "deny"
+    note: str = ""
+
+
+class BrowserConfig(BaseModel):
+    """The agent's browser: Chromium run by a browser daemon per environment."""
+
+    env: Literal["auto", "container", "host"] = "auto"
+    """Where an agent's browser runs: ``auto`` is the container's browser service where there is one
+    and the operator's machine otherwise (a native installation)."""
+    running_cap: int = Field(default=2, ge=1, le=32)
+    """Browsers that may run at once in one environment: the daemon's own limit, which the load bar
+    projects against. Changing it here does not change the daemon's; its configuration does."""
+    agent_wait_seconds: float = Field(default=60.0, ge=0, le=600)
+    """How long an agent's BrowserOpen waits in line when every browser is busy before it gives up."""
+    control_wait_seconds: float = Field(default=20.0, ge=0, le=60)
+    """How long an agent's call waits for a person who holds the browser to give it back."""
+    ticket_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    audit_retention_days: int = Field(default=90, ge=1)
+    closed_retention_hours: int = Field(default=72, ge=1)
+    """How long a closed group's row stays listed."""
+    lan_allow: list[str] = Field(default_factory=list)
+    """Addresses or prefixes on the local network the browser may reach after the operator's yes
+    (the network wall asks about each; it never lets metadata addresses through)."""
+    rules: list[BrowserRuleConfig] = Field(default_factory=list)
+    """The operator's rules about sensitive actions by site. A rule never allows ``credentials``:
+    typing into a sign-in is the operator's, however the site is trusted."""
+
+
 class HeartbeatConfig(BaseModel):
     """A periodic unattended check driven by the HEARTBEAT.md file on the state volume."""
 
@@ -1550,6 +1587,7 @@ class RuntimeConfig(BaseModel):
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

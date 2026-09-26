@@ -20,6 +20,7 @@ import builtins
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -38,9 +39,12 @@ from daedalus.browser.model import (
     BrowserGone,
     EnvUnavailable,
     InvalidRequest,
+    LiveBrowsers,
+    NoRebuilder,
     NotFound,
     OverCap,
     Owner,
+    Unsupported,
     group_id,
     profile_id,
     rpc_failure,
@@ -49,6 +53,7 @@ from daedalus.browser.model import (
 from daedalus.browser.owners import BrowserOwners
 from daedalus.terminals.client import Channel, PtydClient, Unavailable
 from daedalus.terminals.service import iso, now_iso
+from daedalus.terminals.update import DaemonUpdate
 
 if TYPE_CHECKING:
     from daedalus.config import BrowserConfig
@@ -78,6 +83,10 @@ PROFILE = "browser"
 """The cost profile of a browser in the load estimate, beside the terminals' ``shell`` and CLIs."""
 OUTDATED = "restart the browser service, which ends its browsers"
 LABEL = "browser service"
+UPDATE_BY_HAND = "docker compose -f deploy/compose.yaml --env-file .env up -d --build browser"
+"""What the operator runs on the server when no rebuilder is there to recreate the browser service."""
+ACTING_SECONDS = 4.0
+"""How long after an action a group still counts as acting: the app's pulsing dot."""
 
 
 @dataclass(slots=True)
@@ -146,6 +155,59 @@ def _count(tabs: Any) -> int:
     return len(tabs) if isinstance(tabs, list) else 0
 
 
+def _json(text: Any) -> dict[str, Any]:
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _age(at: str) -> float:
+    try:
+        moment = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - moment).total_seconds()
+
+
+ACTOR_OF = {"take": "operator", "give": "operator", "pause": "operator", "download": "page"}
+KIND_OF = {"act": "", "tab_new": "new_tab", "download_saved": "download"}
+
+
+def _action_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One audit row as a line of the app's action log (``BrowserActionRow``)."""
+    detail = _json(row.get("detail_json"))
+    action = str(row["action"])
+    actor = str(row["actor"])
+    out: dict[str, Any] = {
+        "id": str(row["seq"]),
+        "at": row["at"],
+        "actor": ACTOR_OF.get(action) or ("operator" if actor == "operator" else "system" if actor == "system" else "agent"),
+        "kind": str(detail.get("action") or "") if action == "act" else KIND_OF.get(action, action),
+        "element": str(detail.get("element") or ""),
+        "name": str(detail.get("name") or ""),
+        "tab": str(detail.get("tab") or ""),
+        "ok": not detail.get("error"),
+    }
+    for key in ("point", "box", "keys", "url", "error", "text_len"):
+        if detail.get(key) is not None and detail.get(key) != "":
+            out[key] = detail[key]
+    if row.get("typed") is not None:
+        out["text"] = row["typed"]
+    if detail.get("sensitive"):
+        out["sensitive"] = {"kinds": list(detail.get("sensitive") or []), "decision": str(detail.get("decision") or ("allowed_once" if detail.get("grant") else "allowed"))}
+    if action == "handoff":
+        out["needs"] = {"reason": str(detail.get("reason") or ""), "what": str(detail.get("what") or "")}
+    if action in ("download", "download_saved"):
+        out["download"] = {"id": str(detail.get("id") or ""), "name": str(detail.get("name") or ""), "size": int(detail.get("size") or 0)}
+    return out
+
+
 def _stamp_after(hours: float = 0, days: float = 0) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours, days=days)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -160,12 +222,20 @@ class Browsers:
         owners: BrowserOwners,
         bus: EventBus | None = None,
         wake: Wake | None = None,
+        wall: Callable[[str], dict[str, Any]] | None = None,
+        daemon_update: DaemonUpdate | None = None,
     ) -> None:
         self.db = db
         self.config = config
         self.owners = owners
         self.bus = bus
         self.wake = wake
+        self.wall = wall
+        """``env -> net.configure`` params: the network wall's rules, which the host alone knows (its
+        own ports, the services ranges, the operator's allowlist). Sent on every connection, since a
+        daemon keeps no rules across its restarts and starts at its strictest."""
+        self.daemon_update = daemon_update
+        """The container's browser daemon as the image holds it; None where no image does."""
         self.links = {env: Link(env, run_dirs.get(env)) for env in ENVS}
         for link in self.links.values():
             if link.run_dir is not None:
@@ -267,7 +337,18 @@ class Browsers:
         link.event_seq = link.event_seq_saved = after
         # Subscribe first and list second: an event between the two is seen twice rather than never.
         await link.client.call("events.subscribe", {"after_seq": after})
+        await self._configure_wall(link)
         await self._reconcile(link)
+
+    async def _configure_wall(self, link: Link) -> None:
+        """Give the daemon's network wall its rules. A daemon without the method keeps its strictest
+        rules (the internet only), which is safe; it is said in the log, not raised."""
+        if self.wall is None or link.client is None:
+            return
+        try:
+            await link.client.call("net.configure", self.wall(link.env))
+        except wire.RpcError as exc:
+            logger.warning("browser service %s did not take the network wall's rules: %s", link.env, exc.message)
 
     async def _housekeeping(self) -> None:
         last_sync = last_prune = time.monotonic()
@@ -324,6 +405,7 @@ class Browsers:
         return "container" if self.configured("container") else "host"
 
     def environments(self) -> list[dict[str, Any]]:
+        image_version = self.daemon_update.image_version if self.daemon_update is not None else ""
         out = []
         for env, link in self.links.items():
             info = link.info if link.available else {}
@@ -341,9 +423,37 @@ class Browsers:
                     "sandbox": str(capabilities.get("sandbox") or "") if info else "",
                     "limits": info.get("limits") or {},
                     "counts": info.get("counts") or {},
+                    "image_version": image_version if env == "container" else "",
+                    "update_available": bool(env == "container" and link.available and image_version and info.get("version") and info.get("version") != image_version),
                 }
             )
         return out
+
+    async def running(self, env: str) -> int:
+        row = await self.db.fetchone("SELECT count(*) AS n FROM browser_groups WHERE env = ? AND status = 'open'", (env,))
+        return int(row["n"]) if row else 0
+
+    async def request_update(self, env: str, *, confirm: bool, actor: str = "operator") -> dict[str, Any]:
+        """Ask the rebuilder to recreate the browser service from the image, which updates its daemon
+        and ends every browser it runs: refused with the count until the operator confirms."""
+        if env != "container":
+            raise InvalidRequest("only the container's browser service is updated from here; the desktop updates its own")
+        if self.daemon_update is None or not self.daemon_update.image_version:
+            raise Unsupported("this installation has no browser service image to update from")
+        running = await self.running(env)
+        if running and not confirm:
+            raise LiveBrowsers(f"updating the browser service ends {running} open browser(s)", running=running)
+        if not self.daemon_update.rebuilder_alive():
+            raise NoRebuilder(f"no rebuilder is running to recreate the browser service; on the server run: {UPDATE_BY_HAND}", command=UPDATE_BY_HAND, running=running)
+        job = self.daemon_update.request()
+        link = self.links[env]
+        await self.audit("", env, actor, "daemon_update", {"job": job, "running": running, "from": str(link.info.get("version") or "") if link.available else "", "to": self.daemon_update.image_version})
+        return {"job": job, "running": running, "image_version": self.daemon_update.image_version}
+
+    def update_result(self, env: str, job: str) -> dict[str, str]:
+        if env != "container" or self.daemon_update is None or not re.fullmatch(r"[0-9a-f]{32}", job):
+            raise NotFound("no update of this environment's browser service was asked for")
+        return self.daemon_update.result(job)
 
     def _link(self, env: str) -> Link:
         link = self.links.get(env)
@@ -376,44 +486,100 @@ class Browsers:
             raise NotFound(f"no browser {group}")
         return dict(row)
 
+    async def get_row(self, group: str) -> dict[str, Any]:
+        """The group's row as the host keeps it; ``NotFound`` for a group it never had."""
+        return await self._row(group)
+
+    async def answer_dialog(self, group: str, *, accept: bool, tab_id: str = "", text: str | None = None) -> None:
+        """The operator's answer to a page's dialog, from the Browser tab: never held back by control."""
+        row = await self._row(group)
+        if not tab_id:
+            listing = await self.call(group, "tab.list", {"group_id": group}, what="listing the tabs")
+            tab_id = str(listing.get("active_tab") or "")
+        params: dict[str, Any] = {"tab_id": tab_id, "accept": bool(accept), "origin": {"actor": "operator"}}
+        if text is not None:
+            params["text"] = text
+        await self.call(group, "dialog.answer", params, what="answering the dialog")
+        await self.audit(group, row["env"], "operator", "dialog", {"tab": tab_id, "accept": bool(accept), "text_len": len(text or "")})
+
     @staticmethod
     def owner_of(row: dict[str, Any]) -> Owner:
         return Owner(row["owner_kind"], row["owner_id"], project_id=row["project_id"], session_id=row["session_id"], staff_id=row["staff_id"])
 
-    def _view(self, row: dict[str, Any], label: str = "") -> GroupView:
+    def _view(self, row: dict[str, Any], label: str = "", live: dict[str, Any] | None = None, tabs: builtins.list[dict[str, Any]] | None = None) -> GroupView:
+        """A group as the app reads it (``miniapp/src/api.ts``, ``BrowserGroup``): the row, and what
+        the daemon says of it now when it is open — its tabs, its viewport, who holds its controls."""
+        live = live or {}
+        control = live.get("control") if isinstance(live.get("control"), dict) else {}
+        assert isinstance(control, dict)
+        last_action = _json(row.get("last_action_json"))
+        acting = bool(last_action) and row["status"] == "open" and _age(str(last_action.get("at") or "")) < ACTING_SECONDS
+        status = {"open": "running", "lost": "lost"}.get(row["status"], "idle" if row["close_reason"] == "idle" else "closed")
+        tab_views = [
+            {"id": str(t.get("id")), "url": str(t.get("url") or ""), "title": str(t.get("title") or ""), "favicon_url": str(t.get("favicon_url") or ""), "loading": bool(t.get("loading")), "active": bool(t.get("active"))}
+            for t in tabs or []
+            if isinstance(t, dict)
+        ]
+        if not tab_views and row["status"] == "open" and row["url"]:
+            tab_views = [{"id": "", "url": row["url"], "title": row["title"], "favicon_url": "", "loading": False, "active": True}]
+        viewport = live.get("viewport") if isinstance(live.get("viewport"), dict) else {}
+        assert isinstance(viewport, dict)
         return {
             "id": row["id"],
-            "env": row["env"],
-            "profile": row["profile"],
-            "browser_id": row["browser_id"],
             "owner": {"kind": row["owner_kind"], "id": row["owner_id"], "label": label},
-            "project_id": row["project_id"],
             "session_id": row["session_id"],
             "staff_id": row["staff_id"],
-            "fresh": bool(row["fresh"]),
-            "status": row["status"],
+            "project_id": row["project_id"],
+            "profile": row["profile"],
+            "env": row["env"],
+            "browser_id": row["browser_id"],
+            "status": status,
             "close_reason": row["close_reason"],
-            "control": {"owner": row["control_owner"], "reason": row["control_reason"]},
+            "fresh": bool(row["fresh"]),
+            "viewport": {"w": int(viewport.get("w") or 1280), "h": int(viewport.get("h") or 800)},
+            "tabs": tab_views,
+            "active_tab": str(live.get("active_tab") or "") or next((t["id"] for t in tab_views if t["active"] and t["id"]), None),
+            "control": {"owner": str(control.get("owner") or row["control_owner"]), "holder": control.get("holder") or None, "until": control.get("until") or None, "reason": str(control.get("reason") or row["control_reason"])},
+            "needs_you": _json(row.get("needs_json")) or None,
+            "acting": acting,
+            "last_action": {"kind": str(last_action.get("kind") or ""), "element": str(last_action.get("element") or ""), "at": str(last_action.get("at") or "")} if last_action else None,
             "url": row["url"],
             "title": row["title"],
-            "tabs": row["tabs"],
             "created_at": row["created_at"],
             "last_activity_at": row["last_activity_at"],
             "closed_at": row["closed_at"],
         }
 
-    async def get(self, group: str, *, live: bool = True) -> GroupView:
-        """One group; with ``live``, its tabs and controls as the daemon has them now."""
+    async def _live(self, rows: builtins.list[dict[str, Any]]) -> dict[str, tuple[dict[str, Any], builtins.list[dict[str, Any]]]]:
+        """What the daemons say now of the open groups among ``rows``: one listing per environment
+        and the tabs of each; a daemon that does not answer leaves its groups as the rows have them."""
+        out: dict[str, tuple[dict[str, Any], builtins.list[dict[str, Any]]]] = {}
+        for env in ENVS:
+            wanted = {r["id"] for r in rows if r["env"] == env and r["status"] == "open"}
+            if not wanted or not self.available(env):
+                continue
+            try:
+                listing = await self._call(env, "group.list", {}, what="listing the groups")
+            except BrowserError:
+                continue
+            for info in listing.get("groups") or []:
+                if not isinstance(info, dict) or str(info.get("id")) not in wanted:
+                    continue
+                tabs: builtins.list[dict[str, Any]] = []
+                with contextlib.suppress(BrowserError):
+                    tabs = [t for t in (await self._call(env, "tab.list", {"group_id": info["id"]}, what="listing the tabs")).get("tabs") or [] if isinstance(t, dict)]
+                out[str(info["id"])] = (info, tabs)
+        return out
+
+    async def get(self, group: str) -> GroupView:
         row = await self._row(group)
-        view = self._view(row, await self.owners.label(self.owner_of(row)))
-        view["live"] = None
-        if live and row["status"] == "open" and self.available(row["env"]):
-            with contextlib.suppress(BrowserError):
-                listing = await self._call(row["env"], "tab.list", {"group_id": group}, what="listing the tabs")
-                view["live"] = {"tabs": listing.get("tabs") or [], "active_tab": listing.get("active_tab")}
-        return view
+        live = await self._live([row])
+        info, tabs = live.get(group, ({}, []))
+        return self._view(row, await self.owners.label(self.owner_of(row)), info, tabs)
 
     async def list(self, *, session_id: str | None = None, staff_id: str | None = None, project_id: str | None = None, status: str | None = None) -> builtins.list[GroupView]:
+        """The groups, open ones first then the newest activity; closed ones stay listed while their
+        row does, so an owner that had a browser keeps its Browser tab."""
         where: builtins.list[str] = []
         params: builtins.list[Any] = []
         for column, value in (("session_id", session_id), ("staff_id", staff_id), ("project_id", project_id)):
@@ -427,14 +593,25 @@ class Browsers:
             params.append(status)
         sql = "SELECT * FROM browser_groups" + (f" WHERE {' AND '.join(where)}" if where else "")
         rows = [dict(r) for r in await self.db.fetchall(sql + " ORDER BY status != 'open', last_activity_at DESC", params)]  # noqa: S608 — column names are literals above
-        return [self._view(r, await self.owners.label(self.owner_of(r))) for r in rows]
+        live = await self._live(rows)
+        return [self._view(r, await self.owners.label(self.owner_of(r)), *live.get(r["id"], ({}, []))) for r in rows]
 
-    async def audit(self, group: str, env: str, actor: str, action: str, detail: dict[str, Any] | None = None) -> None:
+    async def actions(self, group: str, *, limit: int = 100) -> builtins.list[dict[str, Any]]:
+        """The group's action log as the app shows it, newest first: what the agent did and what it
+        was refused, what the page did on its own, and the operator's hand on the controls. The text
+        the agent typed into a field that is not secret is there while its session exists."""
+        rows = await self.db.fetchall(
+            "SELECT * FROM browser_audit WHERE group_id = ? AND action IN ('act', 'navigate', 'tab_new', 'look', 'dialog', 'handoff', 'download', 'download_saved', 'take', 'give', 'pause', 'open', 'close') ORDER BY seq DESC LIMIT ?",
+            (group, max(1, min(limit, 500))),
+        )
+        return [_action_row(dict(r)) for r in rows]
+
+    async def audit(self, group: str, env: str, actor: str, action: str, detail: dict[str, Any] | None = None, *, typed: str | None = None) -> None:
         """Append to the audit. Never with what anyone typed: an agent's text is a length and a hash,
         a person's input a count, because a search box holds what a person would not have written down."""
         await self.db.execute(
-            "INSERT INTO browser_audit(at, group_id, env, actor, action, detail_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (now_iso(), group, env, actor, action, json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":"))),
+            "INSERT INTO browser_audit(at, group_id, env, actor, action, detail_json, typed) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (now_iso(), group, env, actor, action, json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")), typed),
         )
 
     async def audit_log(self, group: str, *, limit: int = 200) -> builtins.list[dict[str, Any]]:
@@ -654,9 +831,28 @@ class Browsers:
         await self._needs_you(row, reason, what, row["url"])
         return {"url": row["url"], "title": row["title"]}
 
-    async def _needs_you(self, row: dict[str, Any], reason: str, what: str, url: str) -> None:
+    async def _needs_you(self, row: dict[str, Any], reason: str, what: str, url: str, *, by: str = "agent") -> None:
+        """The operator is needed: kept on the group, so every list says so until the browser is
+        taken, given back or closed, and announced."""
+        need = {"reason": reason, "what": what[:500], "url": url[:2000], "at": now_iso(), "by": by}
+        await self.db.execute("UPDATE browser_groups SET needs_json = ? WHERE id = ?", (json.dumps(need, ensure_ascii=False), row["id"]))
         label = await self.owners.label(self.owner_of(row))
-        await self._publish("browser.needs_you", {"group_id": row["id"], "reason": reason, "what": what[:500], "url": url[:2000], "title": label}, row)
+        await self._publish("browser.needs_you", {"group_id": row["id"], "reason": reason, "what": what[:500], "url": url[:2000], "title": label, "by": by}, row)
+
+    async def grant(self, group: str, host: str, port: int, *, ttl_ms: int | None = None, by: str = "operator") -> None:
+        """Open one host and port for the group's browser past the network wall's ask: the operator's
+        yes, carried to the daemon. A grant never lifts what the wall denies."""
+        row = await self._row(group)
+        params: dict[str, Any] = {"group_id": group, "host": host, "port": int(port)}
+        if ttl_ms is not None:
+            params["ttl_ms"] = ttl_ms
+        await self._call(row["env"], "net.grant", params, what="letting the browser through")
+        await self.audit(group, row["env"], by, "net_grant", {"host": host, "port": int(port), "ttl_ms": ttl_ms})
+
+    async def revoke(self, group: str, host: str, port: int, *, by: str = "operator") -> None:
+        row = await self._row(group)
+        await self._call(row["env"], "net.revoke", {"group_id": group, "host": host, "port": int(port)}, what="taking a grant back")
+        await self.audit(group, row["env"], by, "net_revoke", {"host": host, "port": int(port)})
 
     # -- closing ----------------------------------------------------------------------------
 
@@ -668,7 +864,9 @@ class Browsers:
         await self._mark_closed(row, reason, status="closed", by=actor)
 
     async def close_owned(self, owner_kind: str, owner_id: str, *, actor: str = "system") -> int:
-        """Close every open group of an owner that is going away; returns how many were open."""
+        """Close every open group of an owner that is going away, and forget the text its agent typed
+        (the action log keeps it only while the session exists); returns how many were open."""
+        await self.db.execute("UPDATE browser_audit SET typed = NULL WHERE typed IS NOT NULL AND group_id IN (SELECT id FROM browser_groups WHERE owner_kind = ? AND owner_id = ?)", (owner_kind, owner_id))
         rows = await self.db.fetchall("SELECT id FROM browser_groups WHERE status = 'open' AND owner_kind = ? AND owner_id = ?", (owner_kind, owner_id))
         for row in rows:
             try:
@@ -683,7 +881,7 @@ class Browsers:
             if current is None or current["status"] != "open":
                 return False
             await self.db.execute(
-                "UPDATE browser_groups SET status = ?, close_reason = ?, closed_at = ?, control_owner = 'agent', control_reason = '' WHERE id = ?",
+                "UPDATE browser_groups SET status = ?, close_reason = ?, closed_at = ?, control_owner = 'agent', control_reason = '', needs_json = NULL WHERE id = ?",
                 (status, reason, now_iso(), row["id"]),
             )
         self._notes.pop(row["id"], None)
@@ -885,6 +1083,9 @@ class Browsers:
         if kind == "browser.stats":
             self._on_stats(link, data)
             return
+        if kind == "egress":
+            await self._on_egress(link, data)
+            return
         if kind == "browser.started":
             await self._browser_started(link, data)
             return
@@ -903,7 +1104,11 @@ class Browsers:
         elif kind == "control":
             await self._on_control(row, data)
         elif kind == "needs_you":
-            await self._needs_you(row, str(data.get("reason") or "other"), str(data.get("what") or ""), str(data.get("url") or row["url"]))
+            await self._needs_you(row, str(data.get("reason") or "other"), str(data.get("what") or ""), str(data.get("url") or row["url"]), by=str(data.get("by") or "daemon"))
+        elif kind == "action":
+            last = {"kind": str(data.get("kind") or ""), "element": str(data.get("element") or data.get("name") or "")[:300], "at": now_iso()}
+            await self.db.execute("UPDATE browser_groups SET last_action_json = ?, last_activity_at = ? WHERE id = ?", (json.dumps(last, ensure_ascii=False), last["at"], row["id"]))
+            await self._publish("browser.activity", {"group_id": row["id"], **last}, row)
         elif kind == "download.done":
             download = data.get("download") if isinstance(data.get("download"), dict) else {}
             assert isinstance(download, dict)
@@ -914,7 +1119,13 @@ class Browsers:
         if owner not in CONTROL_OWNERS:
             return
         before = row["control_owner"]
-        await self.db.execute("UPDATE browser_groups SET control_owner = ?, control_reason = ? WHERE id = ?", (owner, str(data.get("reason") or "")[:300], row["id"]))
+        # A person at the controls, or the agent given them back, is the answer to what was asked:
+        # the request is over. A pause is how a request is made, so it keeps it.
+        await self.db.execute(
+            "UPDATE browser_groups SET control_owner = ?, control_reason = ?, needs_json = CASE WHEN ? = 'paused' THEN needs_json ELSE NULL END WHERE id = ?",
+            (owner, str(data.get("reason") or "")[:300], owner, row["id"]),
+        )
+        await self._publish("browser.control", {"group_id": row["id"], "owner": owner, "reason": str(data.get("reason") or "")[:300]}, row)
         if owner != "agent" or before == "agent" or row["status"] != "open":
             return
         note, by = self._notes.pop(row["id"], ("", "operator"))
@@ -930,6 +1141,27 @@ class Browsers:
                 await self.wake(self.owner_of(fresh), text)
             except Exception:  # noqa: BLE001 — the browser is given back whether or not the owner could be woken
                 logger.exception("could not tell the owner of browser %s that it was given back", row["id"])
+
+    async def _on_egress(self, link: Link, data: dict[str, Any]) -> None:
+        """Where a browser went, and what the wall said, in the egress log every session already has,
+        under the tool ``Browser``: the session that owns the group, or the staff member for one of a
+        command-line member (which has no session here)."""
+        host = str(data.get("host") or "")
+        if not host:
+            return
+        group = str(data.get("group_id") or "")
+        row = await self.db.fetchone("SELECT * FROM browser_groups WHERE id = ?", (group,)) if group else None
+        if row is None:
+            row = await self.db.fetchone("SELECT * FROM browser_groups WHERE env = ? AND browser_id = ? ORDER BY last_activity_at DESC LIMIT 1", (link.env, str(data.get("browser_id") or "")))
+        if row is None:
+            return
+        owner = row["session_id"] or f"staff:{row['staff_id'] or row['owner_id']}"
+        port = data.get("port")
+        where = host if port in (None, 80, 443) else f"{host}:{port}"
+        await self.db.execute(
+            "INSERT INTO egress_log(at, session_id, run_id, tool, host, action) VALUES (?, ?, ?, 'Browser', ?, ?)",
+            (iso(data.get("at")) or now_iso(), owner, None, where[:300], str(data.get("decision") or "")[:20]),
+        )
 
     async def _browser_started(self, link: Link, data: dict[str, Any]) -> None:
         bid = str(data.get("browser_id") or "")

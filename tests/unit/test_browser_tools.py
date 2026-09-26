@@ -376,3 +376,34 @@ async def test_what_the_daemon_refuses_or_leaves_as_it_was_is_said_in_words_to_a
     assert failed and "BrowserHandoff" in text
     text, failed = await rig.call(sid, "BrowserAct", action="press", ref="e31", keys="Enter", element="the password field")
     assert failed and "submit a sign-in" in text and "Approval key" in text
+
+
+async def test_the_walls_ask_becomes_the_operators_question_and_a_yes_a_grant(rig: Rig) -> None:
+    sid = await rig.session()
+    await rig.call(sid, "BrowserOpen")
+    rig.daemon.walled["nas.lan.test"] = ("ask", "lan_allow")
+    rig.daemon.walled["router.lan.test"] = ("deny", "private")
+    text, failed = await rig.call(sid, "BrowserNavigate", url="http://router.lan.test/")
+    assert failed and "network wall refused router.lan.test" in text
+    text, failed = await rig.call(sid, "BrowserNavigate", url="http://nas.lan.test/")
+    assert failed and "needs the operator's approval" in text and "nas.lan.test:80" in text and "rule browser.network" in text
+    key = text.split("Approval key: ")[1].split(".")[0]
+    await rig.manager.grant(sid, key, via="app")
+    text, failed = await rig.call(sid, "BrowserNavigate", url="http://nas.lan.test/")
+    assert not failed and "nas.lan.test" in text
+    assert (rig.daemon.groups[f"s-{sid}"].browser_id, "nas.lan.test", 80) in rig.daemon.grants
+
+
+async def test_the_action_log_shows_what_was_typed_while_the_session_lasts(rig: Rig) -> None:
+    sid = await rig.session()
+    await rig.call(sid, "BrowserOpen", url="https://shop.test/")
+    await rig.call(sid, "BrowserAct", action="type", ref="e1", element="the search box", text="trail shoes")
+    await rig.call(sid, "BrowserAct", action="click", ref="e3", element="the shoes link")
+    service = rig.app.extensions["browser"]
+    rows = await service.actions(f"s-{sid}")
+    typed = next(r for r in rows if r["kind"] == "type")
+    assert typed["text"] == "trail shoes" and typed["text_len"] == 11 and typed["actor"] == "agent" and typed["box"]
+    assert rows[0]["kind"] == "click" and rows[0]["name"] == "Running shoes"
+    assert "trail shoes" not in json.dumps(await service.audit_log(f"s-{sid}"))
+    await service.close_owned("session", sid)
+    assert "text" not in next(r for r in await service.actions(f"s-{sid}") if r["kind"] == "type")

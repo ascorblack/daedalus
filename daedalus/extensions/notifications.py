@@ -994,6 +994,16 @@ class NotificationRouter:
             link = f"/app/project/{event.project_id}/staff/{event.staff_id}?panel=browser"
         else:
             link = f"{self._session_link(event.session_id)}?panel=browser" if event.session_id else ""
+        # A link that opens the Mini App on the owner's Browser tab: from a chat, a lock screen or a
+        # phone the operator is not at the app, and "needs you" is a thing to open at once.
+        front = self.service._front()
+        bot = str(getattr(front, "username", "") or "")
+        public = str(getattr(getattr(self.manager, "settings", None), "miniapp_public_url", "") or "").rstrip("/")
+        if event.session_id and bot:
+            body += f"\n{render('browser.open', self._lang())}: https://t.me/{bot}?startapp=browser_{event.session_id}"
+        elif public and link:
+            base = public[: -len("/app")] if public.endswith("/app") else public
+            body += f"\n{render('browser.open', self._lang())}: {base}{link}"
         ref = f"browser:{group}"
         await self.service.post(Draft(
             "question", render("browser.needs_you", self._lang(), title=str(p.get("title") or "")), body, kind="browser_needs_you", tone="warning", level="urgent",

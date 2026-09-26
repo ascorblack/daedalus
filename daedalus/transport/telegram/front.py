@@ -446,6 +446,8 @@ class TelegramFront:
         self.settings = settings
         self.config = config
         self.manager = manager
+        self.username = ""
+        """The bot's own name, once polling starts: what a link that opens the Mini App names."""
         self.save_config = save_config
         self.speech = speech if speech is not None else LocalSpeech(settings.state_dir, config)
         """Local speech recognition, which answers before any endpoint is asked. Handed in by the
@@ -519,6 +521,7 @@ class TelegramFront:
     async def start(self) -> None:
         self.listen()  # before polling, which does not return until the front stops
         me = await self.bot.get_me()
+        self.username = str(me.username or "")
         logger.warning("telegram: polling as @%s", me.username)
         await self.bot.delete_webhook(drop_pending_updates=False)
         await self.dp.start_polling(self.bot, handle_signals=False)

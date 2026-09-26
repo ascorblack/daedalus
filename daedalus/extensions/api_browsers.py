@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from daedalus.browser.gateway import BrowserGateway
-from daedalus.browser.model import BrowserError, EnvUnavailable, InvalidRequest, NotFound, Owner
+from daedalus.browser.model import BrowserError, EnvUnavailable, InvalidRequest, NotFound
 from daedalus.gateway import SocketGone, ticket_who
 from daedalus.stores.files import FileRefused, safe_name
 
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 class TicketBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     read_only: bool = False
+    tier: Literal["live", "thumb"] = "live"
+    """The app says which view it opens; the tier itself travels in the socket's ATTACH."""
 
 
 class ControlBody(BaseModel):
@@ -45,6 +47,18 @@ class ControlBody(BaseModel):
 class SaveBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     to: str = Field(default="", max_length=500)
+
+
+class DialogBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    accept: bool
+    tab_id: str = Field(default="", max_length=64)
+    text: str | None = Field(default=None, max_length=10_000)
+
+
+class UpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
 
 
 class ViewSocket:
@@ -102,17 +116,30 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
 
     @api.get("/api/browsers")
     async def browsers_list(
-        session_id: str | None = Query(default=None, max_length=128),
-        staff_id: str | None = Query(default=None, max_length=128),
-        project_id: str | None = Query(default=None, max_length=128),
+        session: str | None = Query(default=None, max_length=128),
+        staff: str | None = Query(default=None, max_length=128),
+        project: str | None = Query(default=None, max_length=128),
         status: Literal["open", "closed", "lost"] | None = None,
         _: dict[str, Any] = Depends(auth),
     ) -> dict[str, Any]:
-        """The groups: every agent's browser, open ones first, with the environments and the cap."""
-        found = service()
-        groups = await found.list(session_id=session_id, staff_id=staff_id, project_id=project_id, status=status)
-        running = sum(1 for g in await found.list(status="open"))
-        return {"envs": found.environments(), "groups": groups, "capacity": {"open": running, "cap": app.config.browser.running_cap, "queued": found.queue()}}
+        """An owner's groups (``session`` or ``staff``), a project's, or every one: open first, then
+        by activity. ``available`` says whether a browser answers now, and ``reason`` why not; an
+        installation without a browser answers ``available: false`` rather than an error, since the
+        app asks for every session it shows."""
+        found = cast("Browsers | None", app.extensions.get("browser"))
+        if found is None:
+            return {"available": False, "reason": "this installation has no browser", "groups": [], "envs": [], "capacity": None}
+        envs = found.environments()
+        up = [e for e in envs if e["available"]]
+        reason = "" if up else next((f"{e['env']}: {e['detail'] or e['reason']}" for e in envs if e["configured"]), "no browser is configured")
+        groups = await found.list(session_id=session, staff_id=staff, project_id=project, status=status)
+        return {
+            "available": bool(up),
+            "reason": reason,
+            "groups": groups,
+            "envs": envs,
+            "capacity": {"open": await found.running(found.agent_env()), "cap": app.config.browser.running_cap, "queued": found.queue()},
+        }
 
     @api.get("/api/browsers/load")
     async def browsers_load(cap: int | None = Query(default=None, ge=1, le=64), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -174,10 +201,33 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     @api.post("/api/browsers/{group_id}/control")
     async def browsers_control(group_id: str, body: ControlBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Take the browser (``human`` with the view's ``client_id``), pause the agent, or give it back
-        (``agent``, with a note). The agent hears of the give-back once, with where the browser is."""
+        (``agent``, with a note); answers the group's control as it now is. The agent hears of the
+        give-back once, with where the browser is."""
         if body.owner == "human" and not body.client_id:
             raise InvalidRequest("taking control names the live view that drives: its client_id")
-        return {"control": await service().control(group_id, body.owner, client_id=body.client_id, ttl_ms=body.ttl_ms, reason=body.reason, note=body.note, by="operator")}
+        return await service().control(group_id, body.owner, client_id=body.client_id, ttl_ms=body.ttl_ms, reason=body.reason, note=body.note, by="operator")
+
+    @api.post("/api/browsers/{group_id}/dialog")
+    async def browsers_dialog(group_id: str, body: DialogBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator answers the page's alert, confirm or prompt (the tab's, or the active one's)."""
+        await service().answer_dialog(group_id, accept=body.accept, tab_id=body.tab_id, text=body.text)
+        return {"ok": True}
+
+    @api.get("/api/browsers/{group_id}/actions")
+    async def browsers_actions(group_id: str, limit: int = Query(default=100, ge=1, le=500), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The action log the Browser tab shows, newest first."""
+        await service().get_row(group_id)
+        return {"actions": await service().actions(group_id, limit=limit)}
+
+    @api.post("/api/browsers/envs/{env}/update", status_code=202)
+    async def browsers_daemon_update(env: str, body: UpdateBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Recreate the browser service from the image, which updates its daemon and ends its
+        browsers: 409 ``live_browsers`` with the count until repeated with ``confirm``."""
+        return await service().request_update(env, confirm=body.confirm if body is not None else False)
+
+    @api.get("/api/browsers/envs/{env}/update/{job}")
+    async def browsers_daemon_update_result(env: str, job: str, _: dict[str, Any] = Depends(auth)) -> dict[str, str]:
+        return service().update_result(env, job)
 
     @api.post("/api/browsers/{group_id}/close")
     async def browsers_close(group_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -209,8 +259,8 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         if download.get("state") != "completed":
             raise InvalidRequest(f"{download.get('name')} is {download.get('state')}, not finished")
         data = await found.read_download(group_id, download, limit=500 << 20)
-        row = await found.get(group_id, live=False)
-        owner = Owner(row["owner"]["kind"], row["owner"]["id"], project_id=row["project_id"], session_id=row["session_id"], staff_id=row["staff_id"])
+        row = await found.get_row(group_id)
+        owner = found.owner_of(row)
         name = safe_name(str(download.get("name") or "")) or "download"
         out: dict[str, Any] = {"name": name, "size": len(data)}
         if owner.session_id:

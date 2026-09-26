@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import socket
 import tempfile
@@ -25,6 +26,7 @@ from websockets.datastructures import Headers  # noqa: F401 — imported for the
 from websockets.exceptions import ConnectionClosed
 from websockets.typing import Origin
 
+from daedalus.browser.agent import Caller
 from daedalus.browser.gateway import BROWSER_WS_MAX_BYTES
 from daedalus.browser.model import Owner
 from daedalus.config import RuntimeConfig, Settings
@@ -32,7 +34,7 @@ from daedalus.extensions import browser as browser_extension
 from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
-from tests.support.fake_browserd import FakeBrowserd, ViewChannel
+from tests.support.fake_browserd import Element, FakeBrowserd, ViewChannel
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = json.loads((ROOT / "browserd" / "internal" / "wire" / "testdata" / "frames.json").read_text())
@@ -265,22 +267,36 @@ async def test_the_daemon_letting_go_and_the_daemon_dying(served: Served) -> Non
 
 async def test_the_routes_list_hand_over_and_keep_downloads(served: Served, tmp_path: Path) -> None:
     group = await served.group()
+    session = group.removeprefix("s-")
     async with served.http() as http:
-        listed = (await http.get("/api/browsers", headers=H)).json()
-        assert [g["id"] for g in listed["groups"]] == [group] and listed["envs"][0]["available"]
-        one = (await http.get(f"/api/browsers/{group}", headers=H)).json()
-        assert one["live"]["tabs"][0]["url"] == "https://shop.test/"
+        listed = (await http.get("/api/browsers", params={"session": session}, headers=H)).json()
+        assert listed["available"] and listed["reason"] == "" and [g["id"] for g in listed["groups"]] == [group]
+        one = listed["groups"][0]
+        # The group as the app reads it (miniapp/src/api.ts, BrowserGroup).
+        assert one["status"] == "running" and one["owner"]["kind"] == "session" and one["session_id"] == session
+        assert one["tabs"][0]["url"] == "https://shop.test/" and one["active_tab"] == one["tabs"][0]["id"] and one["viewport"] == {"w": 1280, "h": 800}
+        assert one["control"] == {"owner": "agent", "holder": None, "until": None, "reason": ""} and one["needs_you"] is None and one["acting"] is False
+        assert (await http.get("/api/browsers", params={"session": "someone-else"}, headers=H)).json()["groups"] == []
+        assert (await http.get(f"/api/browsers/{group}", headers=H)).json()["id"] == group
+        assert (await http.post(f"/api/browsers/{group}/ticket", json={"tier": "thumb", "read_only": True}, headers=H)).status_code == 200
         assert (await http.post(f"/api/browsers/{group}/control", json={"owner": "human"}, headers=H)).status_code == 400
         taken = (await http.post(f"/api/browsers/{group}/control", json={"owner": "human", "client_id": "v1"}, headers=H)).json()
-        assert taken["control"]["owner"] == "human"
+        assert taken["owner"] == "human" and taken["holder"] == "v1"
         given = (await http.post(f"/api/browsers/{group}/control", json={"owner": "agent", "note": "done"}, headers=H)).json()
-        assert given["control"]["owner"] == "agent"
+        assert given["owner"] == "agent"
+        served.daemon.tab_of(group).dialog = {"type": "confirm", "message": "Leave?"}
+        assert (await http.post(f"/api/browsers/{group}/dialog", json={"accept": True}, headers=H)).status_code == 200
+        assert served.daemon.tab_of(group).dialog is None
         served.daemon.add_download(group, "report.pdf", b"%PDF-1.7 fake")
         downloads = (await http.get(f"/api/browsers/{group}/downloads", headers=H)).json()["downloads"]
         saved = (await http.post(f"/api/browsers/{group}/downloads/{downloads[0]['id']}/save", json={}, headers=H)).json()
         assert Path(saved["path"]).read_bytes() == b"%PDF-1.7 fake" and saved["path"].endswith("downloads/report.pdf")
         refused = await http.post(f"/api/browsers/{group}/downloads/{downloads[0]['id']}/save", json={"to": "../../escape.pdf"}, headers=H)
         assert refused.status_code == 400
+        actions = (await http.get(f"/api/browsers/{group}/actions", params={"limit": 50}, headers=H)).json()["actions"]
+        kinds = [(a["actor"], a["kind"]) for a in actions]
+        assert ("operator", "take") in kinds and ("operator", "give") in kinds and ("page", "download") in kinds and ("operator", "dialog") in kinds
+        assert (await http.get("/api/browsers/nope/actions", headers=H)).status_code == 404
         assert (await http.get(f"/api/browsers/{group}/asks/abcdef012345/thumbnail", headers=H)).status_code == 404
         load = (await http.get("/api/workloads/load", headers=H)).json()
         assert load["browsers"]["running"] == 1 and load["terminals"] is None
@@ -288,17 +304,22 @@ async def test_the_routes_list_hand_over_and_keep_downloads(served: Served, tmp_
         assert caps["browser"] == {"configured": True, "envs": ["container"], "available": True}
         audit = (await http.get(f"/api/browsers/{group}/audit", headers=H)).json()["entries"]
         assert {"open", "take", "give", "download_saved"} <= {e["action"] for e in audit}
+        # No image to update from here (no rebuilder, no image binary).
+        assert (await http.post("/api/browsers/envs/container/update", json={}, headers=H)).status_code == 501
         closed = await http.post(f"/api/browsers/{group}/close", headers=H)
         assert closed.status_code == 200
         assert (await http.post(f"/api/browsers/{group}/ticket", headers=H)).status_code == 404
+        after = (await http.get("/api/browsers", params={"session": session}, headers=H)).json()["groups"]
+        assert after[0]["status"] == "closed"  # still listed, so the app keeps offering the tab
 
 
 async def test_the_doctor_names_the_browser_its_chromium_and_its_walls(browser_settings: Settings, app: Any, daemon: FakeBrowserd) -> None:
     from daedalus.doctor import DoctorContext, _browser  # noqa: PLC0415 — the probe alone, not the whole doctor
 
     checks = await _browser(DoctorContext(settings=browser_settings, config=app.config, extensions=app.extensions))
-    [line] = checks
-    assert line.ok and line.name == "browser (container)" and "Chromium 151.0.0.0 (bundled)" in line.message and "its own network" in line.message
+    line, walls = checks
+    assert line.ok and line.name == "browser (container)" and "Chromium 151.0.0.0, bundled" in line.message
+    assert walls.name == "browser walls (container)" and "network of its own" in walls.message
     # Without the running service the doctor dials the daemon itself.
     alone = await _browser(DoctorContext(settings=browser_settings, config=app.config, extensions={}))
     assert alone[0].ok
@@ -319,6 +340,9 @@ async def test_needs_you_is_an_urgent_notification_until_the_browser_comes_back(
         def language(self) -> str:
             return "en"
 
+        def _front(self) -> Any:
+            return type("Front", (), {"username": "shop_agent_bot"})()
+
         async def post(self, draft: Any) -> None:
             posted.append(draft)
 
@@ -331,5 +355,51 @@ async def test_needs_you_is_an_urgent_notification_until_the_browser_comes_back(
     [draft] = posted
     assert draft.level == "urgent" and draft.title == "Research needs you in the browser" and draft.link == "/app/agents/s1?panel=browser"
     assert "sign in to github.test" in draft.body and draft.request_ref == "browser:s-1"
+    # From a chat or a lock screen the line opens the Mini App on that session's Browser tab.
+    assert draft.body.endswith("Open the browser: https://t.me/shop_agent_bot?startapp=browser_s1")
     await router.handle(AppEvent(seq=2, at="2026-09-26T00:00:01Z", type="browser.returned", payload={"group_id": "s-1", "url": "", "title": "", "tabs": 1, "by": "operator"}, session_id="s1"))
     assert resolved == ["browser:s-1"]
+
+
+def _ts_fields(name: str) -> tuple[set[str], set[str]]:
+    """The fields of a type in the app's ``api.ts``: those it requires, and the optional ones."""
+    source = (ROOT / "miniapp" / "src" / "api.ts").read_text(encoding="utf-8")
+    body = source[source.index(f"export type {name} = {{") :]
+    first = body.split("\n", 1)[0]
+    if first.rstrip().endswith("};"):
+        # A type on one line: its fields are the top-level names of the object.
+        inner = first[first.index("{") + 1 : first.rindex("}")]
+        names = re.findall(r"(?:^|;)\s*(\w+)(\??):", inner)
+    else:
+        names = re.findall(r"^\s{2}(\w+)(\??):", body[: body.index("\n};")], re.M)
+    required = {n for n, q in names if not q}
+    optional = {n for n, q in names if q}
+    return required, optional
+
+
+async def test_the_host_answers_in_the_shapes_the_app_reads(served: Served) -> None:
+    """The app was built against a stub; this holds the real host to the app's own types, so a name
+    that drifts on either side fails here rather than as a blank Browser tab."""
+    group = await served.group()
+    service = served.app.extensions["browser"]
+    view = await service.get(group)
+    required, _ = _ts_fields("BrowserGroup")
+    assert required <= set(view), required - set(view)
+    agent = served.app.extensions["browser_agent"]
+
+    async def gate(ask: Any) -> tuple[bool, str]:
+        return True, ""
+
+    served.daemon.page("https://shop.test/", title="Shop", elements={"e1": Element("e1", "searchbox", "Search", tag="input")})
+    owner = service.owner_of(await service.get_row(group))
+    caller = Caller(owner=owner, actor="agent:test", gate=gate, files=None)  # type: ignore[arg-type]
+    await agent.run("BrowserNavigate", {"url": "https://shop.test/"}, caller)
+    await agent.run("BrowserAct", {"action": "type", "ref": "e1", "element": "the search box", "text": "boots"}, caller)
+    rows = await service.actions(group)
+    row_required, row_optional = _ts_fields("BrowserActionRow")
+    typed = next(r for r in rows if r["kind"] == "type")
+    assert row_required <= set(typed) and set(typed) <= row_required | row_optional, set(typed) ^ (row_required | row_optional)
+    listing_required, _ = _ts_fields("BrowserList")
+    async with served.http() as http:
+        listed = (await http.get("/api/browsers", params={"session": group.removeprefix("s-")}, headers=H)).json()
+    assert listing_required <= set(listed)

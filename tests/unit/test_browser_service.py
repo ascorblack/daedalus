@@ -182,7 +182,7 @@ async def test_a_give_back_wakes_the_owner_exactly_once_with_the_note(service: B
 
 
 async def _control(service: Browsers) -> str:
-    return str((await service.get("s-sess1", live=False))["control"]["owner"])
+    return str((await service.get("s-sess1"))["control"]["owner"])
 
 
 async def test_a_handoff_pauses_and_tells_the_operator(service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
@@ -191,7 +191,7 @@ async def test_a_handoff_pauses_and_tells_the_operator(service: Browsers, owners
     await service.handoff("s-sess1", "login", "sign in to github.test", actor="agent:sess1")
     assert daemon.groups["s-sess1"].control["owner"] == "paused"
     needs = bus.of("browser.needs_you")
-    assert needs and needs[0][0] == {"group_id": "s-sess1", "reason": "login", "what": "sign in to github.test", "url": "https://github.test/login", "title": "Research"}
+    assert needs and needs[0][0] == {"group_id": "s-sess1", "reason": "login", "what": "sign in to github.test", "url": "https://github.test/login", "title": "Research", "by": "agent"}
     # The daemon raises it on its own for a CAPTCHA, and the host retells it with the owner's ids.
     daemon.needs_you("s-sess1", "captcha", "solve the CAPTCHA")
     await wait_until(lambda: _async(len(bus.of("browser.needs_you"))), 2)
@@ -208,7 +208,7 @@ async def test_a_crash_closes_the_groups_and_the_next_call_says_how_to_go_on(ser
         await service.call("s-sess1", "tab.list", {"group_id": "s-sess1"}, what="listing")
     assert "crashed" in gone.value.message and "BrowserOpen" in gone.value.message
     reopened = await service.open(SESSION, actor="agent:sess1")
-    assert reopened["created"] and (await service.get("s-sess1", live=False))["status"] == "open"
+    assert reopened["created"] and (await service.get("s-sess1"))["status"] == "running"
 
 
 async def test_reconcile_after_a_daemon_restart_and_an_adoption_by_labels(db: Database, service: Browsers, owners: FakeOwners, bus: FakeBus, daemon: FakeBrowserd) -> None:
@@ -238,7 +238,7 @@ async def test_the_audit_never_holds_what_anyone_typed_and_closing_the_owner_clo
     await service.audit("s-sess1", "container", "agent:sess1", "act", {"text_len": 16, "text_sha256": "ab" * 32})
     assert "hunter2" not in json.dumps(await service.audit_log("s-sess1"))
     assert await service.close_owned("session", "sess1") == 1
-    assert (await service.get("s-sess1", live=False))["close_reason"] == "owner_gone"
+    assert (await service.get("s-sess1"))["close_reason"] == "owner_gone"
 
 
 async def test_the_load_counts_browsers_under_their_own_profile(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd) -> None:
@@ -259,10 +259,64 @@ async def test_a_group_the_daemon_forgot_reads_as_closed_idle_and_a_missing_thin
     # Nothing is open to answer: the group stays open.
     with pytest.raises(NotFound):
         await service.call("s-sess1", "dialog.answer", {"tab_id": tab, "accept": True}, what="answering the dialog")
-    assert (await service.get("s-sess1", live=False))["status"] == "open"
+    assert (await service.get("s-sess1"))["status"] == "running"
     # The daemon closed it without a word reaching this host (its idle close while the host was away).
     del daemon.groups["s-sess1"]
     with pytest.raises(BrowserGone) as gone:
         await service.call("s-sess1", "tab.list", {"group_id": "s-sess1"}, what="listing")
     assert "ten minutes" in gone.value.message
-    assert (await service.get("s-sess1", live=False))["close_reason"] == "idle"
+    assert (await service.get("s-sess1"))["close_reason"] == "idle"
+
+
+async def test_the_wall_gets_its_rules_on_every_connection_and_egress_is_logged(db: Database, run_dir: Path, owners: FakeOwners, daemon: FakeBrowserd, cfg: BrowserConfig) -> None:
+    rules = {"sealed_ports": [8765], "services_ports": [[8100, 8119]], "loopback_rewrite": "host.docker.internal", "ask_loopback": False, "lan_allow": []}
+    made = Browsers(db, run_dirs={"container": run_dir, "host": None}, config=lambda: cfg, owners=owners, wall=lambda env: dict(rules))  # type: ignore[arg-type]
+    await made.start()
+    try:
+        assert await made.wait_available("container")
+        assert daemon.wall == rules
+        owners.add(SESSION)
+        await made.open(SESSION, actor="agent:sess1")
+        daemon.walled["intranet.test"] = ("deny", "private")
+        with pytest.raises(Exception) as refused:
+            await made.call("s-sess1", "page.navigate", {"tab_id": daemon.groups["s-sess1"].active, "url": "http://intranet.test/"}, what="opening")
+        assert refused.value.details["reason"] == "private"  # type: ignore[attr-defined]
+        await wait_until(lambda: _egress(db), [("sess1", "Browser", "intranet.test", "deny")])
+        # A restarted daemon starts at its strictest: the rules go again.
+        await daemon.restart()
+        daemon.wall = None
+        await wait_until(lambda: _async(daemon.wall), rules)
+    finally:
+        await made.close()
+
+
+async def _egress(db: Database) -> list[tuple[str, str, str, str]]:
+    return [(r["session_id"], r["tool"], r["host"], r["action"]) for r in await db.fetchall("SELECT * FROM egress_log WHERE action != 'allow' ORDER BY seq")]
+
+
+async def test_a_request_and_the_last_action_are_on_the_listing_until_answered(service: Browsers, owners: FakeOwners, daemon: FakeBrowserd) -> None:
+    owners.add(SESSION, "Research")
+    await service.open(SESSION, url="https://github.test/login", actor="agent:sess1")
+    daemon.needs_you("s-sess1", "captcha", "solve the CAPTCHA")
+
+    async def need() -> Any:
+        return (await service.get("s-sess1"))["needs_you"]
+
+    await wait_until(lambda: _reason(service), "captcha")
+    assert (await need())["by"] == "daemon"
+    daemon.emit("action", {"group_id": "s-sess1", "tab_id": "t1", "kind": "click", "element": "the Next button", "name": "Next"})
+    await wait_until(lambda: _acting(service), True)
+    group = await service.get("s-sess1")
+    assert group["last_action"]["kind"] == "click" and group["last_action"]["element"] == "the Next button"
+    # The operator takes the browser: what was asked of them is being done.
+    daemon.set_control("s-sess1", "human", "v1")
+    await wait_until(need, None)
+
+
+async def _reason(service: Browsers) -> str | None:
+    need = (await service.get("s-sess1"))["needs_you"]
+    return need["reason"] if need else None
+
+
+async def _acting(service: Browsers) -> bool:
+    return bool((await service.get("s-sess1"))["acting"])

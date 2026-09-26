@@ -214,6 +214,8 @@ class BrowserNeedsYou(TypedDict):
     url: str
     title: str
     """Who asks, as a person reads it: the session's title or the staff member's name."""
+    by: NotRequired[str]
+    """``agent`` (a handoff) or ``daemon`` (a secret field, a CAPTCHA, an HTTP sign-in)."""
 
 
 class BrowserReturned(TypedDict):
@@ -225,6 +227,24 @@ class BrowserReturned(TypedDict):
     tabs: int
     by: str
     note: NotRequired[str]
+
+
+class BrowserControl(TypedDict):
+    """Who holds a browser's controls now: ``agent``, ``human`` or ``paused``. Ephemeral: the app's
+    lists re-read on it, and the listing is the truth."""
+
+    group_id: str
+    owner: str
+    reason: str
+
+
+class BrowserActivity(TypedDict):
+    """The agent acted on its browser: the app's pulsing dot and its corner preview. Ephemeral."""
+
+    group_id: str
+    kind: str
+    element: str
+    at: str
 
 
 class BrowserClosed(TypedDict):
@@ -475,6 +495,9 @@ REGISTRY: dict[str, EventSpec] = {
     "browser.needs_you": EventSpec(BrowserNeedsYou),
     "browser.returned": EventSpec(BrowserReturned),
     "browser.closed": EventSpec(BrowserClosed),
+    # Many a minute while an agent works, and worth nothing once read: delivered live, never stored.
+    "browser.control": EventSpec(BrowserControl, persist=False),
+    "browser.activity": EventSpec(BrowserActivity, persist=False),
     "staff.status": EventSpec(StaffStatus),
     "staff.report": EventSpec(StaffReport),
     "staff.message": EventSpec(StaffMessage),

@@ -38,7 +38,7 @@ from daedalus.browser.model import (
     Paused,
     StaleRef,
 )
-from daedalus.host.policy import ALLOW, ASK, Decision, browser_sensitive
+from daedalus.host.policy import ALLOW, ASK, Decision, approval_key, browser_sensitive
 
 if TYPE_CHECKING:
     from daedalus.browser.service import Browsers
@@ -57,6 +57,12 @@ NAVIGATE_TIMEOUT_MS = 30_000
 UPLOAD_MAX_FILES = 10
 UPLOAD_MAX_BYTES = 100 << 20
 DOWNLOAD_MAX_BYTES = 500 << 20
+NETWORK_WORDS = {
+    "egress_allow": "outside the operator's allowlist",
+    "loopback": "a port of this machine that is not one of the agent's services",
+    "lan_allow": "an address on the local network the operator listed",
+}
+"""Why the wall asks, as a person reads it in the question."""
 PAGE_BUDGET = 40_000
 """Characters of a page a result carries when the caller names no budget of its own."""
 THUMB_WIDTH = 320
@@ -220,20 +226,23 @@ class BrowserAgent:
         tabs = [t for t in listing.get("tabs") or [] if isinstance(t, dict)]
         return "\n".join(self._tab_line(t) for t in tabs) or "(no tabs)"
 
-    async def _audit(self, group: dict[str, Any], caller: Caller, action: str, detail: dict[str, Any]) -> None:
+    async def _audit(self, group: dict[str, Any], caller: Caller, action: str, detail: dict[str, Any], *, typed: str | None = None) -> None:
         try:
-            await self.service.audit(group["id"], group["env"], caller.actor, action, detail)
+            await self.service.audit(group["id"], group["env"], caller.actor, action, detail, typed=typed)
         except Exception:  # noqa: BLE001 — a failed audit write is logged, not the agent's failure
             logger.exception("could not write %s of browser %s to the audit", action, group["id"])
 
     # -- the tools --------------------------------------------------------------------------------
 
     async def open(self, caller: Caller, *, url: str | None = None, fresh: bool = False) -> str:
-        opened = await self.service.open(caller.owner, url=url or None, fresh=fresh, actor=caller.actor)
+        # Opened blank and then sent to the address, so the address meets the network wall as any
+        # navigation does: an ask becomes the operator's question, not a failed start.
+        opened = await self.service.open(caller.owner, fresh=fresh, actor=caller.actor)
         group = opened["group"]
-        if not opened["created"] and url:
+        if url:
             tab = opened.get("tab") or {}
-            await self.service.call(group["id"], "page.navigate", {"tab_id": tab.get("id"), "url": url, "origin": self._origin(caller), "timeout_ms": NAVIGATE_TIMEOUT_MS}, what="opening the page", timeout=NAVIGATE_TIMEOUT_MS / 1000 + 25)
+            row = await self._group(caller)
+            await self._through_wall(caller, row, lambda: self.service.call(group["id"], "page.navigate", {"tab_id": tab.get("id"), "url": url, "origin": self._origin(caller), "timeout_ms": NAVIGATE_TIMEOUT_MS}, what="opening the page", timeout=NAVIGATE_TIMEOUT_MS / 1000 + 25))
         where = "a throwaway profile, wiped when it closes" if fresh else ("the project's profile, whose logins the project's agents share" if caller.owner.project_id else "your own profile")
         head = f"Browser {'opened' if opened['created'] else 'already open'} ({where})."
         return f"{head} Tabs:\n{await self._tabs_text(group['id'])}\nNext: BrowserSnapshot to see the page and its refs, BrowserNavigate to go elsewhere."
@@ -249,12 +258,33 @@ class BrowserAgent:
         else:
             if not url:
                 raise InvalidRequest("give a url, or go='back', 'forward' or 'reload'")
-            result = await self.service.call(group["id"], "page.navigate", {"tab_id": current["id"], "url": url, "origin": origin, "timeout_ms": NAVIGATE_TIMEOUT_MS}, what="opening the page", timeout=NAVIGATE_TIMEOUT_MS / 1000 + 25)
+            result = await self._through_wall(caller, group, lambda: self.service.call(group["id"], "page.navigate", {"tab_id": current["id"], "url": url, "origin": origin, "timeout_ms": NAVIGATE_TIMEOUT_MS}, what="opening the page", timeout=NAVIGATE_TIMEOUT_MS / 1000 + 25))
         await self._audit(group, caller, "navigate", {"tab": current["id"], "go": go or "", "url": str(result.get("url") or url or "")[:2000]})
         status = f" (HTTP {result['status']})" if result.get("status") else ""
         failed = f"; the page did not load: {result['error']}" if result.get("error") else ""
         title = str(result.get("title") or "").strip()
         return f"Tab {current['id']} is on {result.get('url') or url}{status}{failed}." + (f" Its title: {fenced(origin_of(str(result.get('url') or '')), title)}" if title else "") + "\nNext: BrowserSnapshot to see it."
+
+    async def _through_wall(self, caller: Caller, group: dict[str, Any], go: Callable[[], Awaitable[Any]]) -> Any:
+        """Run a call that loads an address; when the network wall asks rather than refuses (a host
+        outside the allowlist, a port of this machine natively, an address the operator listed), ask
+        the caller's operator, and on a yes grant exactly that host and port and go once more."""
+        try:
+            return await go()
+        except Blocked as exc:
+            if exc.details.get("decision") != "ask":
+                raise
+            host, port = str(exc.details.get("host") or ""), int(exc.details.get("port") or 0)
+            reason = str(exc.details.get("reason") or "")
+            what = f"{host}:{port}" if port else host
+            decision = Decision(ASK, f"the browser's network wall asks before it reaches {what} ({NETWORK_WORDS.get(reason, reason or 'not on the allowlist')})", "browser.network", key=approval_key("BrowserNavigate", {"group": group["id"], "host": host, "port": port}))
+            ask = SensitiveAsk(decision, "BrowserNavigate", group["id"], "open", ["network"], what, what, host, 0, "")
+            allowed, why = await caller.gate(ask)
+            await self._audit(group, caller, "sensitive", {"kinds": ["network"], "decision": "allow" if allowed else "ask", "key": decision.key, "host": host, "port": port, "reason": reason})
+            if not allowed:
+                raise Forbidden(why) from None
+            await self.service.grant(group["id"], host, port, by=caller.actor)
+            return await go()
 
     async def snapshot(self, caller: Caller, *, tab: str | None = None, scope: str | None = None) -> str:
         group = await self._group(caller)
@@ -353,7 +383,22 @@ class BrowserAgent:
                 uploads.append((name, data))
         name = ""
         grant = ""
+        decided = ""
         kinds: list[str] = []
+        secret = False
+        detail: dict[str, Any] = {"tab": current["id"], "action": action, "ref": ref or "", "element": element.strip()[:300], "origin": origin_of(url), "url": url[:2000]}
+        if text is not None:
+            detail["text_len"] = len(text)
+            detail["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if keys:
+            detail["keys"] = keys[:100]
+        if uploads:
+            detail["uploads"] = [{"name": n, "size": len(d), "sha256": hashlib.sha256(d).hexdigest()} for n, d in uploads]
+
+        async def refused(message: str, *, decision: str = "") -> None:
+            # A refusal is a line of the action log too: what was tried, and why it did not happen.
+            await self._audit(group, caller, "act", {**detail, "name": name, "error": message[:500], **({"sensitive": kinds, "decision": decision} if decision else {})})
+
         if ref or action == "press":
             # A press without a ref goes to the focused field, and Enter there may send a sign-in: the
             # preflight is asked for it too, and a daemon that needs a ref for one says so.
@@ -361,8 +406,12 @@ class BrowserAgent:
                 preflight = await self.service.call(group["id"], "page.act", {**base, "dry_run": True}, what="looking at the element", timeout=40.0)
             except InvalidRequest:
                 preflight = {}
+            except BrowserError as exc:
+                await refused(explain(exc))
+                raise
             info = preflight.get("element") or {}
             name = str(info.get("name") or "")
+            secret = bool(info.get("secret"))
             sensitive = preflight.get("sensitive") or {}
             kinds = [str(k) for k in sensitive.get("kinds") or []]
             if action == "upload" and "upload" not in kinds:
@@ -374,33 +423,39 @@ class BrowserAgent:
                 decision = browser_sensitive(
                     tool="BrowserAct", group=group["id"], host=host_of(url), page_origin=origin_of(url), kinds=kinds, action=action, name=name, text=typed, rules=self.service.config().rules,
                 )
+                decided = "allowed"
                 if decision.action != ALLOW:
-                    thumbnail = await self._thumbnail(group, current, ref, decision.key) if decision.action == ASK else ""
+                    thumbnail = await self._thumbnail(group, current, ref, decision.key) if decision.action == ASK and ref else ""
                     ask = SensitiveAsk(decision, "BrowserAct", group["id"], action, kinds, origin_of(url), element.strip()[:300], name, len(text or ""), thumbnail)
                     if decision.action != ASK:
-                        await self._audit(group, caller, "sensitive", {"kinds": kinds, "decision": decision.action, "rule": decision.rule, "name": name})
-                        raise Forbidden(f"refused by policy: {decision.reason} (rule {decision.rule}). This is not a question for the operator; do the task another way.")
+                        message = f"refused by policy: {decision.reason} (rule {decision.rule}). This is not a question for the operator; do the task another way."
+                        await refused(message, decision="denied")
+                        raise Forbidden(message)
                     allowed, why = await caller.gate(ask)
-                    await self._audit(group, caller, "sensitive", {"kinds": kinds, "decision": "allow" if allowed else "ask", "key": decision.key, "name": name, "element": element.strip()[:300]})
                     if not allowed:
+                        await refused(why, decision="asked")
                         raise Forbidden(why)
-                    grant = decision.key
+                    grant, decided = decision.key, "allowed_once"
         if uploads:
             base["upload_ids"] = [await self.service.upload(group["id"], n, d) for n, d in uploads]
-        result = await self.service.call(group["id"], "page.act", base, what=f"{action} on the page", timeout=45.0)
-        detail: dict[str, Any] = {"tab": current["id"], "action": action, "ref": ref or "", "element": element.strip()[:300], "name": name, "origin": origin_of(url)}
-        if text is not None:
-            detail["text_len"] = len(text)
-            detail["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if keys:
-            detail["keys"] = keys[:100]
+        try:
+            result = await self.service.call(group["id"], "page.act", base, what=f"{action} on the page", timeout=45.0)
+        except BrowserError as exc:
+            await refused(explain(exc))
+            raise
+        done = result.get("element") if isinstance(result.get("element"), dict) else {}
+        assert isinstance(done, dict)
+        name = name or str(done.get("name") or "")
+        detail.update({"name": name, "point": result.get("point"), "box": result.get("box")})
         if kinds:
             detail["sensitive"] = kinds
+            detail["decision"] = decided
         if grant:
             detail["grant"] = grant
-        if uploads:
-            detail["uploads"] = [{"name": n, "size": len(d), "sha256": hashlib.sha256(d).hexdigest()} for n, d in uploads]
-        await self._audit(group, caller, "act", detail)
+        # The words typed into a field that is not secret are shown in the operator's action log while
+        # the session exists; the audit's own record is their length and hash.
+        shown = text if text is not None and action == "type" and not (secret or done.get("secret")) else None
+        await self._audit(group, caller, "act", detail, typed=shown)
         return self._act_text(action, current, result, name)
 
     def _act_text(self, action: str, tab: dict[str, Any], result: dict[str, Any], name: str) -> str:
@@ -444,7 +499,7 @@ class BrowserAgent:
         group = await self._group(caller)
         origin = self._origin(caller)
         if action == "new":
-            created = await self.service.call(group["id"], "tab.new", {"group_id": group["id"], "url": url or "about:blank", "origin": origin}, what="opening a tab", timeout=40.0)
+            created = await self._through_wall(caller, group, lambda: self.service.call(group["id"], "tab.new", {"group_id": group["id"], "url": url or "about:blank", "origin": origin}, what="opening a tab", timeout=40.0))
             await self._audit(group, caller, "tab_new", {"tab": created.get("id"), "url": (url or "")[:2000]})
         elif action in ("select", "close"):
             if not tab:

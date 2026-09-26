@@ -4125,6 +4125,10 @@ class SessionManager:
             base_dir=base_dir,
         )
 
+    def sealed_ports(self) -> tuple[int, ...]:
+        """The installation's own loopback doors, for the browser daemon's network wall natively."""
+        return self._sealed_ports()
+
     def _sealed_ports(self) -> tuple[int, ...]:
         """The installation's own doors on the loopback interface: the app's API, and the launcher's
         action page where a launcher is holding this installation.

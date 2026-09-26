@@ -1414,7 +1414,11 @@ UPDATE watches SET action_json = json_remove(json_set(action_json, '$.when',
 # - browser_profiles: the profiles the host asked for, with the scope that names them, so a profile
 #   can be listed, cleared or deleted after every browser on it has closed.
 # - browser_audit: append-only, like terminal_audit. What an agent typed is kept as a length and a
-#   hash, and what a person typed while driving as a count: never the text.
+#   hash, and what a person typed while driving as a count. The text an agent typed into a field that
+#   is not secret sits in a column of its own, for the action log the operator reviews, and is
+#   emptied when the session it belongs to is deleted.
+# - A group also keeps what it asks of the operator now (needs_json) and its last action, for the
+#   app's lists without a round trip to the daemon per row.
 MIGRATIONS.append("""
 CREATE TABLE browsers (
     id TEXT NOT NULL,
@@ -1463,7 +1467,9 @@ CREATE TABLE browser_groups (
     created_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,
-    closed_at TEXT
+    closed_at TEXT,
+    needs_json TEXT,
+    last_action_json TEXT
 );
 CREATE INDEX browser_groups_by_owner ON browser_groups(owner_kind, owner_id);
 CREATE INDEX browser_groups_by_session ON browser_groups(session_id);
@@ -1477,7 +1483,8 @@ CREATE TABLE browser_audit (
     env TEXT NOT NULL,
     actor TEXT NOT NULL,
     action TEXT NOT NULL,
-    detail_json TEXT NOT NULL DEFAULT '{}'
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    typed TEXT
 );
 CREATE INDEX browser_audit_by_group ON browser_audit(group_id, seq);
 CREATE INDEX browser_audit_by_at ON browser_audit(at);

@@ -616,42 +616,75 @@ that named `client_id` in its `hello`; `{owner: "paused", reason}` pauses the ag
 its session (or to the staff member): "The operator gave the browser back. Now on <title> — <url>.
 Their note: …". `BrowserHandoff` pauses the group with its reason and publishes `browser.needs_you`,
 as does the daemon's own `needs_you`; the notification router makes an urgent entry linking to the
-owner's chat with `?panel=browser`, closed when the browser is given back or closed.
+owner's chat with `?panel=browser`, closed when the browser is given back or closed. Its text ends
+with a line that opens the Mini App on that Browser tab (`https://t.me/<bot>?startapp=browser_<session>`
+once the bot's name is known, else the app's own address under `MINIAPP_PUBLIC_URL`), which is what a
+Telegram message or a lock screen can act on.
 
 ### Events on the bus
 
 | Type | Payload (ids as columns: `project_id`, `session_id`, `staff_id`) |
 |---|---|
 | `browser.opened` | `{group_id, env, profile, owner_kind, owner_id, url, fresh}` — a group opened, or opened again after its browser closed |
-| `browser.needs_you` | `{group_id, reason, what, url, title}` — `title` is the owner as a person reads it |
+| `browser.needs_you` | `{group_id, reason, what, url, title, by}` — `title` is the owner as a person reads it; `by` is `agent` or `daemon` |
 | `browser.returned` | `{group_id, url, title, tabs, by, note?}` |
 | `browser.closed` | `{group_id, reason: closed \| idle \| crashed \| memory \| shutdown \| lost \| owner_gone, by}` |
+| `browser.control` | `{group_id, owner, reason}` — live only, never stored |
+| `browser.activity` | `{group_id, kind, element, at}` — each agent action, live only |
 
 ### Routes
 
 Every route takes the app's authentication. A refusal is `{detail, code}` with the status of its
 kind (`404 not_found`, `409 over_cap`, `409 human_driving`, `410 browser_gone`, `503 unavailable`, …).
+The shapes are the app's own types in `miniapp/src/api.ts`; a host test holds them to it.
 
 | Route | What |
 |---|---|
-| `GET /api/browsers?session_id&staff_id&project_id&status` | `{envs: [{env, configured, available, reason, detail, version, chromium{version, kind, error}, sandbox, limits, counts}], groups: [Group], capacity{open, cap, queued}}` |
-| `GET /api/browsers/<group>` | `Group` with `live {tabs: [Tab], active_tab}` while open |
-| `POST /api/browsers/<group>/ticket {read_only?}` | `{ticket, expires_in}`; `409` while the environment is down, `404` for a group that is not open |
+| `GET /api/browsers?session&staff&project&status` | `{available, reason, groups: [BrowserGroup], envs, capacity}` — an installation without a browser answers `available: false` and no groups, not an error. Closed groups stay listed while their row does, so an owner keeps its Browser tab |
+| `GET /api/browsers/<group>` | one `BrowserGroup` |
+| `POST /api/browsers/<group>/ticket {tier?, read_only?}` | `{ticket, expires_in}`; `409` while the environment is down, `404` for a group that is not open |
 | `WS /ws/browsers/<group>?ticket=` | the live view (The host's relay, above) |
-| `POST /api/browsers/<group>/control {owner, client_id?, ttl_ms?, reason?, note?}` | `{control}` |
+| `POST /api/browsers/<group>/control {owner, client_id?, ttl_ms?, reason?, note?}` | the group's `Control` as it now is; `human` needs the view's `client_id` |
+| `POST /api/browsers/<group>/dialog {accept, tab_id?, text?}` | the operator answers the page's dialog |
 | `POST /api/browsers/<group>/close` | closes the group; the profile stays |
-| `GET /api/browsers/<group>/audit?limit` | `{entries: [{seq, at, env, actor, action, detail}]}`, newest first |
+| `GET /api/browsers/<group>/actions?limit` | `{actions: [BrowserActionRow]}`, newest first |
+| `GET /api/browsers/<group>/audit?limit` | `{entries: [{seq, at, env, actor, action, detail}]}`, newest first; never typed text |
 | `GET /api/browsers/<group>/downloads` | `{downloads: [Download]}` |
 | `POST /api/browsers/<group>/downloads/<id>/save {to?}` | into the owning session's workspace, and by handle in a project: `{name, size, path?, handle?}` |
 | `GET /api/browsers/<group>/asks/<key>/thumbnail` | the element's picture for a permission card |
 | `GET /api/browsers/profiles` · `POST …/profiles/<env>/<profile>/clear` · `DELETE …/profiles/<env>/<profile>` | profiles with `size_bytes` and `running`; clearing or deleting one whose browser runs is refused |
+| `POST /api/browsers/envs/container/update {confirm?}` · `GET …/update/<job>` | recreate the browser service from the image (the rebuilder's `browser-request`): `409 live_browsers` with the count until confirmed |
 | `GET /api/browsers/load?cap` | the browsers' cost now and at `cap` per environment, in the terminals' load shape |
 | `GET /api/workloads/load?terminal_cap&browser_cap` | `{terminals, browsers}`: both loads, `null` where there is none |
 
-`Group` is `{id, env, profile, browser_id, owner{kind, id, label}, project_id, session_id, staff_id,
-fresh, status: open | closed | lost, close_reason, control{owner, reason}, url, title, tabs,
-created_at, last_activity_at, closed_at}`. The memory the load counts is the daemon's private figure
-under the cost profile `browser`, beside the terminals' profiles in `daedalus/load.py`.
+`BrowserGroup` is `{id, owner{kind, id, label}, session_id, staff_id, project_id, profile, env,
+browser_id, status: running | idle | closed | lost, close_reason, fresh, viewport{w, h}, tabs: [{id,
+url, title, favicon_url, loading, active}], active_tab, control{owner, holder, until, reason},
+needs_you{reason, what, url, at, by} | null, acting, last_action{kind, element, at} | null, url,
+title, created_at, last_activity_at, closed_at}`. `idle` is a group whose browser the daemon closed
+for idleness (its profile kept); `needs_you` stays until the operator takes the browser, gives it back
+or it closes; `acting` is true for a few seconds after each action.
+
+`BrowserActionRow` is `{id, at, actor: agent | operator | page | system, kind, element, name, tab,
+point?, box?, text?, text_len?, keys?, url?, ok?, error?, sensitive?{kinds, decision: allowed_once |
+allowed | denied | asked}, needs?, download?}`. A refused action is a row with its `error`. `text` is
+what the agent typed into a field that is not secret, kept while its session exists (emptied when the
+session is deleted); the audit itself keeps its length and hash only. The memory the load counts is
+the daemon's private figure under the cost profile `browser`, beside the terminals' in
+`daedalus/load.py`.
+
+### The network wall's rules and asks
+
+On every connection the host sends `net.configure` (The network wall, below): in a container
+`sealed_ports` = the API's port, `services_ports` = the agent's and the terminals' ranges,
+`loopback_rewrite: "host.docker.internal"`, `ask_loopback: false`; natively `sealed_ports` = the
+policy's sealed ports (the API, the launcher, the terminal daemons' ports) and the key proxy's port,
+the same ranges, `ask_loopback: true`; both with `[browser] lan_allow` and, when the operator has one,
+`[policy] egress_allow`. A navigation the wall refuses with `decision: "ask"` becomes the caller's
+question to the operator (rule `browser.network`, the key over the group, host and port); on a yes
+the host sends `net.grant {group_id, host, port}` and navigates once more. A `deny` is told to the
+agent as the wall's refusal. Every `egress` event is written to `egress_log` under the tool `Browser`
+(the owning session, or `staff:<id>` for a command-line member).
 
 ## The network wall
 

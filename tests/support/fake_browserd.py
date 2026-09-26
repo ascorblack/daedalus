@@ -195,6 +195,12 @@ class FakeBrowserd:
         self.attached: asyncio.Queue[ViewChannel] = asyncio.Queue()
         self._next = {"browser": 0, "tab": 0, "channel": 0, "action": 0, "download": 0, "upload": 0}
         self._control_changed = asyncio.Event()
+        self.wall: dict[str, Any] | None = None
+        """The rules ``net.configure`` last set; ``None`` until the host sends them."""
+        self.walled: dict[str, tuple[str, str]] = {}
+        """Host → (decision, reason) the network wall gives it: ``deny`` or ``ask``. Others pass."""
+        self.grants: set[tuple[str, str, int]] = set()
+        """(browser, host, port) the host opened with ``net.grant``."""
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -451,6 +457,22 @@ class FakeBrowserd:
         self.emit("tab.created", {"group_id": group.id, "tab": tab.view(True)})
         return tab
 
+    def _through_wall(self, group: Group, url: str) -> None:
+        """The wall's check of a navigation, as the daemon makes it: ``1102`` with the verdict."""
+        from urllib.parse import urlsplit  # noqa: PLC0415 — only navigations need it
+
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        verdict = self.walled.get(host)
+        if verdict is None or (group.browser_id, host, port) in self.grants:
+            if host:
+                self.emit("egress", {"browser_id": group.browser_id, "group_id": group.id, "host": host, "port": port, "decision": "allow", "at": stamp()})
+            return
+        decision, reason = verdict
+        self.emit("egress", {"browser_id": group.browser_id, "group_id": group.id, "host": host, "port": port, "decision": decision, "reason": reason, "at": stamp()})
+        raise _Fail(1102, f"the network wall refused {host}:{port}: {reason}", {"host": host, "port": port, "decision": decision, "reason": reason})
+
     def _page_at(self, url: str) -> Page:
         known = self.pages.get(url)
         if known is not None:
@@ -507,6 +529,7 @@ class FakeBrowserd:
             await self._held_back(group, params)
             if len(group.tabs) >= 8:
                 raise _Fail(1003, "a group has at most 8 tabs", {"limit": "tabs", "max": 8})
+            self._through_wall(group, str(params.get("url") or "about:blank"))
             return self._new_tab(group, str(params.get("url") or "about:blank")).view(True)
         if method == "tab.select":
             group, tab = self._tab(params)
@@ -528,6 +551,7 @@ class FakeBrowserd:
             url = str(params.get("url") or "")
             if url.split(":", 1)[0] not in ("http", "https", "about"):
                 raise _Fail(1004, f"{url.split(':', 1)[0]}: URLs are not opened", {"reason": "scheme"})
+            self._through_wall(group, url)
             tab.history.append(tab.page)
             tab.page = self._page_at(url)
             self.emit("tab.updated", {"group_id": group.id, "tab_id": tab.id, "url": tab.page.url, "title": tab.page.title, "favicon_url": "", "loading": False})
@@ -599,6 +623,17 @@ class FakeBrowserd:
                 raise _Fail(-32602, "offset is not the size so far")
             upload["data"] += data
             return {"upload_id": upload_id, "size": len(upload["data"])}
+        if method == "net.configure":
+            self.wall = dict(params)
+            return {}
+        if method in ("net.grant", "net.revoke"):
+            group = self._group(str(params.get("group_id")))
+            key = (group.browser_id, str(params.get("host")), int(params.get("port") or 0))
+            if method == "net.grant":
+                self.grants.add(key)
+            else:
+                self.grants.discard(key)
+            return {}
         if method == "control.set":
             group = self._group(str(params.get("group_id")))
             owner = str(params.get("owner"))

@@ -166,6 +166,16 @@ class BrowserGone(BrowserError):
     status, code = 410, "browser_gone"
 
 
+class LiveBrowsers(BrowserError):
+    """Recreating the browser service would end open browsers, and the operator has not said yes."""
+
+    status, code = 409, "live_browsers"
+
+
+class NoRebuilder(BrowserError):
+    status, code = 503, "no_rebuilder"
+
+
 def rpc_failure(exc: wire.RpcError, what: str) -> BrowserError:
     """A daemon's error as the service's own, keeping the daemon's words and its ``data``."""
     data = exc.data if isinstance(exc.data, dict) else {}
@@ -213,6 +223,8 @@ __all__ = [
     "Forbidden",
     "HumanDriving",
     "InvalidRequest",
+    "LiveBrowsers",
+    "NoRebuilder",
     "NoSuchTab",
     "NotFound",
     "OverCap",

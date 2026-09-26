@@ -11,14 +11,22 @@ Installed only where the installation has a browser daemon at all (``capabilitie
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from daedalus.browser.agent import BrowserAgent
 from daedalus.browser.cli import TOOL_SET, StaffBrowser
 from daedalus.browser.model import Owner
 from daedalus.browser.owners import DatabaseOwners
 from daedalus.browser.service import Browsers
+from daedalus.config import keyproxy_base
+from daedalus.terminals.update import DaemonUpdate
+
+IMAGE_BINARY = Path("/usr/local/bin/browserd")
+"""Where the image puts the browser daemon (``deploy/Dockerfile``), in both of its targets."""
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -44,6 +52,32 @@ def build(app: Application) -> Browsers:
         if owner.kind == "session" and owner.session_id:
             await manager.submit(owner.session_id, text, as_answer=False, origin="browser")
 
+    def wall(env: str) -> dict[str, Any]:
+        """The network wall's rules for ``env``'s daemon (``docs/architecture/browser.md``, The
+        network wall). The daemon cannot know them: this installation's own ports, the ranges its
+        services are published on, the operator's allowlist and LAN addresses."""
+        ranges = [r for r in (_port_range(settings.services_port_range), _port_range(settings.terminals_port_range)) if r]
+        rules: dict[str, Any] = {"services_ports": ranges, "lan_allow": list(app.config.browser.lan_allow)}
+        if env == "container":
+            # The daemon's own network reaches this container's published ports on the Docker host;
+            # an address the agent prints for its service (127.0.0.1:8103) is sent there.
+            rules.update({"sealed_ports": [settings.api_port], "loopback_rewrite": "host.docker.internal", "ask_loopback": False})
+        else:
+            # Natively the browser shares this machine's loopback with the API, the key proxy, the
+            # terminal daemons' hook listeners and the launcher: every door the policy seals.
+            sealed = set(manager.sealed_ports())
+            # The key proxy is a loopback port natively too; whatever reaches it spends the keys.
+            with contextlib.suppress(ValueError):
+                keys = urlsplit(keyproxy_base())
+                if keys.hostname in ("127.0.0.1", "localhost", "::1") and keys.port:
+                    sealed.add(keys.port)
+            rules.update({"sealed_ports": sorted(sealed), "ask_loopback": True})
+        allow = [h for h in app.config.policy.egress_allow if h.strip()]
+        if allow:
+            rules["egress_allow"] = allow
+        return rules
+
+    update = DaemonUpdate(settings.rebuild_trigger_dir, binary=IMAGE_BINARY, service="browser", program="browserd") if settings.browser_container_dir is not None and not settings.native else None
     return Browsers(
         app.db,
         run_dirs={"container": settings.browser_container_dir, "host": settings.browser_host_dir},
@@ -51,7 +85,18 @@ def build(app: Application) -> Browsers:
         owners=DatabaseOwners(app.db),
         bus=manager.bus,
         wake=wake,
+        wall=wall,
+        daemon_update=update,
     )
+
+
+def _port_range(text: str) -> list[int] | None:
+    low, _, high = text.strip().partition("-")
+    if not low.strip().isdigit():
+        return None
+    first = int(low)
+    last = int(high) if high.strip().isdigit() else first
+    return [first, last] if 0 < first <= last <= 65535 else None
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
@@ -77,6 +122,9 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
 
     manager.delete_hooks.append(session_deleted)
     tasks = await service.start()
+    if service.daemon_update is not None:
+        # In the background: it runs a program, and nothing about the start waits for its answer.
+        tasks.append(asyncio.create_task(service.daemon_update.probe(), name="browser-image-version"))  # type: ignore[arg-type]
 
     async def closer() -> None:
         # Cancelled at shutdown like every background task; the connections go with it, which leaves
