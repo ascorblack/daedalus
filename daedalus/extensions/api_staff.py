@@ -34,7 +34,7 @@ class MessageBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=64_000)
-    mode: Literal["queue", "steer", "interrupt"] = "queue"
+    when: Literal["now", "after_turn", "interrupt"] = "now"
 
 
 def _numstat(text: str) -> dict[str, Any]:
@@ -119,7 +119,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         the operator to stop typing — it is the operator."""
         member = await member_of(staff_id)
         try:
-            return await team().tell(member, body.text, mode=body.mode, by="operator")  # type: ignore[no-any-return]
+            return await team().tell(member, body.text, when=body.when, by="operator")  # type: ignore[no-any-return]
         except StaffBusy as exc:
             raise HTTPException(409, str(exc)) from exc
         except StaffError as exc:

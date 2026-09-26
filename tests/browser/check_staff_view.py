@@ -161,7 +161,7 @@ def desktop(browser, lang: str, check: Check) -> None:  # type: ignore[no-untype
     expect(page.locator(".staff-aside .staff-message[data-message='mi2']")).to_have_attribute("data-state", "acknowledged", timeout=4000)
     expect(marker).to_have_text("1", timeout=4000)
     # A message of the operator's fails: the marker says so, and with the column closed it opens it at the Messages.
-    failed = {**focus.messages["st-ira"][0], "id": "mi4", "origin": "operator", "text": "use the owner's sheet", "mode": "queue", "state": "failed", "error": "the command-line agent did not take the message"}
+    failed = {**focus.messages["st-ira"][0], "id": "mi4", "origin": "operator", "text": "use the owner's sheet", "mode": "after_turn", "state": "failed", "error": "the command-line agent did not take the message"}
     failed["created_at"] = failed["updated_at"] = page.evaluate("new Date().toISOString()")
     focus.messages["st-ira"].insert(0, failed)
     feed.send("staff.message", {"message_id": "mi4", "state": "failed"}, project=pid, staff="st-ira")
@@ -176,7 +176,7 @@ def desktop(browser, lang: str, check: Check) -> None:  # type: ignore[no-untype
     check.that(top[:1] == ["mi4"], f"{lang}: the failed message is not on top of the list: {top}")
     section.locator(".staff-message[data-message='mi4'] .staff-message-retry").click()
     page.wait_for_timeout(400)
-    check.that(focus.sent == [("st-ira", {"text": "use the owner's sheet", "mode": "queue"})], f"{lang}: Retry sent {focus.sent}")
+    check.that(focus.sent == [("st-ira", {"text": "use the owner's sheet", "when": "after_turn"})], f"{lang}: Retry sent {focus.sent}")
     focus.sent.clear()
     # The terminal is exactly as tall now, with four messages and a failure, as with none shown under it.
     after = page.locator(".staff-term").bounding_box()
@@ -218,14 +218,19 @@ def desktop(browser, lang: str, check: Check) -> None:  # type: ignore[no-untype
     late_bar.locator(".ask-answers-row .btn").first.click()
     expect(page.locator(".toast")).to_contain_text(words["by"], timeout=4000)
 
-    # The composer: "now" is a steer.
+    # The composer: "now" is chosen until the operator picks otherwise, as it is for the orchestrator's Tell.
     field = page.locator(".staff-compose-field")
     check.that(field.get_attribute("placeholder") == words["placeholder"], f"{lang}: the composer says {field.get_attribute('placeholder')!r}")
+    check.that(page.locator(".staff-when button[data-when='now']").get_attribute("aria-pressed") == "true", f"{lang}: the composer did not start on 'now'")
     field.fill("use the owner's sheet")
-    page.locator(".staff-when button[data-when='steer']").click()
     page.locator(".staff-compose-send").click()
     page.wait_for_timeout(600)
-    check.that(focus.sent == [("st-ira", {"text": "use the owner's sheet", "mode": "steer"})], f"{lang}: the composer sent {focus.sent}")
+    field.fill("then the prices")
+    page.locator(".staff-when button[data-when='after_turn']").click()
+    page.locator(".staff-compose-send").click()
+    page.wait_for_timeout(600)
+    expected = [("st-ira", {"text": "use the owner's sheet", "when": "now"}), ("st-ira", {"text": "then the prices", "when": "after_turn"})]
+    check.that(focus.sent == expected, f"{lang}: the composer sent {focus.sent}")
     check.that(len(term.inputs("tm-ira")) == 0, f"{lang}: the message was typed into the program")
 
     # The column beside: events, changes, notes.
@@ -240,7 +245,7 @@ def desktop(browser, lang: str, check: Check) -> None:  # type: ignore[no-untype
     # OpenCode cannot take a message into a running turn: "now" is offered disabled, and says why.
     page.locator(".focus-staff", has_text="Naya").click()
     page.wait_for_url(f"**/project/{pid}/staff/st-naya**")
-    now = page.locator(".staff-when button[data-when='steer']")
+    now = page.locator(".staff-when button[data-when='now']")
     expect(now).to_be_disabled(timeout=5000)
     check.that(words["degrades"] in (now.get_attribute("title") or ""), f"{lang}: the disabled 'now' says {now.get_attribute('title')!r}")
     naya = page.locator(".staff-head .staff-health")

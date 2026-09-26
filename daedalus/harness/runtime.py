@@ -1084,7 +1084,7 @@ class CliStaffRuntime:
     async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt:
         """Queue a message for the session's delivery worker and say so. The worker reports every
         later state (``written``, ``submitted``, ``acknowledged`` or ``failed``) through the ingress;
-        a mode this CLI cannot do is named in ``degraded_to`` at once."""
+        a timing this CLI cannot keep is named in ``degraded_to`` at once."""
         session = self._session(live)
         assert session.worker is not None
         text = msg.text if msg.origin == "operator" else f"[orchestrator] {msg.text}"
@@ -1113,7 +1113,7 @@ class CliStaffRuntime:
                     break
             if not held:
                 assert session.worker is not None
-                session.worker.put(Pending("", f"[the {decision.by} answers your question] {words}", "queue", "system"))
+                session.worker.put(Pending("", f"[the {decision.by} answers your question] {words}", "after_turn", "system"))
         else:
             if ask.kind == "permission":
                 choice = ("allow_always" if decision.always else "allow_once") if decision.allow else "deny_with_note" if text else "deny"
@@ -1362,7 +1362,7 @@ class CliStaffRuntime:
         if message is None or message.state in ("acknowledged", "failed"):
             return
         session.resend_first = False
-        session.worker.put(Pending(message.id, message.text, "queue", message.origin))
+        session.worker.put(Pending(message.id, message.text, "after_turn", message.origin))
 
 
 def _render(turns: list[Turn], count: int) -> str:

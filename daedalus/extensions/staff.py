@@ -596,7 +596,7 @@ class Team:
         await self.publish("staff.status", {"status": "starting", "previous": None, "actor": by}, member=member)
         first = self.first_message(member, task, folder, worktree, predecessor, by, delivered)
         try:
-            recorded = await self.manager.staff.add_message(member.id, first, origin=by, mode="queue", staff_session_id=session.id)
+            recorded = await self.manager.staff.add_message(member.id, first, origin=by, mode="after_turn", staff_session_id=session.id)
             first_id = recorded.id
         except StaffError:
             first_id = ""  # a brief longer than a message may be; it is still sent, just not receipted
@@ -660,13 +660,13 @@ class Team:
         live = LiveSession(member, session)
         text = prompts.STAFF_NEXT_TASK + self.first_message(member, task, folder, None, predecessor, by, delivered)
         try:
-            message_id = (await self.manager.staff.add_message(member.id, text, origin=by, mode="queue", staff_session_id=session.id)).id
+            message_id = (await self.manager.staff.add_message(member.id, text, origin=by, mode="after_turn", staff_session_id=session.id)).id
         except StaffError:
             message_id = ""  # a brief longer than a message may be; it is still sent, just not receipted
         await self._move_task(task, "doing", actor=by, assignee=member.id, folder_id=folder.id)
         origin = "orchestrator" if by == "orchestrator" else "operator"
         try:
-            receipt = await self.runtime(member).send(live, OutgoingMessage(message_id, text, "queue", origin))  # type: ignore[arg-type]
+            receipt = await self.runtime(member).send(live, OutgoingMessage(message_id, text, "after_turn", origin))  # type: ignore[arg-type]
         except Exception as exc:  # noqa: BLE001 — a session that cannot take a message is replaced, not left holding the task
             logger.warning("%s's session could not take task %s: %s", member.name, task.id, exc)
             if message_id:
@@ -737,10 +737,13 @@ class Team:
 
     # -- control ---------------------------------------------------------------------------------------
 
-    async def tell(self, member: Staff, text: str, *, mode: str = "queue", by: str = "operator", files: list[StoredFile] | None = None) -> dict[str, Any]:
-        """Say something to a member's live session; returns the message and its receipt. ``files`` are
-        put where the member can open them first, and the message ends with their paths; they also
-        stay with the session's task, so a restart of it hands them over again."""
+    async def tell(self, member: Staff, text: str, *, when: str = "now", by: str = "operator", files: list[StoredFile] | None = None) -> dict[str, Any]:
+        """Say something to a member's live session; returns the message and its receipt. ``when`` is
+        ``now`` (into the running turn), ``after_turn`` or ``interrupt``; ``now`` is the default
+        because a message to someone at work is almost always about that work, and one that waited
+        for the turn's end used to arrive after the work it was meant to change. ``files`` are put
+        where the member can open them first, and the message ends with their paths; they also stay
+        with the session's task, so a restart of it hands them over again."""
         live = await self.live_of(member)
         if live is None:
             raise StaffError(f"{member.name} has no live session; assign a task to start one")
@@ -753,8 +756,8 @@ class Team:
             text = text.rstrip() + "\n\n" + prompts.STAFF_FILES.format(lines="\n".join(d.line() for d in delivered)).strip()
         if live.session.pause_requested:
             await self.manager.staff.request_pause(live.id, False)
-        message = await self.manager.staff.add_message(member.id, text, origin=by, mode=mode, staff_session_id=live.id)
-        outgoing = OutgoingMessage(message.id, message.text, mode, "orchestrator" if by == "orchestrator" else "operator")  # type: ignore[arg-type]
+        message = await self.manager.staff.add_message(member.id, text, origin=by, mode=when, staff_session_id=live.id)
+        outgoing = OutgoingMessage(message.id, message.text, when, "orchestrator" if by == "orchestrator" else "operator")  # type: ignore[arg-type]
         try:
             receipt = await self.runtime(member).send(live, outgoing)
         except Exception as exc:  # noqa: BLE001 — a failed delivery is recorded on the message, not raised past it
@@ -1340,6 +1343,7 @@ class Team:
                 await self.tell(
                     live.staff,
                     "The file your brief names by a path you could not open is now in your own folder; use this copy.",
+                    when="now",
                     by="orchestrator",
                     files=found,
                 )

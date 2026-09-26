@@ -22,7 +22,8 @@ from daedalus.host.worktrees import Worktree
 from daedalus.stores.projects import Project, ProjectFolder
 from daedalus.stores.staff import Staff, StaffSession
 
-MessageMode = Literal["queue", "steer", "interrupt"]
+MessageMode = Literal["now", "after_turn", "interrupt"]
+"""When a message goes in; see ``daedalus.harness.contract.SendMode``."""
 Origin = Literal["orchestrator", "operator"]
 ReceiptState = Literal["queued", "written", "submitted", "acknowledged", "failed"]
 PermissionLevel = Literal["ask", "edits", "all"]
@@ -143,7 +144,7 @@ class Receipt:
     """How far a message got. A later state arrives through :meth:`TeamIngress.message_state`.
 
     ``degraded_to`` names the mode a runtime used instead of the one asked for, when its executor
-    cannot do that one (a steer that became a queued message, a steer that became interrupt-and-send).
+    cannot do that one (``now`` that waits for the turn to end, ``now`` that interrupts the turn first).
     """
 
     state: ReceiptState

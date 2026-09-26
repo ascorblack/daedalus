@@ -339,13 +339,6 @@ class AssignBody(BaseModel):
     task_id: str
 
 
-class TellBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str
-    mode: Literal["queue", "steer", "interrupt"] = "queue"
-
-
 class ReleaseBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1623,12 +1616,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         team = team_or_503()
         member = await staff_member(staff_id)
         return await team_call(team.assign(member, body.task_id, by="operator"))  # type: ignore[no-any-return]
-
-    @api.post("/api/staff/{staff_id}/tell")
-    async def tell_staff(staff_id: str, body: TellBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        team = team_or_503()
-        member = await staff_member(staff_id)
-        return await team_call(team.tell(member, body.text, mode=body.mode, by="operator"))  # type: ignore[no-any-return]
 
     @api.post("/api/staff/{staff_id}/interrupt")
     async def interrupt_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

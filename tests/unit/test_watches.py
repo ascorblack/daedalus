@@ -164,6 +164,7 @@ async def test_setting_a_watch_checks_every_part_and_the_project_limit(settings:
             ({"event": "ci", "provider": "github"}, {"action": "wake"}, "no webhook provider 'github'"),
             ({"event": "staff_finished"}, {"action": "shout"}, "then.action is one of"),
             ({"event": "staff_finished"}, {"action": "tell", "staff": "Ada"}, "needs a text"),
+            ({"event": "staff_finished"}, {"action": "tell", "staff": "Ada", "text": "x", "when": "queue"}, "then.when is one of now, after_turn, interrupt"),
             ({"event": "staff_finished"}, {"action": "notify", "title": "x", "level": "loud"}, "level is one of"),
         ]
         for when, then, reason in refusals:
@@ -235,6 +236,12 @@ async def test_cooldown_once_and_the_hourly_budget(settings: Settings, db: Datab
         entry = next(e for e in await r.manager.projects.journal(r.project.id) if e.kind == "watch")
         assert loop.id in entry.text and "switched itself off" in entry.text
         assert all(message.origin == "orchestrator" for _, message in runtime.sent), "a watch the orchestrator set speaks as it"
+        assert {message.mode for _, message in runtime.sent} == {"now"}, "a watch's tell goes into the turn unless it says otherwise"
+        later = await keeper.create(project, when={"event": "staff_finished", "staff": "Ada"}, then={"action": "tell", "staff": "Ada", "text": "Next, the prices", "when": "after_turn"})
+        assert later.action["when"] == "after_turn"
+        clock.advance(minutes=61)
+        await finish()
+        assert [m.mode for _, m in runtime.sent if m.text == "Next, the prices"] == ["after_turn"]
     finally:
         await keeper.close()
         await r.manager.close()

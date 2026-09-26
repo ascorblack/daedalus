@@ -508,10 +508,10 @@ class Watches:
             text = str(then.get("text") or "").strip()
             if not text or len(text) > TEXT_MAX:
                 raise WatchRefused(f"tell needs a text of at most {TEXT_MAX} characters")
-            mode = str(then.get("mode") or "queue")
-            if mode not in MESSAGE_MODES:
-                raise WatchRefused(f"mode is one of {', '.join(MESSAGE_MODES)}")
-            return {"action": "tell", "staff": member.name, "staff_id": member.id, "text": text, "mode": mode}
+            when = str(then.get("when") or "now")
+            if when not in MESSAGE_MODES:
+                raise WatchRefused(f"then.when is one of {', '.join(MESSAGE_MODES)}")
+            return {"action": "tell", "staff": member.name, "staff_id": member.id, "text": text, "when": when}
         title = " ".join(str(then.get("title") or "").split())
         text = str(then.get("text") or "").strip()
         if not title or len(title) > TITLE_MAX:
@@ -582,7 +582,7 @@ class Watches:
             if team is None or member is None or not member.active:
                 return f"{action.get('staff')} is no longer on the team"
             try:
-                receipt = await team.tell(member, str(action.get("text") or ""), mode=str(action.get("mode") or "queue"), by=watch.created_by)
+                receipt = await team.tell(member, str(action.get("text") or ""), when=str(action.get("when") or "now"), by=watch.created_by)
             except StaffError as exc:
                 return str(exc)
             return str(receipt.get("error") or "") if receipt.get("state") == "failed" else ""

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ChannelHealth, StaffMessage, StaffTurn } from "../api";
 import { setLang } from "../i18n";
-import { answeredBy, applyMessageEvent, attention, canAlways, channelWords, defaultMode, healthParts, keyboardBlocks, listRows, mergeTurns, nextSince, nowChoice, openRequests, outboxRows, stripRows, turnFacts } from "./model";
+import { answeredBy, applyMessageEvent, attention, canAlways, channelWords, composerWhen, defaultMode, healthParts, keyboardBlocks, listRows, mergeTurns, nextSince, nowChoice, openRequests, outboxRows, stripRows, turnFacts } from "./model";
 
 const msg = (id: string, state: StaffMessage["state"], created_at: string, origin: StaffMessage["origin"] = "orchestrator"): StaffMessage => ({
-  id, staff_id: "st-ira", origin, text: id, mode: "queue", state, attempts: 1, created_at, updated_at: created_at, error: "",
+  id, staff_id: "st-ira", origin, text: id, mode: "after_turn", state, attempts: 1, created_at, updated_at: created_at, error: "",
 });
 
 const turn = (index: number, role: StaffTurn["role"], text: string, started_at = ""): StaffTurn => ({ index, role, text, tools: [], started_at, ended_at: "", usage: null });
@@ -92,6 +92,16 @@ describe("what the capabilities decide", () => {
     expect(nowChoice({ steer: "native" })).toEqual({ enabled: true, hint: "staff.now.native" });
     expect(nowChoice({ steer: "tui_queue" })).toEqual({ enabled: true, hint: "staff.now.tui" });
     expect(nowChoice(null).enabled).toBe(true);
+  });
+
+  it("sends a message now unless the operator chose otherwise, the CLI cannot, or now would stop the turn", () => {
+    expect(composerWhen(nowChoice({ steer: "tui_queue" }), null)).toBe("now");
+    expect(composerWhen(nowChoice({ steer: "native" }), null)).toBe("now");
+    expect(composerWhen(nowChoice(null), null)).toBe("now");
+    expect(composerWhen(nowChoice({ steer: "tui_queue" }), "after_turn")).toBe("after_turn");
+    expect(composerWhen(nowChoice({ steer: "degrade_to_queue" }), "now")).toBe("after_turn");
+    expect(composerWhen(nowChoice({ steer: "cancel_and_send" }), null)).toBe("after_turn");
+    expect(composerWhen(nowChoice({ steer: "cancel_and_send" }), "now")).toBe("now");
   });
 
   it("offers 'always' only on a permission of a CLI that asks for them", () => {

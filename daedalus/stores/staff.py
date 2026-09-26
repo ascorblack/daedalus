@@ -47,7 +47,7 @@ WAITING_STATUSES = frozenset({"question", "permission"})
 SESSION_KINDS = ("daedalus", "cli")
 
 MESSAGE_ORIGINS = ("orchestrator", "operator")
-MESSAGE_MODES = ("queue", "steer", "interrupt")
+MESSAGE_MODES = ("now", "after_turn", "interrupt")
 MESSAGE_STATES = ("queued", "written", "submitted", "acknowledged", "failed")
 _MESSAGE_RANK = {"queued": 0, "written": 1, "submitted": 2, "acknowledged": 3}
 
@@ -950,11 +950,11 @@ class StaffStore:
 
     # -- messages ------------------------------------------------------------------
 
-    async def add_message(self, staff_id: str, text: str, *, origin: str, mode: str = "queue", staff_session_id: str | None = None) -> StaffMessage:
+    async def add_message(self, staff_id: str, text: str, *, origin: str, mode: str, staff_session_id: str | None = None) -> StaffMessage:
         if origin not in MESSAGE_ORIGINS:
             raise StaffError(f"a message to staff comes from the orchestrator or the operator, not {origin!r}")
         if mode not in MESSAGE_MODES:
-            raise StaffError(f"a message is queued, steered or interrupts, not {mode!r}")
+            raise StaffError(f"a message goes in now, after the turn or with an interrupt ({', '.join(MESSAGE_MODES)}), not {mode!r}")
         body = _plain(text, "a message", TEXT_MAX, multiline=True)
         if not body:
             raise StaffError("a message needs text")
