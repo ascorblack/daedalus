@@ -47,10 +47,21 @@ type Deps struct {
 	Config *config.Config
 	Log    *slog.Logger
 	Events *events.Debouncer
-	// Proxy is the network wall's address for a new browser; nil or "" starts it without one.
-	Proxy func() string
+	// Wall is the network wall (internal/netwall): a proxy for each browser, and the check every
+	// navigation passes. Nil starts browsers without one, which only a test does.
+	Wall Wall
 	// Busy says whether someone watches the browser, which keeps it from closing as idle.
 	Busy func(b *Browser) bool
+}
+
+// Wall is the browsers' one way out. Open gives a browser about to start the address of its own
+// proxy, and Close ends that proxy once the browser has exited; Navigation judges a top-level
+// navigation before it is made, and its error (1102, the verdict in its data) is the caller's
+// answer as it stands.
+type Wall interface {
+	Open(browserID string) (addr string, err error)
+	Close(browserID string)
+	Navigation(ctx context.Context, browserID, url string) error
 }
 
 // Manager holds every browser, group and tab of the daemon.
@@ -363,12 +374,17 @@ func (m *Manager) startBrowser(ctx context.Context, profile string) (*Browser, e
 		return nil, err
 	}
 	proxy := ""
-	if m.deps.Proxy != nil {
-		proxy = m.deps.Proxy()
+	if m.deps.Wall != nil {
+		addr, err := m.deps.Wall.Open(b.ID)
+		if err != nil {
+			return nil, errWith(wire.CodeUnsupported, map[string]any{"reason": err.Error()}, "the browser's network wall did not start: %v", err)
+		}
+		proxy = addr
 	}
 	proc, err := chrome.Start(chrome.Options{Path: found.Path, ProfileDir: dir, Proxy: proxy,
 		Args: m.deps.Config.Chromium.Args, NoSandbox: m.deps.Config.Chromium.NoSandbox}, func(e cdp.Event) { m.onEvent(b, e) })
 	if err != nil {
+		m.closeWall(b)
 		return nil, errWith(wire.CodeUnsupported, map[string]any{"reason": err.Error()}, "Chromium did not start: %v", err)
 	}
 	b.proc = proc
@@ -381,6 +397,7 @@ func (m *Manager) startBrowser(ctx context.Context, profile string) (*Browser, e
 	}
 	if err := b.conn.Call(startCtx, "", "Browser.getVersion", nil, &ver); err != nil {
 		proc.Kill()
+		m.closeWall(b)
 		b.removeTemp()
 		reason := chrome.SandboxProblem(proc.Stderr())
 		if reason != "" {
@@ -405,12 +422,20 @@ func (m *Manager) startBrowser(ctx context.Context, profile string) (*Browser, e
 	} {
 		if err := b.conn.Call(startCtx, "", call.method, call.params, nil); err != nil {
 			proc.Kill()
+			m.closeWall(b)
 			b.removeTemp()
 			return nil, errWith(wire.CodeUnsupported, map[string]any{"reason": err.Error()}, "Chromium refused %s: %v", call.method, err)
 		}
 	}
 	m.log.Info("browser started", "browser", b.ID, "profile", profile, "pid", proc.Pid, "chromium", ver.Product)
 	return b, nil
+}
+
+// closeWall ends the proxy of a browser that exited or never started.
+func (m *Manager) closeWall(b *Browser) {
+	if m.deps.Wall != nil {
+		m.deps.Wall.Close(b.ID)
+	}
 }
 
 func lastLine(s string) string {
@@ -573,6 +598,7 @@ func (m *Manager) watch(b *Browser) {
 		g.closeControl()
 	}
 	b.removeTemp()
+	m.closeWall(b)
 	sort.Strings(groups)
 	m.log.Info("browser exited", "browser", b.ID, "reason", reason, "code", b.proc.ExitCode())
 	m.publish("browser.exited", map[string]any{"browser_id": b.ID, "profile": b.Profile, "code": b.proc.ExitCode(),

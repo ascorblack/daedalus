@@ -576,16 +576,21 @@ lan_allow: [address or prefix], egress_allow?: [host]}` → `{}`, strictly decod
 - `lan_allow` from the browser settings (empty by default), and `egress_allow` when the operator has
   an allowlist (absent means none; an empty list allows no host).
 
-**Top-level navigations** — the agent's `page.navigate`, the operator's address bar, and a page's
-own link, redirect or form, which the daemon pauses (`Fetch.requestPaused`, `resourceType:
-Document`, the main frame) — are judged before they happen by the same rules, plus two more:
+**Top-level navigations** — the agent's `page.navigate`, `tab.new` and `browser.open` with a URL,
+and the operator's address bar — are judged before they happen by the same rules, plus two more:
 
 - the scheme: only `http` and `https` (and `about:blank`). `file:`, `data:`, `blob:`,
   `javascript:`, `chrome:`, `chrome-extension:`, `devtools:`, `view-source:`, `filesystem:` and
-  the rest are `deny`, `scheme`. A page's own `file:` and `data:` navigations are refused by
-  Chromium as well (measured);
+  the rest are refused before the wall is asked, as `1004` (the wall's own check would say `deny`,
+  `scheme`). A page's own `file:` and `data:` navigations are refused by Chromium as well
+  (measured);
 - `egress_allow`: a host outside it is `ask`, `egress_allow`, unless it is the installation's own
   services range or already granted. Subresources to other hosts are logged, not blocked.
+
+A page's own link, redirect or form meets the proxy's address rules like every other request.
+Pausing it to apply `egress_allow` as well (`Fetch.requestPaused`, `resourceType: Document`, the main
+frame) is *not yet*: until then the allowlist's ask covers the navigations above, and a page that
+follows a link off the list is only logged.
 
 A refused navigation is `1102 {host, port, decision, reason}`. An `ask` is a refusal the operator
 can lift: the host asks, and on a yes sends `net.grant {group_id, host, port}`, which opens exactly

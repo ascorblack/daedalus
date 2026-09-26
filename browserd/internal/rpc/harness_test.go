@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/chrome"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
@@ -120,16 +122,24 @@ func startWith(t *testing.T, edit func(*config.Limits), args []string) *harness 
 	evlog := events.NewLog(config.EventRingSize)
 	deb := events.NewDebouncer(evlog, map[string]events.Policy{"tab.updated": {Window: 250 * time.Millisecond, Coalesce: true}})
 	var hub *view.Hub
-	m := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb, Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
+	// Every test browses through the network wall, as the daemon does, with the fixture's port as
+	// the services range: the rest of this machine is refused.
+	site := fixture(t)
+	wall := netwall.NewBrowsers(netwall.New(netwall.Options{Events: func(e netwall.Egress) { deb.Publish("egress", "", e) }}))
+	sitePort := site.Listener.Addr().(*net.TCPAddr).Port
+	if err := wall.Wall.Configure(netwall.Config{ServicesPorts: [][2]int{{sitePort, sitePort}}}); err != nil {
+		t.Fatal(err)
+	}
+	m := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb, Wall: wall, Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
 	hub = view.New(m, evlog, log)
 	model := page.New(m, cfg, log)
 	hub.HumanInput = model.HumanInput
 	m.Listen(hub)
 	m.Listen(model)
-	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Page: model, Events: evlog, Log: log}
+	d := &rpc.Daemon{Config: cfg, Instance: "test", StartedAt: time.Now(), Manager: m, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall}
 	srv := server.New(ep.Token, log, d.Hello)
 	d.Register(srv)
-	h := &harness{t: t, manager: m, site: fixture(t), stop: make(chan struct{})}
+	h := &harness{t: t, manager: m, site: site, stop: make(chan struct{})}
 	go hub.Run(h.stop)
 	go m.RunTitles(h.stop)
 	go func() { _ = srv.Serve(ep.Listener) }()

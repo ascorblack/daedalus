@@ -16,6 +16,7 @@ import (
 
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/rpc"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
@@ -112,7 +113,11 @@ func serve(args []string) error {
 	evlog.SetMaxBytes(config.EventRingBytes)
 	deb := events.NewDebouncer(evlog, tabUpdates)
 	var hub *view.Hub
-	manager := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb,
+	// The network wall: every browser gets a proxy of its own, at its strictest (the internet only)
+	// until the host sends its rules with net.configure. Its egress events are rate-limited by the
+	// wall itself.
+	wall := netwall.NewBrowsers(netwall.New(netwall.Options{Events: func(e netwall.Egress) { deb.Publish("egress", "", e) }}))
+	manager := browser.New(browser.Deps{Config: cfg, Log: log, Events: deb, Wall: wall,
 		Busy: func(b *browser.Browser) bool { return hub != nil && hub.Busy(b) }})
 	hub = view.New(manager, evlog, log)
 	model := page.New(manager, cfg, log)
@@ -120,7 +125,7 @@ func serve(args []string) error {
 	manager.Listen(hub)
 	manager.Listen(model)
 	daemon := &rpc.Daemon{Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(),
-		Manager: manager, Hub: hub, Page: model, Events: evlog, Log: log}
+		Manager: manager, Hub: hub, Page: model, Events: evlog, Log: log, Net: wall}
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 
