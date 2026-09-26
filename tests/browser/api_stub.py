@@ -141,6 +141,10 @@ GATES: dict[str, object] = {
     "/api/project-environments": ENVIRONMENTS,
     # The composer offers the voice page only where the installation has one; a harness has none.
     "/api/voice": {"enabled": False},
+    # The browsers of whichever session or staff member a screen shows: none, on an installation that
+    # has a browser. A harness that opens one installs `browser_stub.BrowserStub`, which answers the rest
+    # of `/api/browsers*` and the live view's WebSocket.
+    "/api/browsers": {"available": True, "reason": "", "groups": []},
     # Terminal environments and the terminals in them: a container environment that works, a host
     # one that is not installed, and no terminals yet. Every session screen lists its terminals (with
     # `?owner_kind=session&owner_id=…`, answered here by path). A harness that opens terminals installs

@@ -31,6 +31,7 @@ import {
   readPanelTab,
   rememberPanelPct,
   rememberPanelTab,
+  routeTabsFor,
   tabsFor,
   toggleExpanded,
   togglePanel,
@@ -64,6 +65,8 @@ export type PanelHostProps = {
   pages?: Partial<Record<PanelTab, ReactNode>>;
   /** A number on a tab: subagents working on Details, jobs on Jobs. */
   badges?: Partial<Record<PanelTab, number>>;
+  /** A dot on a tab instead of a number: the agent busy in its browser, or waiting for the operator. */
+  marks?: Partial<Record<PanelTab, "busy" | "attn">>;
   /** Phones: the tabs in a full sheet instead of a column. */
   sheet?: boolean;
   /** Desktop: what dragging the left edge does. */
@@ -134,9 +137,9 @@ function Column(props: HostProps) {
   );
 }
 
-const TAB_ICON: Record<PanelTab, IconName> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal", board: "board", brief: "pen", wakeups: "clock", folders: "folder", questions: "ask" };
+const TAB_ICON: Record<PanelTab, IconName> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal", board: "board", brief: "pen", wakeups: "clock", folders: "folder", questions: "ask", browser: "globe" };
 
-function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local, tabs = PANEL_TABS }: HostProps & { inSheet?: boolean }) {
+function Tabs({ state, onTab, onClose, onExpand, badges, marks, inSheet, local, tabs = PANEL_TABS }: HostProps & { inSheet?: boolean }) {
   const strip = useRef<HTMLDivElement>(null);
   const onKey = (e: React.KeyboardEvent) => {
     const i = tabs.indexOf(state.tab!);
@@ -157,6 +160,7 @@ function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local, tabs = 
               <Icon name={TAB_ICON[tab]} size={14} />
               <span>{t(`panel.tab.${tab}`)}</span>
               {n > 0 && <span className={`count ${tab === "questions" ? "attn" : ""}`}>{n}</span>}
+              {marks?.[tab] && <span className={`tab-mark ${marks[tab]}`} aria-hidden="true" />}
             </button>
           );
         })}
@@ -261,7 +265,9 @@ export type PanelControls = {
  *  panel into its own route, or opening a tab would leave the project. */
 export function usePanel(sessionId: string, base: string, opts: { route: URLSearchParams | null; beside?: string | null; pane?: "left" | "right"; context?: PanelContext; at?: (query: Record<string, string | null>) => string }): PanelControls {
   const { route, beside, pane, context = "session", at } = opts;
-  const tabs = tabsFor(context);
+  // What the route may name, the Browser tab included; what a panel opens on by itself is `first`.
+  const tabs = routeTabsFor(context);
+  const first = tabsFor(context)[0];
   const [state, setState] = useState<PanelState>(() => {
     const fromRoute = route ? readPanelQuery(route, tabs) : null;
     if (fromRoute) return applyPanelQuery(PANEL_CLOSED, fromRoute, base);
@@ -330,8 +336,8 @@ export function usePanel(sessionId: string, base: string, opts: { route: URLSear
     toggle: useCallback(() => {
       const s = stateRef.current;
       if (s.tab === null) announce();
-      commit(togglePanel(s, last.current, tabs[0]), s.tab === null);
-    }, [commit, announce, tabs[0]]),
+      commit(togglePanel(s, last.current, first), s.tab === null);
+    }, [commit, announce, first]),
     expand: useCallback(() => {
       const s = stateRef.current;
       if (s.tab !== null) {
@@ -339,8 +345,8 @@ export function usePanel(sessionId: string, base: string, opts: { route: URLSear
         return;
       }
       announce();
-      commit({ ...openTab(s, last.current ?? tabs[0]), expanded: true }, true);
-    }, [commit, announce, tabs[0]]),
+      commit({ ...openTab(s, last.current ?? first), expanded: true }, true);
+    }, [commit, announce, first]),
     back: useCallback(() => commit(goBack(stateRef.current)), [commit]),
     forward: useCallback(() => commit(goForward(stateRef.current)), [commit]),
     openFile: useCallback(

@@ -131,6 +131,9 @@ export const api = {
    */
   terminalTicket: (id: string, readOnly: boolean) =>
     call<{ ticket: string; expires_in: number }>("POST", `/api/terminals/${encodeURIComponent(id)}/ticket`, { read_only: readOnly }),
+  /** A single-use pass for one browser group's live view (`/ws/browsers/{group}`), as for a terminal. */
+  browserTicket: (group: string, tier: "live" | "thumb", readOnly: boolean) =>
+    call<{ ticket: string; expires_in: number }>("POST", `/api/browsers/${encodeURIComponent(group)}/ticket`, { tier, read_only: readOnly }),
   /** A new terminal. At the machine's cap the host answers 409 `over_cap`; `confirm` is the operator's "open it anyway". */
   createTerminal: (body: TerminalCreate) => call<TerminalView>("POST", "/api/terminals", body),
   terminal: (id: string) => call<TerminalView>("GET", `/api/terminals/${encodeURIComponent(id)}`),
@@ -199,6 +202,68 @@ export type TerminalEnv = {
 
 /** One styled run of a preview row: text and its pen. */
 export type TerminalRun = { t: string; fg?: number | string; bg?: number | string; b?: boolean; i?: boolean; u?: boolean; d?: boolean; inv?: boolean };
+
+/** Who drives a browser group. `holder` in a listing is the holding client's label, or null. */
+export type BrowserControl = { owner: "agent" | "human" | "paused"; holder: string | null; until: number | null; reason: string };
+
+export type BrowserTabView = { id: string; url: string; title: string; favicon_url: string; loading: boolean; active: boolean };
+
+/** What the agent asked the operator for (`BrowserHandoff`, or the daemon on its own). */
+export type BrowserNeed = { reason: "login" | "captcha" | "two_factor" | "payment" | "confirm" | "field_forbidden" | "basic_auth" | "other" | string; what: string; url: string; at: string };
+
+/**
+ * One agent owner's tabs in one browser (`GET /api/browsers?session=…` or `?staff=…`). `acting` is true
+ * while an action is under way or finished in the last few seconds; `last_activity_at` moves with every
+ * agent call, a person's input and a new tab, and is what a hidden corner preview compares against.
+ */
+export type BrowserGroup = {
+  id: string;
+  owner: { kind: "session" | "staff" | "project"; id: string; label: string };
+  session_id: string | null;
+  staff_id: string | null;
+  project_id: string | null;
+  profile: string;
+  env: string;
+  status: "running" | "idle" | "closed" | "lost";
+  viewport: { w: number; h: number };
+  tabs: BrowserTabView[];
+  active_tab: string | null;
+  control: BrowserControl;
+  needs_you: BrowserNeed | null;
+  acting: boolean;
+  last_action: { kind: string; element: string; at: string } | null;
+  created_at: string;
+  last_activity_at: string;
+};
+
+/** Whether this installation has a browser at all, and the owner's groups. */
+export type BrowserList = { available: boolean; reason: string; groups: BrowserGroup[] };
+
+/**
+ * One row of a group's action log (`GET /api/browsers/{group}/actions`). `text` is what the agent
+ * typed into a field that is not secret, kept while the session exists; a secret field carries only
+ * `text_len`. `sensitive` is the policy's decision on an action it asked about.
+ */
+export type BrowserActionRow = {
+  id: string;
+  at: string;
+  actor: "agent" | "operator" | "page" | string;
+  kind: string;
+  element: string;
+  name: string;
+  tab: string;
+  point?: { x: number; y: number } | null;
+  box?: { x: number; y: number; w: number; h: number } | null;
+  text?: string;
+  text_len?: number;
+  keys?: string;
+  url?: string;
+  ok?: boolean;
+  error?: string;
+  sensitive?: { kinds: string[]; decision: "allowed_once" | "allowed" | "denied" | "asked" } | null;
+  needs?: { reason: string; what: string } | null;
+  download?: { id: string; name: string; size: number } | null;
+};
 
 export type TerminalView = {
   id: string;
