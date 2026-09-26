@@ -20,6 +20,8 @@ import { mainPreset } from "../main/model";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { LangPicker } from "../components";
+import { AppearancePanel } from "./Appearance";
+import { modeHome, storedMode } from "../mode";
 import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
 import { NotificationSettings } from "./NotificationSettings";
@@ -940,23 +942,31 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "terminals" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
-/** The sections, in the order they are listed; the words come from the table, not from here. */
-const SECTIONS: { id: Section; icon: IconName }[] = [
-  { id: "models", icon: "model" },
-  { id: "rules", icon: "pen" },
-  { id: "limits", icon: "chart" },
-  { id: "terminals", icon: "terminal" },
-  { id: "tools", icon: "wrench" },
-  { id: "voice", icon: "mic" },
-  { id: "components", icon: "plug" },
-  { id: "dependencies", icon: "wrench" },
-  { id: "chat", icon: "inbox" },
-  { id: "notifications", icon: "inbox" },
-  { id: "security", icon: "key" },
-  { id: "heartbeat", icon: "loop" },
-  { id: "about", icon: "settings" },
+type Section = "appearance" | "models" | "rules" | "limits" | "terminals" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
+/** The sections, grouped the way the page lists them. The words come from the table, not from here. */
+const GROUPS: { id: "you" | "work" | "system"; sections: { id: Section; icon: IconName }[] }[] = [
+  { id: "you", sections: [
+    { id: "appearance", icon: "eye" },
+    { id: "notifications", icon: "bell" },
+    { id: "voice", icon: "mic" },
+    { id: "security", icon: "key" },
+  ] },
+  { id: "work", sections: [
+    { id: "models", icon: "model" },
+    { id: "rules", icon: "pen" },
+    { id: "limits", icon: "chart" },
+    { id: "tools", icon: "wrench" },
+    { id: "terminals", icon: "terminal" },
+    { id: "chat", icon: "inbox" },
+  ] },
+  { id: "system", sections: [
+    { id: "components", icon: "plug" },
+    { id: "dependencies", icon: "wrench" },
+    { id: "heartbeat", icon: "loop" },
+    { id: "about", icon: "settings" },
+  ] },
 ];
+const SECTIONS = GROUPS.flatMap((group) => group.sections);
 
 const sectionLabel = (id: Section) => t(`settings.sec.${id}`);
 
@@ -966,6 +976,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState<any>(null);
   const wide = useMedia("(min-width: 1024px)");
+  const [query, setQuery] = useState("");
   const current: Section | null = SECTIONS.some((x) => x.id === section) ? (section as Section) : null;
   const shown: Section | null = current ?? (wide ? "models" : null);
   useEffect(() => {
@@ -1034,37 +1045,61 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     }
   }
 
+  const needle = query.trim().toLowerCase();
+  const matches = (id: Section | "language") => {
+    const label = id === "language" ? t("settings.sec.language") : sectionLabel(id);
+    const hint = id === "language" ? t("lang.hint") : t(`settings.sec.${id}.hint`);
+    return !needle || `${label} ${hint}`.toLowerCase().includes(needle);
+  };
+  const home = modeHome(storedMode(), wide);
   const index = (
     <div className="settings-index">
-      {/* The language is the first thing here and it is answered here: a reader who cannot read the
-          rest of the page should not have to open a section to change the language of the page. */}
-      <div className="settings-link settings-lang">
-        <Icon name="globe" size={18} />
-        <span className="settings-link-text">
-          <b>{t("settings.sec.language")}</b>
-          <span className="sub">{t("lang.hint")}</span>
-        </span>
-        <LangPicker />
-      </div>
-      {SECTIONS.map((sec) => (
-        <a key={sec.id} href={pathFor("settings", sec.id)} className={`settings-link ${shown === sec.id ? "active" : ""}`} aria-current={shown === sec.id ? "page" : undefined} onClick={(e) => go(e, pathFor("settings", sec.id))}>
-          <Icon name={sec.icon} size={18} />
+      <a className="settings-back" href={home} onClick={(e) => go(e, home)}>
+        <Icon name="back" size={16} /> {t("settings.back")}
+      </a>
+      <input className="field settings-search" value={query} placeholder={t("common.search")} aria-label={t("common.search")} onChange={(e) => setQuery(e.target.value)} />
+      {/* The language is answered here: a reader who cannot read the rest of the page should not
+          have to open a section to change the language of the page. */}
+      {matches("language") && (
+        <div className="settings-link settings-lang">
+          <Icon name="globe" size={18} />
           <span className="settings-link-text">
-            <b>
-              {sectionLabel(sec.id)}
-              {/* A mark, not a count: the one thing worth interrupting a reader for is a feature they
-                  have already configured whose runtime is not installed. */}
-              {sec.id === "components" && componentsNeedAttention(caps.data) && <span className="tab-badge dot settings-mark" aria-label={t("comp.state.missing")} />}
-            </b>
-            <span className="sub">{t(`settings.sec.${sec.id}.hint`)}</span>
+            <b>{t("settings.sec.language")}</b>
+            <span className="sub">{t("lang.hint")}</span>
           </span>
-          <span className="chev">›</span>
-        </a>
-      ))}
+          <LangPicker />
+        </div>
+      )}
+      {GROUPS.map((group) => {
+        const items = group.sections.filter((sec) => matches(sec.id));
+        if (!items.length) return null;
+        return (
+          <div key={group.id}>
+            <div className="settings-group">{t(`settings.group.${group.id}`)}</div>
+            {items.map((sec) => (
+              <a key={sec.id} href={pathFor("settings", sec.id)} className={`settings-link ${shown === sec.id ? "active" : ""}`} aria-current={shown === sec.id ? "page" : undefined} onClick={(e) => go(e, pathFor("settings", sec.id))}>
+                <Icon name={sec.icon} size={18} />
+                <span className="settings-link-text">
+                  <b>
+                    {sectionLabel(sec.id)}
+                    {/* A mark, not a count: the one thing worth interrupting a reader for is a feature they
+                        have already configured whose runtime is not installed. */}
+                    {sec.id === "components" && componentsNeedAttention(caps.data) && <span className="tab-badge dot settings-mark" aria-label={t("comp.state.missing")} />}
+                  </b>
+                  <span className="sub">{t(`settings.sec.${sec.id}.hint`)}</span>
+                </span>
+                <span className="chev">›</span>
+              </a>
+            ))}
+          </div>
+        );
+      })}
+      {needle && !matches("language") && GROUPS.every((group) => group.sections.every((sec) => !matches(sec.id))) && <div className="sub">{t("settings.search.empty")}</div>}
     </div>
   );
 
   const body = (sec: Section) => {
+    if (sec === "appearance") return <AppearancePanel />;
     if (!s) return <div className="empty">{t("common.loading")}</div>;
     const kinds = s.provider_kinds ?? DEFAULT_KINDS;
     const providerIds = Object.keys(s.providers ?? {});
@@ -1303,11 +1338,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
             {!telegram()?.initData && (
               <>
                 <div className="section-title">{t("settings.about.browser")}</div>
-                <div className="btnrow" style={{ marginTop: 0 }}>
-                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "dark"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.dark")}</button>
-                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "light"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.light")}</button>
-                  <button className="btn small" onClick={() => { try { localStorage.removeItem("daedalus.scheme"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.system")}</button>
-                </div>
+                <div className="sub"><a href={pathFor("settings", "appearance")} onClick={(e) => go(e, pathFor("settings", "appearance"))}>{t("settings.about.appearance")}</a></div>
                 <div className="btnrow">
                   <button
                     className="btn small"
@@ -1346,10 +1377,14 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   if (wide) {
     return (
       <>
-        <PageHeader title={screenTitle("settings")} />
-        <div className="screen wide settings-split">
+        <div className="settings-stage">
           <aside className="settings-nav">{index}</aside>
-          <div className="settings-body">{shown && body(shown)}</div>
+          <div className="settings-main">
+            <div className="settings-col">
+              {shown && <h1 className="settings-title">{sectionLabel(shown)}</h1>}
+              {shown && body(shown)}
+            </div>
+          </div>
         </div>
         {addSheet}
       </>
@@ -1367,7 +1402,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   return (
     <>
       <PageHeader title={sectionLabel(current)} back={pathFor("settings")} />
-      <div className="screen narrow">{body(current)}</div>
+      <div className="screen narrow settings-col">{body(current)}</div>
       {addSheet}
     </>
   );

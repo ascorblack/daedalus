@@ -28,6 +28,7 @@ import { listenForOpen, syncPush } from "./push";
 import { focusView, phoneTab } from "./project/focus";
 import { MainEntry } from "./main/MainEntry";
 import { Mode, modeHome, modeOf, rememberMode, storedMode } from "./mode";
+import { applyAppearance } from "./appearance";
 import { OrchestrationList, OrchestrationSidebar, useOrchestrationWaiting } from "./orchestration";
 import { Rail } from "./rail";
 import { SessionScreen, chunk, retried, whenIdle } from "./chunks";
@@ -277,18 +278,14 @@ export function App() {
         /* private mode */
       }
       const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
-      const apply = () => {
-        let forced: string | null = null;
-        try {
-          forced = localStorage.getItem("daedalus.scheme");
-        } catch {
-          /* private mode */
-        }
-        document.documentElement.dataset.scheme = forced === "dark" || forced === "light" ? forced : mq?.matches ? "dark" : "light";
-      };
+      const apply = () => applyAppearance();
       apply();
       mq?.addEventListener("change", apply);
-      return () => mq?.removeEventListener("change", apply);
+      window.addEventListener("daedalus-appearance", apply);
+      return () => {
+        mq?.removeEventListener("change", apply);
+        window.removeEventListener("daedalus-appearance", apply);
+      };
     }
     document.documentElement.dataset.tg = "1";
     tg.ready();
@@ -517,7 +514,7 @@ export function App() {
   // The main chat on a phone is a detail of orchestration's list, with a back of its own and no bar under it.
   const tabBar = !wide && !sessionId && !focusProject && !terminalOpen && !mainChat;
   return (
-    <div ref={shell} className={`app ${projectBar ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${folded ? 0 : sidebarWidth}px` } : undefined}>
+    <div ref={shell} className={`app ${projectBar ? "project-phone" : ""} ${route.screen === "settings" ? "settings-open" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${folded ? 0 : sidebarWidth}px` } : undefined}>
       {wide && (
         <Rail
           screen={route.screen}

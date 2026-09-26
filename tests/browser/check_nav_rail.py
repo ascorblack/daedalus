@@ -1,6 +1,6 @@
 """The rail at the left edge of a desktop, and the phone's tab bar, in both languages.
 
-What is checked is what the operator asked for. On a desktop a narrow rail of icons is always there,
+What is checked is what the operator asked for. On a desktop a narrow rail of icons is always there, except on Settings, which takes the window,
 beside the sidebar or alone when the sidebar is folded: Home, Agents, Orchestration, Terminals, Board,
 Inbox with its unseen count, Services, and at its foot the menu, Settings and the account. Every icon
 names itself in a tooltip of its own. The two mode items choose the mode — there is no switch at the
@@ -137,11 +137,25 @@ def desktop(page: Page, lang: str) -> None:
     page.wait_for_url("**/app/agents")
     expect(page.locator("nav.sidebar:not(.orch-sidebar)")).to_be_visible()
     assert page.evaluate("localStorage.getItem('daedalus.mode')") == "agents"
-    for key, path in (("board", "/app/board"), ("inbox", "/app/inbox"), ("services", "/app/services"), ("settings", "/app/settings"), ("account", "/app/settings/security")):
+    for key, path in (("board", "/app/board"), ("inbox", "/app/inbox"), ("services", "/app/services")):
         rail.locator(f"[data-rail='{key}']").click()
         page.wait_for_url(f"**{path}")
         expect(rail.locator(f"[data-rail='{key}']")).to_have_class(re.compile(r"\bon\b"))
-    expect(rail.locator("[data-rail='settings']")).not_to_have_class(re.compile(r"\bon\b"))
+    # Settings takes the window: its own column, the section centred beside it, the rail stepped aside.
+    rail.locator("[data-rail='settings']").click()
+    page.wait_for_url("**/app/settings")
+    expect(page.locator(".settings-stage")).to_be_visible()
+    expect(rail).to_be_hidden()
+    column = page.locator(".settings-col")
+    stage = page.locator(".settings-main")
+    centre = column.evaluate("el => { const box = el.getBoundingClientRect(); const parent = el.parentElement.getBoundingClientRect(); return Math.abs((box.left + box.right) / 2 - (parent.left + parent.right) / 2); }")
+    assert centre <= 2, f"{lang}: the settings column is {centre}px off centre"
+    page.locator(".settings-nav a[href$='/settings/security']").click()
+    page.wait_for_url("**/app/settings/security")
+    expect(page.locator("h1.settings-title")).to_have_text("Security" if lang == "en" else "Безопасность")
+    page.locator(".settings-back").click()
+    page.wait_for_url("**/app/agents")
+    expect(rail).to_be_visible()
     # The menu opens from the rail's foot with everything else.
     rail.locator("[data-rail='menu']").click()
     expect(page.locator(".navmenu[role='menu']")).to_be_visible()

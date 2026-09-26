@@ -45,7 +45,9 @@ export function withAlpha(value: string, alpha: number): string {
 /** The xterm.js theme from the stylesheet tokens (`--term-bg`, `--fg`, `--accent`, `--ansi-0…15`). */
 export function terminalTheme(read: TokenReader): ITheme {
   const background = colour(read, "--term-bg", FALLBACK.background);
-  const foreground = colour(read, "--fg", FALLBACK.foreground);
+  // --term-fg lets a light page keep a dark terminal. xterm cannot read var(), so the token is a hex
+  // of its own; when it is absent the page colour is the terminal colour, as it always was.
+  const foreground = colour(read, "--term-fg", colour(read, "--fg", FALLBACK.foreground));
   const cursor = colour(read, "--accent", FALLBACK.cursor);
   const theme: ITheme = {
     background,
