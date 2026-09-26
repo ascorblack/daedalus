@@ -6,6 +6,7 @@ launch's port through the daemon.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import sys
@@ -225,15 +226,19 @@ async def test_a_question_is_answered_through_the_server(settings: Settings, db:
         await s.status_event(ada, "turn_done_unseen")
 
 
-async def test_a_steer_waits_for_the_turn_and_says_so_and_an_interrupt_ends_it(settings: Settings, db: Database) -> None:
+async def test_a_message_for_now_waits_for_the_turn_and_says_so_and_an_interrupt_ends_it(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **opencode()) as s:
         ada = await started(s, "slow:1000")
         await s.status_event(ada, "working")
-        steered = await s.team.tell(ada, "echo:after the turn", mode="steer", by="orchestrator")
-        assert steered["degraded_to"] == "queue"
+        steered = await s.team.tell(ada, "echo:after the turn", when="now", by="orchestrator")
+        assert steered["degraded_to"] == "after_turn"
+        await asyncio.sleep(0.5)
+        assert (await s.manager.staff.message(steered["message_id"])).state == "queued"  # type: ignore[union-attr]
         await s.team.interrupt(ada)
         await s.status_event(ada, "idle")
         await message(s, steered["message_id"], "acknowledged")
+        # The fact row keeps what became of the timing, so a later look can tell it was asked for now.
+        assert (await HarnessStore(db).delivery(steered["message_id"])).degraded_to == "after_turn"  # type: ignore[union-attr]
         await s.status_event(ada, "turn_done_unseen")
 
 

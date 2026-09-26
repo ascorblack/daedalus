@@ -385,16 +385,16 @@ async def message(s: Stand, message_id: str, state: str, *, timeout: float = 30.
     return await s.manager.staff.message(message_id)
 
 
-async def test_a_queued_message_waits_for_the_turn_and_a_steer_goes_into_it(settings: Settings, db: Database) -> None:
+async def test_a_message_for_after_the_turn_waits_for_it_and_one_for_now_goes_into_it(settings: Settings, db: Database) -> None:
     async with stand(settings, db, **claude()) as s:
         trust(s)
         ada = await started(s, "slow:1000")
         await s.status_event(ada, "working")
-        queued = await s.team.tell(ada, "echo:after the turn", mode="queue", by="orchestrator")
-        steered = await s.team.tell(ada, "echo:steered in", mode="steer", by="orchestrator")
+        queued = await s.team.tell(ada, "echo:after the turn", when="after_turn", by="orchestrator")
+        steered = await s.team.tell(ada, "echo:steered in", when="now", by="orchestrator")
         assert (queued["state"], steered["state"], steered["degraded_to"]) == ("queued", "queued", None)
-        # The steer goes into the running turn (Claude queues it and says so at once); the queued
-        # message waits behind it for the turn to end, and nothing ends the turn but an Esc.
+        # The message for now goes into the running turn (Claude queues it and says so at once); the
+        # other waits behind it for the turn to end, and nothing ends the turn but an Esc.
         await message(s, steered["message_id"], "acknowledged")
         await asyncio.sleep(0.5)
         assert (await s.manager.staff.message(queued["message_id"])).state == "queued"  # type: ignore[union-attr]
@@ -403,6 +403,26 @@ async def test_a_queued_message_waits_for_the_turn_and_a_steer_goes_into_it(sett
         texts = [e["text"] for e in log(s, "submitted")]
         assert texts.count("[orchestrator] echo:steered in") == 1 and texts.count("[orchestrator] echo:after the turn") == 1
         assert "idle" in await s.statuses(ada)  # the interrupt was seen on screen
+
+
+async def test_the_orchestrators_message_is_typed_into_the_busy_turn_at_once_and_acknowledged_within_it(settings: Settings, db: Database) -> None:
+    """What the operator saw fail: an orchestrator's correction to a Claude Code member at work reached
+    it only when the turn had ended, minutes late. Without a timing it now goes in at once."""
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "slow:1000")
+        await s.status_event(ada, "working")
+        told = await s.team.tell(ada, "echo:use the owner's sheet", by="orchestrator")
+        assert (told["state"], told["degraded_to"]) == ("queued", None)
+        await message(s, told["message_id"], "acknowledged", timeout=15)
+        # Acknowledged by the prompt hook Claude fires as it queues a message in a busy TUI, while
+        # the turn it is meant for still runs: nothing ended it.
+        assert (await s.session_row(ada)).status == "working"
+        [typed] = [e for e in log(s, "submitted") if e["text"] == "[orchestrator] echo:use the owner's sheet"]
+        assert typed["busy"] is True
+        assert (await s.manager.staff.message(told["message_id"])).mode == "now"  # type: ignore[union-attr]
+        delivery = await HarnessStore(db).delivery(told["message_id"])
+        assert delivery is not None and (delivery.via, delivery.degraded_to, delivery.acknowledged_at is not None) == ("paste", "", True)
 
 
 async def test_messages_never_merge_and_a_swallowed_enter_is_recovered_once(settings: Settings, db: Database) -> None:
@@ -492,7 +512,7 @@ async def test_after_a_restart_a_submitted_message_found_in_the_transcript_is_no
         await s.status_event(ada, "turn_done_unseen")
         # The host went away after the CLI took the message and before it heard so.
         await db.execute("UPDATE staff_messages SET state = 'submitted' WHERE id = ?", (told["message_id"],))
-        pending = await s.manager.staff.add_message(ada.id, "echo:still to go", origin="operator", staff_session_id=(await s.session_row(ada)).id)
+        pending = await s.manager.staff.add_message(ada.id, "echo:still to go", origin="operator", mode="after_turn", staff_session_id=(await s.session_row(ada)).id)
         runtime = s.restart_runtime(ClaudeCodeAdapter())
         assert await runtime.reconcile(wait=5) == 1
         await message(s, told["message_id"], "acknowledged")
@@ -883,7 +903,7 @@ async def test_the_staff_views_routes(settings: Settings, db: Database, config: 
             assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "human"})).json()["owner"] == "human"
             assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "auto"})).json()["owner"] == "auto"
             assert (await client.post(f"/api/terminals/{row.terminal_id}/keyboard", headers=headers, json={"owner": "agent"})).status_code == 422
-            told = await client.post(f"/api/staff/{ada.id}/messages", headers=headers, json={"text": "echo:and a footer", "mode": "queue"})
+            told = await client.post(f"/api/staff/{ada.id}/messages", headers=headers, json={"text": "echo:and a footer", "when": "after_turn"})
             assert told.status_code == 200 and told.json()["state"] == "queued"
             await message(s, told.json()["message_id"], "acknowledged")
             [newest] = (await client.get(f"/api/staff/{ada.id}/messages?limit=1", headers=headers)).json()

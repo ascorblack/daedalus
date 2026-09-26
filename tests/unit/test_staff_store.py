@@ -266,7 +266,7 @@ async def test_message_receipts_only_move_forward(db: Database, tmp_path: Path) 
     _, pid = await _project(db, tmp_path)
     store = _store(db)
     ada = await store.hire(pid, name="Ada")
-    message = await store.add_message(ada.id, "Use the blue palette", origin="orchestrator", mode="steer")
+    message = await store.add_message(ada.id, "Use the blue palette", origin="orchestrator", mode="now")
     assert (message.state, message.attempts) == ("queued", 0)
     assert (await store.set_message_state(message.id, "written")).state == "written"  # type: ignore[union-attr]
     assert (await store.set_message_state(message.id, "acknowledged")).state == "acknowledged"  # type: ignore[union-attr]
@@ -274,7 +274,7 @@ async def test_message_receipts_only_move_forward(db: Database, tmp_path: Path) 
     assert late is not None and late.state == "acknowledged", "a late receipt must not undo a later one"
     assert (await store.set_message_state(message.id, "failed", "boom")).state == "acknowledged"  # type: ignore[union-attr]
 
-    other = await store.add_message(ada.id, "Again", origin="operator")
+    other = await store.add_message(ada.id, "Again", origin="operator", mode="after_turn")
     failed = await store.set_message_state(other.id, "failed", "the terminal was gone")
     assert failed is not None and (failed.state, failed.error, failed.attempts) == ("failed", "the terminal was gone", 0)
     assert (await store.set_message_state(other.id, "written")).state == "failed"  # type: ignore[union-attr]
@@ -284,7 +284,7 @@ async def test_message_receipts_only_move_forward(db: Database, tmp_path: Path) 
     assert [m.id for m in await store.messages(ada.id)] == [other.id, message.id]
     assert await store.set_message_state("sm-missing", "written") is None
     with pytest.raises(StaffError):
-        await store.add_message(ada.id, "x", origin="staff")
+        await store.add_message(ada.id, "x", origin="staff", mode="now")
     with pytest.raises(StaffError):
         await store.add_message(ada.id, "x", origin="operator", mode="shout")
 

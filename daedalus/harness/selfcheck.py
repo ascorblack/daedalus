@@ -188,7 +188,7 @@ async def session_check(
                 await asyncio.sleep(0.2)
             steps.add("team", "hello" in seen, "the team tools loaded" if "hello" in seen else f"no word from the team tools within {cfg.team_hello_s:g} s")
         if model_turn:
-            delivered = await adapter.send(term, "", PROMPT, "queue")
+            delivered = await adapter.send(term, "", PROMPT, "after_turn")
             acknowledged = await until({EventKind.PROMPT_ACKNOWLEDGED}, cfg.ack_timeout_s * 2)
             if steps.add("deliver", acknowledged is not None and acknowledged.kind is EventKind.PROMPT_ACKNOWLEDGED, f"{delivered.via}: " + ("acknowledged" if acknowledged is not None else "not acknowledged")):
                 done = await until({EventKind.TURN_COMPLETED}, TURN_TIMEOUT_S)

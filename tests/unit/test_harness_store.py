@@ -120,13 +120,13 @@ async def test_delivery_facts_accumulate_and_each_state_keeps_its_first_time(db:
     staff, member, ss = await _staff_session(db, tmp_path)
     store = HarnessStore(db)
     await store.open_launch(_launch(ss))
-    message = await staff.add_message(member, "Add a gluten-free page", origin="orchestrator", mode="steer", staff_session_id=ss)
+    message = await staff.add_message(member, "Add a gluten-free page", origin="orchestrator", mode="now", staff_session_id=ss)
 
-    first = await store.record_delivery("l-1", Delivery(message.id, "written", via="paste", degraded_to="queue"))
-    assert (first.via, first.degraded_to, first.written_at is not None, first.submitted_at) == ("paste", "queue", True, None)
+    first = await store.record_delivery("l-1", Delivery(message.id, "written", via="paste", degraded_to="after_turn"))
+    assert (first.via, first.degraded_to, first.written_at is not None, first.submitted_at) == ("paste", "after_turn", True, None)
     await store.record_delivery("l-1", Delivery(message.id, "written", client_ref="c-7"))
     submitted = await store.record_delivery("l-1", Delivery(message.id, "submitted"))
-    assert (submitted.via, submitted.degraded_to, submitted.client_ref) == ("paste", "queue", "c-7")
+    assert (submitted.via, submitted.degraded_to, submitted.client_ref) == ("paste", "after_turn", "c-7")
     assert submitted.written_at == first.written_at and submitted.submitted_at is not None
     assert await store.count_enter(message.id) == 1
     assert await store.count_enter(message.id) == 2
@@ -147,7 +147,7 @@ async def test_the_harness_rows_go_with_the_staff_rows_they_key_to(db: Database,
     staff, member, ss = await _staff_session(db, tmp_path)
     store = HarnessStore(db)
     await store.open_launch(_launch(ss))
-    message = await staff.add_message(member, "Hello", origin="operator", staff_session_id=ss)
+    message = await staff.add_message(member, "Hello", origin="operator", mode="after_turn", staff_session_id=ss)
     await store.record_delivery("l-1", Delivery(message.id, "written", via="paste"))
     await db.execute("DELETE FROM staff_messages WHERE id = ?", (message.id,))
     assert await store.delivery(message.id) is None
