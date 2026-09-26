@@ -1,11 +1,11 @@
 """What each command-line agent offers, as data: the channels an adapter uses and how far to trust them.
 
 The table is code rather than prose so that three readers agree on it: the adapters, which choose a
-channel by it; the delivery pipeline, which decides what "steer" means for a harness by it; and the
-app and the orchestrator, which show the operator and the model what a harness can and cannot do
-(the Harnesses screen's "status channel" column, the ``Harnesses`` tool). A value that is not yet
-proven against the real CLI is marked in its field's comment; the adapter that proves it corrects
-it here, in the same change.
+channel by it; the delivery pipeline, which decides by it what a message for now becomes for a
+harness; and the app and the orchestrator, which show the operator and the model what a harness can
+and cannot do (the Harnesses screen's "status channel" column, the ``Harnesses`` tool). A value that
+is not yet proven against the real CLI is marked in its field's comment; the adapter that proves it
+corrects it here, in the same change.
 """
 
 from __future__ import annotations

@@ -35,7 +35,7 @@ describe("a watch's request", () => {
 
   it("builds each action, and refuses one missing its words or a cooldown under a minute", () => {
     expect(watchBody({ ...emptyWatch(), action: "tell", tellStaff: "Max" })).toBeNull();
-    expect(watchBody({ ...emptyWatch(), action: "tell", tellStaff: "Max", tellText: " Rebase " })?.then).toEqual({ action: "tell", staff: "Max", text: "Rebase", mode: "queue" });
+    expect(watchBody({ ...emptyWatch(), action: "tell", tellStaff: "Max", tellText: " Rebase " })?.then).toEqual({ action: "tell", staff: "Max", text: "Rebase", when: "now" });
     expect(watchBody({ ...emptyWatch(), action: "notify" })).toBeNull();
     expect(watchBody({ ...emptyWatch(), action: "notify", title: "CI red", level: "urgent" })?.then).toEqual({ action: "notify", title: "CI red", text: "", level: "urgent" });
     expect(watchBody({ ...emptyWatch(), cooldown: "0.5" })).toBeNull();

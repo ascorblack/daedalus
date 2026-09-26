@@ -347,14 +347,23 @@ async def assign(
 @tool(
     name="Tell",
     description=(
-        "Say something to a member's live session. mode: queue (default; read when the current turn ends), steer "
-        "(joins the turn now), interrupt (stops the turn and sends it). files: handles (att:…) or paths in the project's "
-        "folders, copied where the member can open them; the message names the copies. Returns the delivery receipt: "
-        "queued, written, submitted, acknowledged or failed."
+        "Say something to a member's live session. when decides when they read it: now (the default) goes into the "
+        "turn they are working on — they see it between two steps and can change course, without losing what they "
+        "did; use it for a correction, a detail or a new constraint for the work in hand. after_turn waits until "
+        "they finish the turn, for what should not disturb it: the next piece of work, a note for later. interrupt "
+        "stops the turn first, for when what they are doing is wrong or wasted. Where an executor cannot take a "
+        "message into a running turn, the receipt says what happened instead. files: handles (att:…) or paths in the "
+        "project's folders, copied where the member can open them; the message names the copies. Returns the "
+        "delivery receipt: queued, written, submitted, acknowledged or failed."
     ),
 )
-async def tell(context: ToolContext, staff: str, text: str, mode: str = "queue", files: list[str] | None = None) -> ToolResult:
-    return await _call(context, "tell", staff=staff, text=text, mode=mode, files=files)
+async def tell(context: ToolContext, staff: str, text: str, when: str = "now", files: list[str] | None = None) -> ToolResult:
+    return await _call(context, "tell", staff=staff, text=text, when=when, files=files)
+
+
+# The decorator describes a str as any string at all; the model is shown the three timings as the only
+# ones, so it does not guess a word such as "queue" and have the call refused.
+tell().definition.parameters.properties["when"]["enum"] = ["now", "after_turn", "interrupt"]
 
 
 @tool(
@@ -461,7 +470,7 @@ class Watch(Tool):
                 "no lookarounds); git_commit (folder, branch — optional: a new commit on a branch of that folder); pr "
                 "(provider, repo, conclusion such as opened or merged); ci (provider, repo, conclusion such as failure); "
                 "webhook (provider, regex over the payload). then.action is wake (you are woken with the note), tell "
-                "(staff, text, mode) or notify (title, text, level: quiet, normal or urgent). A watch fires at most once "
+                "(staff, text, when: now, after_turn or interrupt, as in Tell) or notify (title, text, level: quiet, normal or urgent). A watch fires at most once "
                 "per cooldown, once=true removes it after the first fire, and one that fires twelve times in an hour "
                 "switches itself off. Nothing you do yourself fires a watch. Unwatch(id) removes it."
             ),
@@ -484,7 +493,7 @@ class Watch(Tool):
                         "properties": {
                             "action": {"type": "string", "enum": ["wake", "tell", "notify"]},
                             "note": {"type": "string"}, "staff": {"type": "string"}, "text": {"type": "string"},
-                            "mode": {"type": "string", "enum": ["queue", "steer", "interrupt"]}, "title": {"type": "string"},
+                            "when": {"type": "string", "enum": ["now", "after_turn", "interrupt"]}, "title": {"type": "string"},
                             "level": {"type": "string", "enum": ["quiet", "normal", "urgent"]},
                         },
                         "required": ["action"],

@@ -233,8 +233,8 @@ async def test_messages_go_through_the_bridge_and_are_acknowledged_by_their_id(s
     async with stand(settings, db, adapter=PiAdapter()) as s:
         ada = await started(s, "slow:1000")
         await s.status_event(ada, "working")
-        queued = await s.team.tell(ada, "echo:after the turn", mode="queue", by="orchestrator")
-        steered = await s.team.tell(ada, "echo:steered in", mode="steer", by="orchestrator")
+        queued = await s.team.tell(ada, "echo:after the turn", when="after_turn", by="orchestrator")
+        steered = await s.team.tell(ada, "echo:steered in", when="now", by="orchestrator")
         assert steered["degraded_to"] is None
         # pi takes a steer into the running turn and says so at once, by the id it was sent with.
         await message(s, steered["message_id"], "acknowledged")

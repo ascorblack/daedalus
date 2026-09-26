@@ -260,13 +260,13 @@ async def test_a_permission_dismissed_in_the_terminal_settles_the_request(settin
         await eventually(settled, "the request was settled by the turn's end")
 
 
-async def test_a_steer_interrupts_first_and_a_queued_message_waits(settings: Settings, db: Database) -> None:
+async def test_a_message_for_now_interrupts_first_and_one_for_after_the_turn_waits(settings: Settings, db: Database) -> None:
     async with stand(settings, db, adapter=GrokAdapter()) as s:
         ada = await started(s, "slow:1000")
         await s.status_event(ada, "working")
-        queued = await s.team.tell(ada, "echo:after the turn", mode="queue", by="orchestrator")
-        steered = await s.team.tell(ada, "echo:instead", mode="steer", by="orchestrator")
-        # Enter while Grok is busy would only queue it, so a steer is an interrupt and then the message.
+        queued = await s.team.tell(ada, "echo:after the turn", when="after_turn", by="orchestrator")
+        steered = await s.team.tell(ada, "echo:instead", when="now", by="orchestrator")
+        # Enter while Grok is busy would only queue it, so now is an interrupt and then the message.
         assert steered["degraded_to"] == "interrupt"
         await message(s, steered["message_id"], "acknowledged")
         await message(s, queued["message_id"], "acknowledged")

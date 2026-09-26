@@ -112,7 +112,7 @@ class DaedalusStaffRuntime:
             await self._settle(session_id)
         try:
             await self.manager.submit(
-                session_id, text, as_answer=False, steer=msg.mode == "steer", follow_up=msg.mode == "queue", origin=msg.origin, client_message_id=msg.id
+                session_id, text, as_answer=False, steer=msg.mode == "now", follow_up=msg.mode == "after_turn", origin=msg.origin, client_message_id=msg.id
             )
         except Exception as exc:  # noqa: BLE001 — a refused delivery is a receipt, not a crash of the caller
             return Receipt("failed", str(exc)[:500])

@@ -32,7 +32,7 @@ import type { TerminalState } from "../terminal/instance";
 import { errorText } from "../ui";
 import { FeedView, useTurns } from "./FeedView";
 import { HealthLine } from "./health";
-import { attention, canAlways, channelWords, defaultMode, keyboardBlocks, listRows, nowChoice, openRequests, outboxRows, turnFacts, type StaffViewMode } from "./model";
+import { attention, canAlways, channelWords, composerWhen, defaultMode, keyboardBlocks, listRows, nowChoice, openRequests, outboxRows, turnFacts, type StaffViewMode } from "./model";
 
 const enc = encodeURIComponent;
 const MODE_KEY = "daedalus.staff.view";
@@ -290,20 +290,20 @@ function PermissionBar({ projectId, staffId, caps, toast }: { projectId: string;
   );
 }
 
-/** "Write to Ira…", with the choice of when it goes in: after the turn, or now where the CLI allows it. */
+/** "Write to Ira…", with the choice of when it goes in: now or after the turn (see ``composerWhen``). */
 function StaffComposer({ staffId, name, caps, live, toast }: { staffId: string; name: string; caps: HarnessCapabilities | null; live: boolean; toast: (text: string) => void }) {
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<"queue" | "steer">("queue");
+  const [picked, setWhen] = useState<"now" | "after_turn" | null>(null);
   const [busy, setBusy] = useState(false);
   const now = nowChoice(caps);
-  const chosen = now.enabled ? mode : "queue";
+  const chosen = composerWhen(now, picked);
   async function send(e?: FormEvent) {
     e?.preventDefault();
     const words = text.trim();
     if (!words || busy) return;
     setBusy(true);
     try {
-      await api.post(`/api/staff/${enc(staffId)}/messages`, { text: words, mode: chosen });
+      await api.post(`/api/staff/${enc(staffId)}/messages`, { text: words, when: chosen });
       setText("");
       toast(t("phone.told", { name }));
       invalidate(`/api/staff/${enc(staffId)}/messages`);
@@ -332,8 +332,8 @@ function StaffComposer({ staffId, name, caps, live, toast }: { staffId: string; 
         }}
       />
       <div className="segmented inline staff-when" role="group" aria-label={t("staff.when")}>
-        <button type="button" className={chosen === "queue" ? "on" : ""} aria-pressed={chosen === "queue"} data-when="queue" onClick={() => setMode("queue")}>{t("staff.when.queue")}</button>
-        <button type="button" className={chosen === "steer" ? "on" : ""} aria-pressed={chosen === "steer"} data-when="steer" disabled={!now.enabled} title={now.hint ? t(now.hint, { cli: caps?.label ?? "" }) : undefined} onClick={() => setMode("steer")}>{t("staff.when.now")}</button>
+        <button type="button" className={chosen === "after_turn" ? "on" : ""} aria-pressed={chosen === "after_turn"} data-when="after_turn" onClick={() => setWhen("after_turn")}>{t("staff.when.after_turn")}</button>
+        <button type="button" className={chosen === "now" ? "on" : ""} aria-pressed={chosen === "now"} data-when="now" disabled={!now.enabled} title={now.hint ? t(now.hint, { cli: caps?.label ?? "" }) : undefined} onClick={() => setWhen("now")}>{t("staff.when.now")}</button>
       </div>
       <button className="iconbtn primary staff-compose-send" type="submit" disabled={busy || !text.trim() || !live} aria-label={t("staff.send")} title={t("staff.send")}>
         <Icon name="send" />

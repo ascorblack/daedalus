@@ -16,7 +16,7 @@ import { plural, t } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { go, PageHeader } from "../shell";
 import { ORCHESTRATION_LIST, navigate, pathFor, projectHome, projectPagePath, projectSessionPath, projectStaffPath } from "../router";
-import { answeredBy, canAlways } from "../staff/model";
+import { answeredBy, canAlways, composerWhen, nowChoice } from "../staff/model";
 import { HealthLine } from "../staff/health";
 import { invalidate, useQuery } from "../store";
 import { PhoneTerminal, type PhoneTerminalProps } from "../terminal/mobile";
@@ -419,7 +419,8 @@ export function StaffPhoneTerminal({ staffId, projectId, ...props }: PhoneTermin
     placeholder: name ? t("term.phone.compose.staff", { name }) : t("term.phone.compose"),
     onSend: async (text: string) => {
       try {
-        await api.post(`/api/staff/${enc(staffId)}/tell`, { text, mode: "queue" });
+        // The same choice the staff view's composer starts on, with no picker here to change it.
+        await api.post(`/api/staff/${enc(staffId)}/messages`, { text, when: composerWhen(nowChoice(view?.capabilities), null) });
         toast(t("phone.told", { name: name || t("focus.team") }));
         invalidate(`/api/staff/${enc(staffId)}/messages`);
         return true;

@@ -299,7 +299,7 @@ class PiAdapter:
         """Hand a message to pi through the bridge. It is ``submitted`` once pi has it; the ``input``
         event that follows, naming the same id, acknowledges it."""
         request: dict[str, Any] = {"op": "send", "id": message_id, "text": text}
-        if mode == "steer":
+        if mode == "now":
             request["deliverAs"] = "steer"
         try:
             reply = await self._bridge(term, request)
