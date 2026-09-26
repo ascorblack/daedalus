@@ -185,6 +185,35 @@ the launch, beside the launch directory rather than inside it."""
 
 
 @dataclass(frozen=True, slots=True)
+class ToolSetSpec:
+    """A set of Daedalus's own tools a launch offers its CLI through ``ptyd tools-mcp --set <name>``.
+
+    The host describes the tools in a launch file (``tools/<name>.json``) and answers every call from
+    the launch's hook listener, so the CLI's copy of a tool runs through the same code, policy and
+    audit as a Daedalus session's. An adapter only places the MCP entry and its CLI's permission rule
+    for the tools that only read (``read_only``)."""
+
+    name: str
+    """The set, as ``tools-mcp`` takes it and the launch file is named: ``browser``."""
+    server: str
+    """The MCP server's name, which is how the CLI names the tools: ``daedalus_browser``."""
+    file: bytes
+    """The launch file's content."""
+    hold_ms: int
+    """How long one call may wait for the host; the CLI's own timeout on a tool call goes above it."""
+    read_only: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+
+    @property
+    def path(self) -> str:
+        return f"tools/{self.name}.json"
+
+    def command(self) -> str:
+        """The shell line that starts the server; the daemon's path is known only from the launch."""
+        return f'exec "$DAEDALUS_PTYD_BIN" tools-mcp --set {self.name}'
+
+
+@dataclass(frozen=True, slots=True)
 class LaunchSpec:
     """Everything an adapter needs to plan a launch, composed by the host.
 
@@ -228,6 +257,9 @@ class LaunchSpec:
     """How long a CLI's permission or question hook may be held for an answer given elsewhere."""
     port_range: tuple[int, int] = (18300, 18399)
     """Loopback ports a CLI that serves on one (OpenCode) may take, ``harness.opencode_port_range``."""
+    tool_sets: tuple[ToolSetSpec, ...] = ()
+    """Daedalus's tools beyond the team's that this launch offers (the browser's), each through an
+    MCP entry of its own."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +591,7 @@ __all__ = [
     "SendMode",
     "StaffEvent",
     "TerminalPort",
+    "ToolSetSpec",
     "ToolUse",
     "Turn",
     "TurnUsage",

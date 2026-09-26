@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from daedalus.config import HarnessConfig
 from daedalus.harness import team as protocol
@@ -48,6 +48,7 @@ from daedalus.harness.contract import (
     ProgramNotFound,
     ScreenClass,
     StaffEvent,
+    ToolSetSpec,
     Turn,
 )
 from daedalus.harness.delivery import DeliveryWorker, Pending, normalised, pending_of, same_prompt
@@ -73,6 +74,19 @@ from daedalus.terminals.model import LaunchSpec as DaemonLaunch
 from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
+
+
+class ToolSet(Protocol):
+    """A set of Daedalus's own tools a CLI reaches through ``ptyd tools-mcp`` (the browser's): what the
+    launch is given, and how one call is answered for a live session.
+
+    ``ask`` is the runtime's way to put a question to the operator for the session and wait for the
+    answer: ``(key, tool, summary) -> True / False``, or ``None`` when the hold ran out first. The
+    question stays open; a later yes lets that one call through once when it is made again."""
+
+    def spec(self, hold_ms: int) -> ToolSetSpec: ...
+
+    async def call(self, live: LiveSession, tool: str, arguments: dict[str, Any], *, ask: Callable[[str, str, str], Awaitable[bool | None]], launch_id: str, cwd: str) -> tuple[str, bool]: ...
 
 LAUNCH_COLS = 120
 LAUNCH_ROWS = 36
@@ -315,6 +329,11 @@ class CliSession:
     held_for: dict[str, list[str]] = field(default_factory=dict)
     """A team request's reference to the later held posts that asked it again, newest last."""
     pending_after_restart: list[Pending] = field(default_factory=list)
+    tool_asks: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
+    """A tool call's question to the operator, by its reference, while the call still waits."""
+    tool_grants: dict[str, bool] = field(default_factory=dict)
+    """Answers to tool questions that came after their call gave up waiting, by the question's key:
+    the same call made again takes its answer once, as a policy grant is taken by a session."""
 
 
 class CliStaffRuntime:
@@ -349,6 +368,9 @@ class CliStaffRuntime:
         """The harness manager's word on ``(env, harness)``: why no member may start on it now (it is
         being updated, its last self-check failed, its major is not supported), or empty."""
         self.sessions: dict[str, CliSession] = {}
+        self.tool_sets: dict[str, ToolSet] = {}
+        """Daedalus's tools beyond the team's that every launch offers (``browser``), set by the
+        subsystem that has them; each becomes an MCP entry and its calls arrive as ``tools`` posts."""
         self._by_terminal: dict[str, CliSession] = {}
         self._unsubscribe = terminals.subscribe(self._on_terminal_event)
         self._background: set[asyncio.Task[Any]] = set()
@@ -443,7 +465,12 @@ class CliStaffRuntime:
             report_hold_ms=cfg.report_hold_s * 1000,
             permission_hold_ms=cfg.permission_hold_s * 1000,
             port_range=port_range(cfg.opencode_port_range),
+            tool_sets=tuple(tools.spec(self._tools_hold_ms()) for tools in self.tool_sets.values()),
         )
+
+    def _tools_hold_ms(self) -> int:
+        """How long a tool call waits for the host: past a question to the operator, which it may be."""
+        return self.config().permission_hold_s * 1000 + HOLD_MARGIN_MS
 
     async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
         """One launch, planned again while the port the plan chose is taken (``PORT_ATTEMPTS``)."""
@@ -492,7 +519,7 @@ class CliStaffRuntime:
         # restarted host could never take up or end.
         await self.store.open_launch(record)
         cfg = self.config()
-        hold = max([cfg.ask_hold_s * 1000 + HOLD_MARGIN_MS, cfg.permission_hold_s * 1000 + HOLD_MARGIN_MS, *plan.hooks.hold_ms.values()])
+        hold = max([cfg.ask_hold_s * 1000 + HOLD_MARGIN_MS, cfg.permission_hold_s * 1000 + HOLD_MARGIN_MS, *plan.hooks.hold_ms.values(), *(t.hold_ms + HOLD_MARGIN_MS for t in spec.tool_sets)])
         registered = False
         created: list[str] = []
         try:
@@ -636,8 +663,11 @@ class CliStaffRuntime:
         try:
             async for hook in self.terminals.hook_events(session.launch.launch_id):
                 post = HookPost(name=hook.name, body=hook.body, at=hook.at, reply_id=hook.reply_id, hold_ms=hook.hold_ms)
-                session.channel["team" if hook.name == "team" else "hook"] = hook.at or _now()
-                if hook.name == "team":
+                session.channel["team" if hook.name == "team" else "tools" if hook.name == "tools" else "hook"] = hook.at or _now()
+                if hook.name == "tools":
+                    # A tool call may wait minutes for the operator: never in the way of the next hook.
+                    self._spawn(self._tools(session, post), f"tools-{session.staff_session_id}")
+                elif hook.name == "team":
                     try:
                         await self._team(session, post)
                     except Exception:  # noqa: BLE001 — one bad team post must not stop the CLI's hooks
@@ -1049,6 +1079,68 @@ class CliStaffRuntime:
         elif post.reply_id:
             await session.term.reply(post.reply_id, {"text": f"the team has no tool {tool!r}", "error": True})
 
+    # -- Daedalus's other tools (the browser's) -------------------------------------------------------
+
+    async def _tools(self, session: CliSession, post: HookPost) -> None:
+        """One call of a tool set through ``ptyd tools-mcp``, answered on its held post.
+
+        The set runs the call as a Daedalus session's tool would run it — the same code, policy and
+        audit — for the live session of the launch. A call seen twice (a replay after the host
+        restarted) is answered as the first one was and run once."""
+        body = post.body if isinstance(post.body, dict) else {}
+        tool = str(body.get("tool") or "")
+        name = str(body.get("set") or "")
+        if tool == "hello":
+            session.channel[f"tools:{name}"] = post.at or _now()
+            return
+        reply: dict[str, Any]
+        try:
+            call_id = str(body.get("call_id") or "")
+            seen = session.calls.get(call_id) if call_id else None
+            if seen is not None and seen[0] == "tools":
+                if post.reply_id:
+                    await session.term.reply(post.reply_id, seen[1])
+                return
+            tools = self.tool_sets.get(name)
+            live = await self.lookup(session.staff_session_id)
+            arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else {}
+            if live is None:
+                reply = {"text": "this session is no longer connected to its team; nothing was done", "error": True}
+            elif tools is None:
+                reply = {"text": f"the {name or 'unnamed'} tools are not available in this installation", "error": True}
+            else:
+
+                async def ask(key: str, what: str, summary: str) -> bool | None:
+                    return await self._ask_operator(session, live, key, what, summary)
+
+                text, failed = await tools.call(live, tool, dict(arguments or {}), ask=ask, launch_id=session.launch.launch_id, cwd=session.cwd)
+                reply = {"text": text, "error": bool(failed)}
+            self._remember_call(session, call_id, ("tools", reply))
+        except Exception as exc:  # noqa: BLE001 — a tool's failure is the call's answer, not the runtime's end
+            logger.exception("a %s tool call of %s failed", name, session.staff_session_id)
+            reply = {"text": f"the tool failed: {exc}", "error": True}
+        if post.reply_id:
+            await session.term.reply(post.reply_id, reply)
+
+    async def _ask_operator(self, session: CliSession, live: LiveSession, key: str, tool: str, summary: str) -> bool | None:
+        """Put a tool call's question to the operator and wait for it up to the permission hold.
+
+        Always the operator's: a tool set asks only what the operator decides (what a browser buys,
+        sends or deletes), whatever the project's autonomy gives the orchestrator. An answer that
+        arrives after the call gave up is kept for the same call made again, once."""
+        if key in session.tool_grants:
+            return session.tool_grants.pop(key)
+        ref = f"tools:{key}"
+        future = session.tool_asks.get(ref)
+        if future is None or future.done():
+            future = asyncio.get_running_loop().create_future()
+            session.tool_asks[ref] = future
+            await self.ingress.permission(live, ref, tool, summary, route="operator", risk="elevated")
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), self.config().permission_hold_s)
+        except TimeoutError:
+            return None
+
     @staticmethod
     def _remember_call(session: CliSession, call_id: str, what: tuple[str, Any]) -> None:
         if not call_id:
@@ -1102,7 +1194,21 @@ class CliStaffRuntime:
         session = self._session(live)
         ref = ask.request_ref
         text = (decision.text or "").strip() or ", ".join(decision.selected)
-        if ref.startswith(("team:", "team-message:")):
+        if ref.startswith("tools:"):
+            # A tool call's question: the call waiting on it takes the answer; one that gave up has
+            # it kept for the same call made again.
+            waiting = session.tool_asks.pop(ref, None)
+            allowed = bool(decision.allow)
+            if waiting is not None and not waiting.done():
+                waiting.set_result(allowed)
+            else:
+                if allowed:
+                    session.tool_grants[ref.removeprefix("tools:")] = True
+                # The call that asked gave up waiting and told the member to stop; the answer is news.
+                assert session.worker is not None
+                words = "it was granted: make the same call again, once" if allowed else "it was refused: do not try it again"
+                session.worker.put(Pending("", f"[the {decision.by} answered your request to act in the browser] {words}", "after_turn", "system"))
+        elif ref.startswith(("team:", "team-message:")):
             words = text or ("yes" if decision.allow else "no" if decision.allow is False else "")
             posts = [*reversed(session.held_for.get(ref, [])), *([ref.removeprefix("team:")] if ref.startswith("team:") else [])]
             held = False

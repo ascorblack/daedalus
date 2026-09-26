@@ -41,7 +41,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -69,6 +69,7 @@ from daedalus.harness.contract import (
     SendMode,
     StaffEvent,
     TerminalPort,
+    ToolSetSpec,
     ToolUse,
     Turn,
     TurnUsage,
@@ -104,7 +105,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def agent_file(skill_text: str, env: Mapping[str, str]) -> str:
+def agent_file(skill_text: str, env: Mapping[str, str], tool_sets: Sequence[ToolSetSpec] = ()) -> str:
     """The launch's agent definition: the hooks, the team's MCP server, and the skill as its body.
 
     The front matter is YAML written as JSON, one key per line: YAML reads it, and so does anything
@@ -128,13 +129,18 @@ def agent_file(skill_text: str, env: Mapping[str, str]) -> str:
         f"name: {AGENT_NAME}",
         'description: "A staff member of a Daedalus project, working under its orchestrator."',
         f"hooks: {json.dumps(hooks)}",
-        f"mcpServers: {json.dumps([server])}",
+        f"mcpServers: {json.dumps([server, *(_set_server(t) for t in tool_sets)])}",
         "---",
         "",
         body or "You are a staff member of a Daedalus project. Report to your orchestrator with the Report tool.",
         "",
     ]
     return "\n".join(lines)
+
+
+def _set_server(tools: ToolSetSpec) -> dict[str, Any]:
+    """One of Daedalus's other tool sets (the browser's) as an entry of the agent file's list."""
+    return {"name": tools.server, "command": "sh", "args": ["-c", tools.command()], "env": [{"name": "DAEDALUS_TOOLS_HOLD_MS", "value": str(tools.hold_ms)}]}
 
 
 def _box_text(line: str) -> str:
@@ -257,12 +263,17 @@ class GrokAdapter:
 
     def _plan(self, spec: LaunchSpec, session: str, *, resume: bool) -> LaunchPlan:
         holds = {"DAEDALUS_ASK_HOLD_MS": str(spec.ask_hold_ms), "DAEDALUS_REPORT_HOLD_MS": str(spec.report_hold_ms)}
-        files = {AGENT_FILE: agent_file(spec.team_skill, holds).encode()}
+        files = {AGENT_FILE: agent_file(spec.team_skill, holds, spec.tool_sets).encode(), **{tools.path: tools.file for tools in spec.tool_sets}}
         # "-s" names a new session and is refused for one that exists; "-r" takes one up.
         argv: list[str] = ["grok", "--cwd", spec.cwd, "-r" if resume else "-s", session, "--trust", "--agent", f"{LAUNCH_DIR}/{AGENT_FILE}"]
         if spec.team_block:
             argv += ["--rules", spec.team_block]
-        argv += ["--allow", TEAM_RULE, "--disallowed-tools", "ask_user_question"]
+        argv += ["--allow", TEAM_RULE]
+        # The tools of each set that only read run unasked; the rest ask by the member's mode.
+        for tools in spec.tool_sets:
+            for name in tools.read_only:
+                argv += ["--allow", f"MCPTool({tools.server}__{name})"]
+        argv += ["--disallowed-tools", "ask_user_question"]
         if spec.model:
             argv += ["-m", spec.model]
         argv += ["--permission-mode", self._mode(spec)]

@@ -14,10 +14,10 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // validID is what a terminal id may look like. The host generates ids; the daemon only makes sure

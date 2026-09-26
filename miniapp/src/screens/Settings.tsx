@@ -26,6 +26,7 @@ import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
 import { NotificationSettings } from "./NotificationSettings";
 import { TerminalCap } from "./TerminalCap";
+import { BrowserSettingsTab } from "./BrowserSettings";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"];
 /** Self-hosted endpoints: temperature is a sampling pin, not a vendor default. */
@@ -942,7 +943,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "appearance" | "models" | "rules" | "limits" | "terminals" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
+type Section = "appearance" | "models" | "rules" | "limits" | "terminals" | "browser" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
 /** The sections, grouped the way the page lists them. The words come from the table, not from here. */
 const GROUPS: { id: "you" | "work" | "system"; sections: { id: Section; icon: IconName }[] }[] = [
   { id: "you", sections: [
@@ -957,6 +958,7 @@ const GROUPS: { id: "you" | "work" | "system"; sections: { id: Section; icon: Ic
     { id: "limits", icon: "chart" },
     { id: "tools", icon: "wrench" },
     { id: "terminals", icon: "terminal" },
+    { id: "browser", icon: "globe" },
     { id: "chat", icon: "inbox" },
   ] },
   { id: "system", sections: [
@@ -1240,6 +1242,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         );
       case "terminals":
         return <TerminalCap s={s} save={save} />;
+      case "browser":
+        return <BrowserSettingsTab s={s} save={save} toast={toast} />;
       case "tools":
         return <ToolsTab s={s} save={save} />;
       case "voice":

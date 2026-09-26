@@ -1206,7 +1206,10 @@ class Team:
             live = await self.live_for_session(event.session_id)
             if live is not None:
                 p = event.payload
-                await self.ingress.permission(live, str(p.get("request_id") or ""), str(p.get("tool") or ""), str(p.get("text") or ""), event_ref=str(p.get("request_ref") or ""))
+                # A session may say who decides its request: a sensitive browser action is the
+                # operator's, whatever the project's autonomy gives the orchestrator.
+                route = "operator" if p.get("routed_to") == "operator" else None
+                await self.ingress.permission(live, str(p.get("request_id") or ""), str(p.get("tool") or ""), str(p.get("text") or ""), event_ref=str(p.get("request_ref") or ""), route=route)
         elif event.type == "permission.resolved" and event.session_id and event.payload.get("via") != "orchestrator":
             live = await self.live_for_session(event.session_id)
             if live is not None:
@@ -1494,7 +1497,7 @@ class Ingress:
             # pause asked for during the turn takes effect (a Daedalus member's in on_run_finished).
             await self.team._settle_pause(LiveSession(live.staff, session))
 
-    async def _open(self, live: LiveSession, kind: str, request_ref: str, text: str, detail: dict[str, Any], event_ref: str | None) -> Ask:
+    async def _open(self, live: LiveSession, kind: str, request_ref: str, text: str, detail: dict[str, Any], event_ref: str | None, route: str | None = None, risk: str = "routine") -> Ask:
         if request_ref:
             # The same request seen again — a hook the daemon replayed after the host restarted — is
             # the request already open, not a second one for the orchestrator to answer twice.
@@ -1505,7 +1508,7 @@ class Ingress:
             if existing is not None:
                 return existing
         project = await self.team.project(live.staff.project_id)
-        routed = self.team.route(project, kind)
+        routed = route or self.team.route(project, kind)
         ask = await self.manager.asks.open(
             project.id,
             origin="staff",
@@ -1526,7 +1529,9 @@ class Ingress:
             ask = (await self.manager.asks.get(ask.id)) or ask
             common = {"request_id": ask.id, "request_ref": ref, "title": live.staff.name, "telegram": False, "routed_to": routed, "short_id": ask.short_id}
             if kind == "permission":
-                await self.team.publish("permission.pending", {**common, "kind": "staff", "tool": str(detail.get("tool") or ""), "text": text[:300], "risk": "routine", "quick": routed == "operator"}, member=live.staff)
+                # An elevated request (what a browser buys or sends) is answered in the app, never
+                # from a lock screen.
+                await self.team.publish("permission.pending", {**common, "kind": "staff", "tool": str(detail.get("tool") or ""), "text": text[:300], "risk": risk, "quick": routed == "operator" and risk != "elevated"}, member=live.staff)
             else:
                 options = [{"label": o, "description": ""} for o in detail.get("options") or []]
                 await self.team.publish("ask.pending", {**common, "run_id": "", "questions": [{"question": text[:2000], "options": options, "multi": False, "custom": True}], "operator_facing": routed == "operator"}, member=live.staff)
@@ -1534,8 +1539,8 @@ class Ingress:
             await self.team._release_hold(ask)
         return ask
 
-    async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str, *, event_ref: str | None = None) -> str:
-        ask = await self._open(live, "permission", request_ref, f"{tool}: {summary}" if tool else summary, {"tool": tool}, event_ref)
+    async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str, *, event_ref: str | None = None, route: str | None = None, risk: str = "routine") -> str:
+        ask = await self._open(live, "permission", request_ref, f"{tool}: {summary}" if tool else summary, {"tool": tool}, event_ref, route=route, risk=risk)
         await self.status(live, "permission", f"permission [{ask.short_id}]: {tool or summary}")
         return ask.id
 

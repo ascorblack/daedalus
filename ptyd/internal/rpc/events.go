@@ -6,9 +6,9 @@ import (
 	"errors"
 	"os"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 func pidSelf() int { return os.Getpid() }

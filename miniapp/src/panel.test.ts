@@ -26,6 +26,8 @@ import {
   readPanelTab,
   rememberPanelPct,
   rememberPanelTab,
+  routeTabsFor,
+  tabsFor,
   toggleExpanded,
   togglePanel,
 } from "./panel";
@@ -207,5 +209,28 @@ describe("the breadcrumb", () => {
     expect(crumbsOf("reports/menu-check.md")).toEqual(["reports", "menu-check.md"]);
     expect(crumbsOf("/a//b/")).toEqual(["a", "b"]);
     expect(crumbsOf("")).toEqual([]);
+  });
+});
+
+describe("the Browser tab", () => {
+  it("is offered only to a session that has had a browser, after the agent's own tabs", () => {
+    expect(tabsFor("session")).not.toContain("browser");
+    expect(tabsFor("session", { browser: true })).toEqual(["details", "files", "preview", "jobs", "browser"]);
+    expect(tabsFor("member", { browser: true })).toEqual(["details", "files", "preview", "jobs", "browser", "board", "brief", "wakeups", "folders"]);
+    expect(tabsFor("main", { browser: true })).toEqual(["questions", "details", "files", "preview", "jobs", "browser"]);
+    expect(tabsFor("orchestrator", { browser: true })).toEqual(["questions", "browser", "board", "brief", "wakeups", "folders"]);
+  });
+
+  it("opens from a link before the listing says there is a browser", () => {
+    const q = readPanelQuery(new URLSearchParams("panel=browser"), routeTabsFor("session"));
+    expect(q).toEqual({ tab: "browser", path: null });
+    expect(applyPanelQuery(PANEL_CLOSED, q, base).tab).toBe("browser");
+    expect(panelQuery(openTab(PANEL_CLOSED, "browser"))).toEqual({ panel: "browser", path: null, lines: null, tab: null });
+  });
+
+  it("is never where a session opens by itself: the next session may have no browser", () => {
+    const kept = new Map<string, string>([["daedalus.session.panel", "browser"]]);
+    const storage = { getItem: (k: string) => kept.get(k) ?? null };
+    expect(readPanelTab(1440, storage)).toBe("details");
   });
 });

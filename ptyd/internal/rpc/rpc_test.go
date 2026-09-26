@@ -20,14 +20,14 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 type fixture struct {
@@ -84,7 +84,7 @@ func startWith(t *testing.T, emu emulator.Factory) *fixture {
 		Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
 		Clock: term.RealClock{}, Log: log, KillGrace: 200 * time.Millisecond,
 	}, 4)
-	ep, err := server.Prepare(cfg.RunDir, "unix")
+	ep, err := server.Prepare(cfg.RunDir, "unix", "ptyd")
 	if err != nil {
 		t.Fatal(err)
 	}

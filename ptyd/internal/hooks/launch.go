@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
 )
 
 // Errors of the registry.

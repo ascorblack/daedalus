@@ -18,14 +18,14 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
 )
 
 const usage = `usage:
@@ -34,6 +34,7 @@ const usage = `usage:
   ptyd hook-post <name> [--wait-ms N] < body   (inside a launch: post a hook, print the reply)
   ptyd hook <source> [--wait-ms N] < body      (a CLI's command hook: the same, and always exit 0)
   ptyd team-mcp                                (inside a launch: the team tools' MCP server on stdio)
+  ptyd tools-mcp --set <name>                  (inside a launch: a set of Daedalus's tools, from tools/<name>.json)
 
 serve flags:
   --listen unix|tcp:127.0.0.1:<port>   where to listen (default unix: <run-dir>/ptyd.sock)
@@ -67,6 +68,8 @@ func main() {
 		os.Exit(hook(os.Args[2:]))
 	case "team-mcp":
 		os.Exit(teamMCP())
+	case "tools-mcp":
+		os.Exit(toolsMCP(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -118,7 +121,7 @@ func serve(args []string) error {
 	// was started from a terminal when that terminal closes; SIGPIPE is handled per write.
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 
-	ep, err := server.Prepare(cfg.RunDir, cfg.Listen)
+	ep, err := server.Prepare(cfg.RunDir, cfg.Listen, "ptyd")
 	if err != nil {
 		if errors.Is(err, server.ErrHeld) {
 			return err

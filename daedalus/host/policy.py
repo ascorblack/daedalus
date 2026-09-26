@@ -116,13 +116,29 @@ class Decision:
 
 
 SHELL_TOOLS = ("Exec", "Verify", "ServiceStart")
+BROWSER_NAV_TOOLS = ("BrowserOpen", "BrowserNavigate")
+"""The browser tools that take the agent to a URL; the address is judged before the page is asked for."""
+BROWSER_SCHEMES = ("http", "https")
+SENSITIVE_KINDS = ("credentials", "purchase", "send", "destroy", "accept", "upload", "cross_origin_post")
+"""What the browser daemon calls an action that changes the world: ``docs/architecture/browser.md``."""
+NEVER_ALLOWED_KINDS = frozenset({"credentials"})
+"""No operator rule lifts these: typing a sign-in is the operator's, however much the site is trusted."""
+SENSITIVE_WORDS = {
+    "credentials": "submit a sign-in",
+    "purchase": "buy or pay",
+    "send": "send or publish something",
+    "destroy": "delete or cancel something",
+    "accept": "accept terms or consent",
+    "upload": "upload a file",
+    "cross_origin_post": "send a form to another site",
+}
 
 
 def canonical(tool: str, arguments: dict[str, Any]) -> str:
     """The text the rules read: the shell command, the URL, or the arguments as JSON."""
     if tool in SHELL_TOOLS:
         return str(arguments.get("command") or "")
-    if tool in ("WebFetch",):
+    if tool in ("WebFetch", *BROWSER_NAV_TOOLS):
         return str(arguments.get("url") or "")
     return json.dumps(arguments, sort_keys=True, ensure_ascii=False)
 
@@ -746,6 +762,21 @@ class Policy:
             return Decision(ASK, f"fetching {host} is outside the egress allowlist", "egress.allowlist", hosts=hosts)
         return Decision(ALLOW, hosts=hosts)
 
+    def _browser_url(self, url: str) -> Decision:
+        """Where an agent may point the browser. Only web pages: ``file:`` reads the machine, ``data:``
+        and ``blob:`` carry a page past every check of its address (the bypass another browser agent
+        shipped with), and ``javascript:``, ``chrome:`` and ``view-source:`` are the browser's own
+        powers. The network wall in the daemon judges every request again; this is the refusal the
+        agent can read before anything is asked of the page."""
+        text = url.strip()
+        if not text:
+            return Decision(ALLOW)
+        scheme = urlsplit(text).scheme.lower()
+        if scheme not in BROWSER_SCHEMES:
+            what = f"{scheme}: URLs" if scheme else "an address without http:// or https://"
+            return Decision(DENY, f"the browser opens http and https pages only, not {what}", "browser.scheme")
+        return self._web(text)
+
     def _config_rules(self, tool: str, text: str, current: Decision) -> Decision:
         """The operator's rules: a match can raise the severity; an ``allow`` can lower an ``ask`` that came from the
         egress allowlist or from another operator rule, never a built-in safety question and never a ``deny``."""
@@ -772,6 +803,8 @@ class Policy:
             decision = self._shell(text, str(arguments.get("cwd") or "") or None, foreground=tool == "Exec" and not bool(arguments.get("background")))
         elif tool == "WebFetch":
             decision = self._web(text)
+        elif tool in BROWSER_NAV_TOOLS:
+            decision = self._browser_url(text)
         else:
             decision = self._host_paths(argument_paths(arguments)) or Decision(ALLOW)
         decision = self._config_rules(tool, text, decision)
@@ -796,7 +829,9 @@ class Policy:
             ("shell.protected_write", "Exec", DENY, "a redirect, copy, move, link, download, extraction or in-place edit onto a protected path or the operator's checkouts"),
             ("git.force_push", "Exec", ASK, "git push --force without --force-with-lease"),
             ("git.operator_push", "Exec", DENY, "git push from the operator's checkouts"),
-            ("egress.allowlist", "Exec, WebFetch", ASK, "a host outside the egress allowlist (when one is configured)"),
+            ("egress.allowlist", "Exec, WebFetch, BrowserOpen, BrowserNavigate", ASK, "a host outside the egress allowlist (when one is configured)"),
+            ("browser.scheme", "BrowserOpen, BrowserNavigate", DENY, "an address that is not an http or https page: file:, data:, blob:, javascript:, chrome:"),
+            ("browser.sensitive", "BrowserAct", ASK, "an action that changes the world: a sign-in submitted, a purchase, a message sent, a deletion, terms accepted, a file uploaded, a form sent to another site"),
         ]
         if self.native:
             # Only where they can fire. A list that names them in Docker mode would describe a boundary
@@ -810,4 +845,35 @@ class Policy:
         return rows
 
 
-__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "mentions_sealed", "path_operands", "real_path", "real_under", "sealed_root", "shell_assignments", "shell_segments"]
+def browser_sensitive(*, tool: str, group: str, host: str, page_origin: str, kinds: Iterable[str], action: str, name: str, text: str, rules: Iterable[Any] = ()) -> Decision:
+    """The policy's answer to an action the browser daemon classified as sensitive.
+
+    Built in, every such action is asked about. The approval key covers the group, the page's origin,
+    the element's accessible name, the action and a hash of the text typed, so a grant lets exactly
+    that action through once: the same button on another site, or another message in the same box,
+    is a new question. The operator's rules for a site (``[[browser.rules]]``) may refuse the kinds
+    they name there, or let them through; they never let ``credentials`` through.
+    """
+    wanted = sorted({k for k in kinds if k in SENSITIVE_KINDS})
+    if not wanted:
+        return Decision(ALLOW)
+    matching = [r for r in rules if host and host_allowed(host, [str(getattr(r, "domain", ""))])]
+    for rule in matching:
+        named = set(getattr(rule, "kinds", None) or ())
+        if getattr(rule, "action", "") == DENY and (not named or named & set(wanted)):
+            note = str(getattr(rule, "note", "") or "")
+            return Decision(DENY, f"the operator does not let an agent {SENSITIVE_WORDS[wanted[0]]} on {host}" + (f" ({note})" if note else ""), "browser.rule")
+    lifted: set[str] = set()
+    for rule in matching:
+        if getattr(rule, "action", "") == ALLOW:
+            lifted |= set(getattr(rule, "kinds", None) or wanted)
+    remaining = [k for k in wanted if k not in lifted - NEVER_ALLOWED_KINDS]
+    if not remaining:
+        return Decision(ALLOW, f"allowed by the operator's rule for {host}", "browser.rule")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+    key = approval_key(tool, {"group": group, "origin": page_origin, "name": name, "action": action, "text_sha256": digest})
+    words = " and ".join(SENSITIVE_WORDS[k] for k in remaining)
+    return Decision(ASK, f"this would {words} on {host or page_origin}", "browser.sensitive", key=key)
+
+
+__all__ = ["ALLOW", "ASK", "BROWSER_NAV_TOOLS", "DENY", "SENSITIVE_KINDS", "SHELL_TOOLS", "browser_sensitive", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "mentions_sealed", "path_operands", "real_path", "real_under", "sealed_root", "shell_assignments", "shell_segments"]

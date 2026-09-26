@@ -19,9 +19,9 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
-	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan/scantest"
+	"github.com/ascorblack/daedalus/ptyd/proto/events"
 )
 
 // heapInUse is the live heap after a collection.

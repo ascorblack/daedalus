@@ -54,7 +54,7 @@ from daedalus.config import (
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
-from daedalus.extensions import api_files, api_harnesses, api_projects, api_staff
+from daedalus.extensions import api_browsers, api_files, api_harnesses, api_projects, api_staff
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature, webhook_facts
@@ -650,6 +650,10 @@ class SettingsBody(BaseModel):
     """The main orchestrator: its model preset, its wake-up batching, when a dispatch counts as stalled."""
     terminals: dict[str, Any] | None = None
     """``running_cap`` from Settings; the terminals service reads the configuration on every admission."""
+    browser: dict[str, Any] | None = None
+    """Settings → Browser: the cap, the idle close, recording, watch mode, the local network the
+    browser may be let into, the injection monitor. The browser service hands the daemon its part at
+    once (``limits.set``, ``net.configure``)."""
     answer_language: str | None = None
 
 
@@ -1426,6 +1430,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     api_staff.register(api, app, auth)
     # The files orchestration keeps by handle: the cards a chat draws, their bytes, the audit.
     api_files.register(api, app, auth)
+    # The agent's browser: its groups, the live view's ticket and socket, control, the audit.
+    api_browsers.register(api, app, auth)
 
     # -- staff: the named members of a project's team ------------------------------------------
 
@@ -4779,6 +4785,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         # Off the loop: nine probes, two walks of the models tree, four `which` calls and, the first
         # time, a subprocess. Milliseconds, but this is the path every page polls.
         answer["components"] = await asyncio.to_thread(lambda: component_registry().summary())
+        # Whether a browser answers now, beside whether one was configured at startup: the Browser tab
+        # says "the browser service is not running" rather than hiding what the agent could use.
+        browsers = app.extensions.get("browser")
+        answer["browser"]["available"] = any(env["available"] for env in browsers.environments()) if browsers is not None else False  # type: ignore[attr-defined]
         return answer
 
     @api.post("/api/self/restart")

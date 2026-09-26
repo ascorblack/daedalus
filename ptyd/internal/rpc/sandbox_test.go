@@ -15,7 +15,7 @@ import (
 
 	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
-	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // realSandbox is a prober for this machine's bubblewrap, or a skip naming why there is none: the

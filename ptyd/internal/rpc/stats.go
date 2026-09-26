@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
-	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
+	"github.com/ascorblack/daedalus/ptyd/proto/procstat"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
 )
 
 // sample returns a measurement of the running terminals no older than maxAge, taking a new one when

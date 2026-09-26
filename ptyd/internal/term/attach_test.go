@@ -25,6 +25,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	protowire "github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 // sink is a client's side of an attachment: it keeps every frame, and acknowledges or not as the
@@ -675,7 +676,7 @@ func TestTitleAndModesReachClients(t *testing.T) {
 func TestASnapshotTooLargeForAFrameIsSentEmpty(t *testing.T) {
 	h := newAttachHarness(t, nil, nil)
 	term, emu := h.start(t, "huge", 1<<20, "cat")
-	emu.SetSnapshot(bytes.Repeat([]byte("x"), wire.MaxPayload))
+	emu.SetSnapshot(bytes.Repeat([]byte("x"), protowire.MaxPayload))
 	_, s := attachClient(t, term, ClientOptions{}, wire.Attach{})
 	e := s.waitEvent(t, "error", nil)
 	if e["code"] != "snapshot_too_large" {

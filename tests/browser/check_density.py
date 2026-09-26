@@ -170,6 +170,37 @@ def check_sidebar(browser) -> dict:  # type: ignore[no-untyped-def]
     return out
 
 
+def check_browser_preview(browser) -> list[str]:  # type: ignore[no-untyped-def]
+    """The browser's corner preview: a 240 px card inside the conversation's column, never over the
+    panel beside it, at 1440 and 1280 (check_browser_pip.py drives the rest of it)."""
+    from browser_stub import BrowserStub, open_page, render_scenes
+
+    problems: list[str] = []
+    bs = BrowserStub(render_scenes(browser))
+    bs.add("g1", scene="shop", owner_id=S1)
+    for width in (1440, 1280):
+        context = browser.new_context(viewport={"width": width, "height": 900}, color_scheme="dark")
+        page = open_page(context, bs, stub, f"{BASE}/agents/{S1}?panel=details&token=t&lang=en", wait=".bp-pip")
+        page.wait_for_timeout(400)
+        m = page.evaluate("""() => {
+          const r = (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, r: b.right, b: b.bottom, w: b.width }; };
+          const pip = document.querySelector('.bp-pip');
+          return { pip: r(pip), column: r(pip.parentElement), column_is_main: pip.parentElement.classList.contains('chat-main'), panel: r(document.querySelector('.panel')) };
+        }""")
+        print(f"preview-{width}", json.dumps(m))
+        p, c, panel = m["pip"], m["column"], m["panel"]
+        if not m["column_is_main"]:
+            problems.append(f"{width}: the preview is not in the conversation's column")
+        if p["x"] < c["x"] or p["r"] > c["r"] + 0.5 or p["y"] < c["y"]:
+            problems.append(f"{width}: the preview {p} leaves its column {c}")
+        if p["r"] > panel["x"] + 0.5:
+            problems.append(f"{width}: the preview reaches over the panel ({p['r']} > {panel['x']})")
+        if abs(p["w"] - 240) > 1:
+            problems.append(f"{width}: the preview is {p['w']} px, not --pip-w")
+        context.close()
+    return problems
+
+
 def judge(m: dict) -> list[str]:
     problems: list[str] = []
     phone = m["vw"] < 1024
@@ -275,6 +306,7 @@ def run() -> int:
             measured[name] = measure_agents(browser, w, h, mobile)
         if ASSERT:
             measured["sidebar"] = check_sidebar(browser)
+            problems += check_browser_preview(browser)
         browser.close()
     for name, m in measured.items():
         print(name, json.dumps(m))

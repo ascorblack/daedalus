@@ -1,0 +1,12 @@
+<!doctype html><title>Analytics</title>
+<p id="out">Loading…</p>
+<script>
+// The page itself, not the agent, reaches for the installation and the local network.
+const hits = [];
+for (const url of ["http://127.0.0.1:{API}/api/settings", "http://localhost:{API}/api/sessions", "http://169.254.169.254/latest/meta-data/", "http://10.123.45.67/"]) {
+  fetch(url, {mode: "no-cors"}).then(() => hits.push(url), () => {});
+  navigator.sendBeacon && navigator.sendBeacon(url, "stolen");
+}
+const ws = new WebSocket("ws://127.0.0.1:{API}/ws/terminals/x"); ws.onerror = () => {};
+setTimeout(() => { document.getElementById("out").textContent = "done"; }, 1500);
+</script>

@@ -1713,7 +1713,8 @@ def run() -> int:
         shot(page, "usage", "usage", settle=1500)
         shot(page, "memory", "memory")
         # The settings index, because the language switch is its first row.
-        shot(page, "settings", "settings")
+        # Settings is a centred stage of its own now, with no `.screen` to wait for.
+        shot(page, "settings", "settings", wait=".settings-stage")
         shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
         shot(page, "settings-notifications", "settings/notifications", wait=".nmatrix", settle=600)
         shot(page, "settings-terminals", "settings/terminals", wait=".loadbar-track", settle=600)
@@ -1756,11 +1757,129 @@ def run() -> int:
     staff = run_staff()
     harnesses = run_harnesses()
     main = run_main()
-    return run_focus() or notifications or phone or staff or harnesses or main
+    browser = run_browser()
+    return run_focus() or notifications or phone or staff or harnesses or main or browser
+
+
+def run_browser() -> int:
+    """The agent's browser (``ONLY=browser``): the corner preview beside the chat, the Browser tab live
+    with the agent's cursor, the operator driving, and the phone's sheet and takeover."""
+    from api_stub import terminal_load
+    from browser_stub import BrowserStub, browser_load, render_scenes, wait_frames
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        scenes = render_scenes(browser)
+        bs = BrowserStub(scenes)
+        bs.add("g1", scene="shop", owner_id=S1, acting=True)
+        bs.act("g1", "click", "size", name="5 kg", element="the 5 kg size option")
+
+        def page_for(context):  # type: ignore[no-untyped-def]
+            page = context.new_page()
+            page.route("**/api/**", stub)
+            bs.install(page)
+            return page
+
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = page_for(desk)
+        page.goto(f"{BASE}/agents/{S1}?panel=details&token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".bp-pip", timeout=15000)
+        wait_frames(page, ".bp-pip", 1)
+        page.wait_for_timeout(600)
+        bs.act("g1", "click", "add", name="Add to cart", element="the Add to cart button")
+        page.wait_for_timeout(260)
+        page.screenshot(path=str(OUT / "browser-pip.png"))
+        print("wrote browser-pip")
+
+        page.goto(f"{BASE}/agents/{S1}?panel=browser&token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".panel .bp .bv[data-state='live']", timeout=15000)
+        wait_frames(page, ".panel .bp", 1)
+        page.locator(".panel .bp-log-head").click()
+        page.wait_for_timeout(500)
+        bs.act("g1", "type", "search", name="Search", element="the shop's search field", text_len=15, text="whole rye flour")
+        page.wait_for_timeout(280)
+        page.screenshot(path=str(OUT / "session-browser.png"))
+        print("wrote session-browser")
+
+        page.locator(".panel .bp-control.take").click()
+        page.wait_for_selector(".panel .bv.driving", timeout=5000)
+        # Out of the way of every tooltip: the empty foot of the panel's stage.
+        page.mouse.move(1300, 800)
+        page.wait_for_timeout(500)
+        page.screenshot(path=str(OUT / "session-browser-takeover.png"))
+        print("wrote session-browser-takeover")
+        page.locator(".panel .bp-control.give").click()
+        page.locator(".bp-give textarea").fill("Signed in; carry on from the cart." if LANG == "en" else "Я вошёл, продолжай с корзины.")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "session-browser-giveback.png"))
+        print("wrote session-browser-giveback")
+        page.locator(".bp-give button[type='submit']").click()
+        page.wait_for_timeout(300)
+
+        # The recording: a keyframe per action, one of them replayed with its element framed.
+        page.locator(".panel .bp-toolbar button[aria-haspopup='menu']").last.click()
+        page.locator(".menu [role='menuitemcheckbox']").first.click()
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        added = bs.act("g1", "click", "add", name="Add to cart", element="the Add to cart button")
+        bs.act("g1", "click", "size", name="5 kg", element="the 5 kg size option")
+        page.wait_for_selector(f".panel .bp-log-row[data-action='{added['id']}'] .bp-log-frame", timeout=10000)
+        page.locator(f".panel .bp-log-row[data-action='{added['id']}']").click()
+        page.wait_for_selector(".panel .bp-replay .bp-replay-img", timeout=5000)
+        page.mouse.move(1300, 850)
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "session-browser-replay.png"))
+        print("wrote session-browser-replay")
+        page.locator(".panel .bp-replay-live").click()
+
+        # Settings → Browser: what runs, the profiles, the limits on the shared load bar.
+        bs.running = [{"env": "container", "id": "b1a2b3c4", "profile": f"project-{P1}", "started_at": ago(minutes=12), "rss_bytes": 318 << 20, "cpu_percent": 3.1, "tabs": 2,
+                       "memory_basis": "cgroup", "groups": [{"id": "g1", "owner": {"kind": "session", "id": S1, "label": "Bakery site"}, "url": "https://shop.example.com/", "title": "Rye flour"}]}]
+        bs.profiles = [
+            {"id": f"project-{P1}", "env": "container", "scope": "project", "project_id": P1, "session_id": None, "staff_id": None, "created_at": ago(days=6), "last_used_at": ago(minutes=2), "size_bytes": 21 << 20, "running": True},
+            {"id": f"project-{P2}", "env": "container", "scope": "project", "project_id": P2, "session_id": None, "staff_id": None, "created_at": ago(days=4), "last_used_at": ago(days=1), "size_bytes": 9 << 20, "running": False},
+        ]
+        page.route("**/api/workloads/load", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"terminals": terminal_load(), "browsers": browser_load(running=1), "together": None})))
+        page.goto(f"{BASE}/settings/browser?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".bs-running .bs-row", timeout=15000)
+        page.wait_for_selector(".bs-limits .loadbar.workloads", timeout=15000)
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "settings-browser.png"))
+        print("wrote settings-browser")
+        desk.close()
+
+        # The phone: a login the agent cannot do, so the button and the sheet are amber.
+        bs.navigate("g1", "signin")
+        bs.needs_you("g1", "login", "Sign in to accounts.example.com")
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        phone.add_init_script("try { localStorage.setItem('daedalus.browser.announced', JSON.stringify(['g1'])); } catch (e) {}")
+        page = page_for(phone)
+        page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".browser-headbtn", timeout=15000)
+        wait_frames(page, ".browser-headbtn", 1)
+        page.wait_for_timeout(500)
+        page.screenshot(path=str(OUT / "phone-browser-head.png"))
+        print("wrote phone-browser-head")
+        page.locator(".browser-headbtn").tap()
+        page.wait_for_selector(".panel-sheet .bp .bv[data-state='live']", timeout=15000)
+        wait_frames(page, ".panel-sheet .bp", 1)
+        page.wait_for_timeout(600)
+        page.screenshot(path=str(OUT / "phone-browser.png"))
+        print("wrote phone-browser")
+        page.locator(".panel-sheet .bp-control.take").tap()
+        page.wait_for_selector(".bp-drive .bv.driving", timeout=5000)
+        wait_frames(page, ".bp-drive", 1)
+        page.wait_for_timeout(700)
+        page.screenshot(path=str(OUT / "phone-browser-takeover.png"))
+        print("wrote phone-browser-takeover")
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_browser() if only == "browser" else run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

@@ -1,7 +1,7 @@
 # Daedalus runtime image. The agent may edit this file; a change triggers an image rebuild.
 #
-# Four stages. The environment is assembled where a compiler, a Node and a Go are allowed to live,
-# and only the results — the virtualenv, the built Mini App and the terminal daemon — are copied into
+# Five stages. The environment is assembled where a compiler, a Node and a Go are allowed to live,
+# and only the results — the virtualenv, the built Mini App and the two daemons — are copied into
 # the image that ships.
 # The `speech` extra rides in the default image rather than being an opt-in like `browser`: the two
 # wheels together are about fifteen megabytes against Playwright's several hundred, and an installation
@@ -11,8 +11,9 @@
 # here — it drags four hundred and fifty megabytes of video codecs in behind it, to convert a voice clip.
 #
 # Two targets come out of it: `runtime` (the default, and what `:latest` is) and `browser`, which
-# adds Playwright and a headless Chromium shell for the browser skills. They share every layer up
-# to the last one, so having both costs the difference, not twice the image.
+# adds Playwright, the headless Chromium shell the browser skills drive, and the full Chromium the
+# `browser` compose service runs under browserd. They share every layer up to the last one, so
+# having both costs the difference, not twice the image.
 
 FROM ubuntu:24.04 AS base
 
@@ -139,6 +140,33 @@ RUN export PKG_CONFIG_PATH="$(cat /opt/libghostty.pkgconfig)" \
     && if [ "$cc" = gcc ]; then /out/ptyd version; fi
 
 
+# -- the browser daemon -----------------------------------------------------------------------
+# browserd owns the agent's browsers (docs/architecture/browser.md). It is plain Go with no C in it,
+# so it cross-compiles for the image's architecture with nothing but the Go toolchain. It builds
+# against ptyd's shared packages through a replace directive, so the daemon's own module and
+# ptyd/proto both come in; ptyd's emulator and its library do not, and a change to them does not
+# rebuild this stage.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS browserd
+ARG TARGETARCH
+
+WORKDIR /src/browserd
+COPY ptyd/go.mod ptyd/go.sum /src/ptyd/
+COPY browserd/go.mod browserd/go.sum ./
+RUN go mod download
+COPY ptyd/proto /src/ptyd/proto
+COPY browserd ./
+# The version is a digest of what the binary is built from: its own sources, ptyd's shared packages
+# and the module files. The host compares it with the running daemon's, and the digest differs
+# exactly when the daemon changed, so a rebuild of the agent for any other reason never offers to
+# end every browser for nothing. browserd/release.sh computes the same digest over a checkout, so a
+# release's daemon and an image's of the same sources report one version.
+RUN digest="$(cd /src && find browserd ptyd/proto ptyd/go.mod ptyd/go.sum -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)" \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -trimpath \
+        -ldflags "-s -w -X github.com/ascorblack/daedalus/browserd/internal/version.Version=src-$digest" \
+        -o /out/browserd ./cmd/browserd \
+    && if [ "$TARGETARCH" = "$(go env GOHOSTARCH)" ]; then /out/browserd version; fi
+
+
 # -- what ships -------------------------------------------------------------------------------
 FROM base AS runtime
 
@@ -147,6 +175,14 @@ COPY --from=miniapp /build/miniapp/dist /opt/miniapp-dist
 # The terminals service runs this as its entrypoint. The agent's container carries it too, and only
 # asks it its version: that is how the host knows a newer daemon is in the image than the one running.
 COPY --from=ptyd /out/ptyd /usr/local/bin/ptyd
+# The same for the browser daemon: the `browser` service runs it, and the agent asks the copy in its
+# own image for its version to know when the running one is older.
+COPY --from=browserd /out/browserd /usr/local/bin/browserd
+# The run directory the agent and the browser service share (the browser-run volume), owned by the
+# browser's user. Docker seeds an empty named volume from the first container that mounts it, and
+# that may be the agent's: made here, the volume starts owned by the user browserd runs as, whichever
+# container comes first. Root in the agent's container reads it all the same.
+RUN install -d -m 0700 -o 1001 -g 1001 /run/daedalus-browser
 # The bot and the core are mounted, not installed: pointing the interpreter at the mounted checkouts
 # is what an editable install would have written anyway, and it needs no sync at the first start.
 RUN printf '%s\n' /srv/daedalus /srv/protocore-exp > /srv/venv/lib/python3.12/site-packages/_daedalus_checkouts.pth
@@ -174,9 +210,15 @@ ENTRYPOINT ["python3", "/opt/launcher/supervisor.py"]
 
 
 # -- the browser variant ----------------------------------------------------------------------
-# `:browser` = the image above plus Playwright and the headless Chromium shell (not the full
-# Chromium build, which is half again as large and drags a GPU stack in with it). The browser lives
-# outside the virtualenv so a re-sync of the environment never re-downloads it.
+# `:browser` = the image above plus Playwright and two builds of Chromium, both Playwright's pinned
+# ones, fetched by one `playwright install chromium`:
+#   - the headless shell, which the browser skills drive: Playwright's `launch(headless=True)` looks
+#     for exactly that build, and with only the full one installed it fails (measured, 1.62);
+#   - the full Chromium, which browserd runs in the `browser` compose service with --headless=new.
+#     The shell is Chromium's //content without the browser around it; the screencast, the
+#     accessibility tree and trusted input the agent's browser rests on were measured on the full
+#     build, and the full build is what a site sees as Chrome.
+# The browsers live outside the virtualenv so a re-sync of the environment never re-downloads them.
 FROM runtime AS browser
 
 ENV DAEDALUS_VENV_EXTRAS=speech,browser
@@ -187,9 +229,16 @@ RUN apt-get update \
     && grep -v '^#' /tmp/apt-packages-browser.txt | xargs apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man \
     && uv pip install --python /srv/venv/bin/python --no-cache --requirements /tmp/requirements-browser.txt \
-    && playwright install chromium-headless-shell \
+    && playwright install chromium \
     && rm -rf /root/.cache \
     && shell="$(find /opt/pw-browsers -type f \( -name chrome-headless-shell -o -name headless_shell \) | head -1)" \
     && test -n "$shell" \
-    && ln -s "$shell" /usr/local/bin/chromium
+    && ln -s "$shell" /usr/local/bin/chromium \
+    && test -n "$(find /opt/pw-browsers -path '*/chromium-*/chrome-linux*/chrome' -type f | head -1)"
 ENV CHROME_PATH=/usr/local/bin/chromium
+# The user the `browser` service runs browserd and Chromium as. Chromium's own sandbox gives every
+# renderer a user namespace of its own, which it can make as an ordinary user once the container's
+# seccomp profile allows it (deploy/compose.yaml) — no added capability, and never --no-sandbox as
+# root. Its home and state directory are made here so a fresh volume is seeded with the right owner.
+RUN useradd --uid 1001 --user-group --home-dir /var/lib/browserd --no-create-home --shell /usr/sbin/nologin browser \
+    && install -d -m 0700 -o browser -g browser /var/lib/browserd

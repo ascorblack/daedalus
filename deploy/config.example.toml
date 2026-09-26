@@ -198,6 +198,22 @@ stale_hours = 6            # a 'doing' task whose session went quiet this long i
 # shell = ""                   # empty = the environment's login shell
 # agent_reads_host = false     # whether a session's agent may read the host terminals of its own session
 
+[browser]
+# env = "auto"                 # where an agent's browser runs: the browser service, or the operator's machine natively
+# running_cap = 2              # browsers at once per environment, as the browser daemon's own limit says
+# agent_wait_seconds = 60      # how long an agent's BrowserOpen waits in line when every browser is busy
+# control_wait_seconds = 20    # how long an agent's call waits for you to hand the browser back
+# ticket_ttl_seconds = 30
+# audit_retention_days = 90
+# closed_retention_hours = 72
+#
+# Sensitive actions (a purchase, a message sent, a deletion, a file uploaded, …) are asked about. A rule
+# per site can refuse them there, or let some kinds through; nothing lets the agent type a sign-in.
+# [[browser.rules]]
+# domain = "shop.example.com"
+# kinds = ["purchase"]
+# action = "deny"
+
 [harness]
 # no_signal_after_s = 300          # a working CLI staff member silent this long has its screen checked
 # ready_timeout_s = 30             # a launched CLI that has not said it is ready by then is shown as failed

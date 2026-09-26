@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ascorblack/daedalus/ptyd/internal/server"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/proto/server"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
 )
 
 // The test binary doubles as the daemon: run with this variable set, it is `ptyd` itself. That tests
@@ -161,7 +161,7 @@ func TestServeEndToEnd(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("the daemon did not stop on SIGTERM")
 	}
-	for _, f := range []string{server.EndpointFile, server.TokenFile, server.SocketFile} {
+	for _, f := range []string{server.EndpointFile, server.TokenFile, server.SocketName("ptyd")} {
 		if _, err := os.Stat(filepath.Join(run, f)); !os.IsNotExist(err) {
 			t.Errorf("%s left after shutdown", f)
 		}

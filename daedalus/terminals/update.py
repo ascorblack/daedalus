@@ -1,4 +1,5 @@
-"""Updating the container's terminal daemon, which only the operator does, knowing what it ends.
+"""Updating a container's daemon — the terminals' or the browser's — which only the operator does,
+knowing what it ends.
 
 The ``terminals`` compose service runs ``ptyd`` from the same image as this container, but it is never
 recreated by a deploy: that is the point of it being a service apart, since recreating it ends every
@@ -27,15 +28,16 @@ IMAGE_BINARY = Path("/usr/local/bin/ptyd")
 """Where the image puts the daemon (``deploy/Dockerfile``). Absent natively and in a checkout."""
 
 REQUEST_FILE = "terminals-request"
-"""The rebuilder takes this file, recreates the service and writes ``terminals-<job>.result``."""
+"""The rebuilder takes this file, recreates the service and writes ``terminals-<job>.result``; the
+browser's are ``browser-request`` and ``browser-<job>.result``."""
 
 BY_HAND = "docker compose -f deploy/compose.yaml --env-file .env up -d terminals"
 """What the operator runs on the server when no rebuilder is there to do it."""
 
 
-async def daemon_version(binary: Path, *, timeout: float = 5.0) -> str:
-    """The version ``binary version`` reports (``ptyd <version> (protocol <n>)``), or "" when there is
-    no such binary or it does not answer: then nothing is offered, which is the safe reading."""
+async def daemon_version(binary: Path, *, program: str = "ptyd", timeout: float = 5.0) -> str:
+    """The version ``binary version`` reports (``ptyd <version> (protocol <n>)``, ``browserd …``), or ""
+    when there is no such binary or it does not answer: then nothing is offered, the safe reading."""
     if not binary.is_file():
         return ""
     try:
@@ -51,23 +53,28 @@ async def daemon_version(binary: Path, *, timeout: float = 5.0) -> str:
         await proc.wait()
         return ""
     words = out.decode("utf-8", "replace").split()
-    if proc.returncode != 0 or len(words) < 2 or words[0] != "ptyd":
+    if proc.returncode != 0 or len(words) < 2 or words[0] != program:
         return ""
     return words[1]
 
 
 class DaemonUpdate:
-    """The container environment's daemon as the image holds it, and the way to ask for it."""
+    """The container environment's daemon as the image holds it, and the way to ask for it.
 
-    def __init__(self, trigger_dir: Path | None, *, binary: Path = IMAGE_BINARY, clock: Callable[[], float] = time.time) -> None:
+    ``service`` names the compose service and the rebuilder's files (``<service>-request``,
+    ``<service>-<job>.result``); ``program`` is the word the daemon's ``version`` starts with."""
+
+    def __init__(self, trigger_dir: Path | None, *, binary: Path = IMAGE_BINARY, service: str = "terminals", program: str = "ptyd", clock: Callable[[], float] = time.time) -> None:
         self.trigger_dir = trigger_dir
         self.binary = binary
+        self.service = service
+        self.program = program
         self.image_version = ""
         self._clock = clock
 
     async def probe(self) -> str:
         """Read the image's version once. The image does not change under a running container."""
-        self.image_version = await daemon_version(self.binary)
+        self.image_version = await daemon_version(self.binary, program=self.program)
         return self.image_version
 
     def rebuilder_alive(self) -> bool:
@@ -86,9 +93,10 @@ class DaemonUpdate:
         renamed, so the rebuilder never reads half an id."""
         assert self.trigger_dir is not None
         job = secrets.token_hex(16)
-        pending = self.trigger_dir / f"{REQUEST_FILE}.pending"
+        request = f"{self.service}-request"
+        pending = self.trigger_dir / f"{request}.pending"
         pending.write_text(job + "\n", encoding="utf-8")
-        os.replace(pending, self.trigger_dir / REQUEST_FILE)
+        os.replace(pending, self.trigger_dir / request)
         return job
 
     def result(self, job: str) -> dict[str, str]:
@@ -97,7 +105,7 @@ class DaemonUpdate:
         if self.trigger_dir is None:
             return {"state": "pending", "detail": ""}
         try:
-            line = (self.trigger_dir / f"terminals-{job}.result").read_text(encoding="utf-8").strip()
+            line = (self.trigger_dir / f"{self.service}-{job}.result").read_text(encoding="utf-8").strip()
         except OSError:
             return {"state": "pending", "detail": ""}
         return {"state": "completed" if line == "completed" else "failed", "detail": "" if line == "completed" else line}

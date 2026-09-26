@@ -42,7 +42,7 @@ MAIN = "main"
 """The main orchestrator's scope; every other scope is a project's id."""
 HANDLE_RE = re.compile(r"\batt:([0-9a-f]{12})\b")
 _BARE_RE = re.compile(r"^[0-9a-f]{12}$")
-ORIGINS = ("operator", "staff", "orchestrator", "folder", "dispatcher")
+ORIGINS = ("operator", "staff", "orchestrator", "folder", "dispatcher", "browser")
 ACTIONS = ("attached", "shared", "delivered", "fetched", "imported", "refused")
 
 

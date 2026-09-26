@@ -43,3 +43,8 @@ deploy/dependencies/local.pending
 ptyd/ptyd
 ptyd/.cache/
 ptyd/*.test
+
+# the browser daemon, when built in place, and its module cache
+browserd/browserd
+browserd/.cache/
+browserd/*.test

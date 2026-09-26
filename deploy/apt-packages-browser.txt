@@ -1,18 +1,22 @@
-# The shared libraries the headless Chromium shell links against, and a font to draw with. This is
-# the list playwright's own `install --with-deps` would install minus everything only a headful
-# browser uses: no GTK, no X server libraries beyond the ones the binary names, no CJK font set.
-# libgbm1 brings mesa and LLVM with it (~190 MB) and cannot be left out: the shell links libgbm.so.1.
+# The shared libraries the two Chromium builds link against, and a font to draw with. This is the
+# list playwright's own `install --with-deps` would install minus everything only a headful browser
+# uses: no GTK, no X server libraries beyond the ones the binaries name, no CJK font set. The full
+# build links three the headless shell does not (cups, cairo, pango), about 4 MB.
+# libgbm1 brings mesa and LLVM with it (~190 MB) and cannot be left out: both link libgbm.so.1.
 fonts-liberation
 libasound2t64
 libatk-bridge2.0-0t64
 libatk1.0-0t64
 libatspi2.0-0t64
+libcairo2
+libcups2t64
 libdbus-1-3
 libexpat1
 libgbm1
 libglib2.0-0t64
 libnspr4
 libnss3
+libpango-1.0-0
 libudev1
 libx11-6
 libxcb1

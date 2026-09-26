@@ -1,0 +1,287 @@
+{
+ "note": "Golden frames of the browser view, the frames a live view of a browser carries between browserd, the host's relay and the app. Written independently of the Go and TypeScript codecs (Python struct, big-endian; JSON compact with keys in the order shown). The daemon's copy (browserd/internal/wire/testdata/frames.json) and the app's (miniapp/src/browser/testdata/frames.json) must be byte-identical; a host test checks it.",
+ "frames": [
+  {
+   "name": "frame-live",
+   "direction": "server",
+   "hex": "2100000001008c7b22746162223a227431222c2274696572223a226c697665222c2277223a313238302c2268223a3830302c227677223a313238302c227668223a3830302c227363726f6c6c5f78223a302c227363726f6c6c5f79223a313435302c226f66667365745f746f70223a302c22706167655f7363616c65223a312c227473223a313739303433303135303732377dffd8ffe000104a46494600010100000100010000ffd9",
+   "value": {
+    "kind": "frame",
+    "frame_no": 1,
+    "meta": {
+     "tab": "t1",
+     "tier": "live",
+     "w": 1280,
+     "h": 800,
+     "vw": 1280,
+     "vh": 800,
+     "scroll_x": 0,
+     "scroll_y": 1450,
+     "offset_top": 0,
+     "page_scale": 1,
+     "ts": 1790430150727
+    },
+    "image_hex": "ffd8ffe000104a46494600010100000100010000ffd9"
+   }
+  },
+  {
+   "name": "frame-thumb-large-no",
+   "direction": "server",
+   "hex": "21ffffffff00897b22746162223a227432222c2274696572223a227468756d62222c2277223a3332302c2268223a3230302c227677223a313238302c227668223a3830302c227363726f6c6c5f78223a302c227363726f6c6c5f79223a302c226f66667365745f746f70223a302c22706167655f7363616c65223a312c227473223a313739303433303135313030307dffd8ffe000104a46494600010100000100010000ffd9",
+   "value": {
+    "kind": "frame",
+    "frame_no": 4294967295,
+    "meta": {
+     "tab": "t2",
+     "tier": "thumb",
+     "w": 320,
+     "h": 200,
+     "vw": 1280,
+     "vh": 800,
+     "scroll_x": 0,
+     "scroll_y": 0,
+     "offset_top": 0,
+     "page_scale": 1,
+     "ts": 1790430151000
+    },
+    "image_hex": "ffd8ffe000104a46494600010100000100010000ffd9"
+   }
+  },
+  {
+   "name": "event-action",
+   "direction": "server",
+   "hex": "227b2274797065223a22616374696f6e222c226964223a226137222c2267726f7570223a226731222c22746162223a227431222c226163746f72223a226167656e74222c226b696e64223a22636c69636b222c22706f696e74223a7b2278223a3634302e352c2279223a3231327d2c22626f78223a7b2278223a3630302c2279223a3230302c2277223a38312c2268223a32347d2c226e616d65223a2241646420746f2063617274222c22656c656d656e74223a227468652041646420746f206361727420627574746f6e222c226174223a313739303433303135303730307d",
+   "value": {
+    "kind": "event",
+    "event": {
+     "type": "action",
+     "id": "a7",
+     "group": "g1",
+     "tab": "t1",
+     "actor": "agent",
+     "kind": "click",
+     "point": {
+      "x": 640.5,
+      "y": 212
+     },
+     "box": {
+      "x": 600,
+      "y": 200,
+      "w": 81,
+      "h": 24
+     },
+     "name": "Add to cart",
+     "element": "the Add to cart button",
+     "at": 1790430150700
+    }
+   }
+  },
+  {
+   "name": "event-control",
+   "direction": "server",
+   "hex": "227b2274797065223a22636f6e74726f6c222c2267726f7570223a226731222c226f776e6572223a2268756d616e222c22686f6c646572223a22796f75222c22756e74696c223a313739303433323030303030302c22726561736f6e223a22227d",
+   "value": {
+    "kind": "event",
+    "event": {
+     "type": "control",
+     "group": "g1",
+     "owner": "human",
+     "holder": "you",
+     "until": 1790432000000,
+     "reason": ""
+    }
+   }
+  },
+  {
+   "name": "event-viewers-utf8",
+   "direction": "server",
+   "hex": "227b2274797065223a2276696577657273222c22636f756e74223a322c226f7468657273223a5b7b226964223a226332222c226b696e64223a22766965776572222c226c6162656c223a22d182d0b5d0bbd0b5d184d0bed0bd227d5d7d",
+   "value": {
+    "kind": "event",
+    "event": {
+     "type": "viewers",
+     "count": 2,
+     "others": [
+      {
+       "id": "c2",
+       "kind": "viewer",
+       "label": "телефон"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "attach",
+   "direction": "client",
+   "hex": "307b2274696572223a226c697665222c22746162223a227431222c226d61785f77223a313630302c226d61785f68223a313030302c22647072223a322c227175616c697479223a36307d",
+   "value": {
+    "kind": "attach",
+    "attach": {
+     "tier": "live",
+     "tab": "t1",
+     "max_w": 1600,
+     "max_h": 1000,
+     "dpr": 2,
+     "quality": 60
+    }
+   }
+  },
+  {
+   "name": "ack",
+   "direction": "client",
+   "hex": "310012d687",
+   "value": {
+    "kind": "ack",
+    "frame_no": 1234567
+   }
+  },
+  {
+   "name": "view",
+   "direction": "client",
+   "hex": "327b2274696572223a227468756d62222c22746162223a227432222c226d61785f77223a3332302c226d61785f68223a3230307d",
+   "value": {
+    "kind": "view",
+    "view": {
+     "tier": "thumb",
+     "tab": "t2",
+     "max_w": 320,
+     "max_h": 200
+    }
+   }
+  },
+  {
+   "name": "input-mouse",
+   "direction": "client",
+   "hex": "337b2274223a226d6f757365222c2274797065223a22646f776e222c2278223a3331312e352c2279223a39302c22627574746f6e223a226c656674222c22636c69636b73223a312c226d6f6473223a307d",
+   "value": {
+    "kind": "input",
+    "input": {
+     "t": "mouse",
+     "type": "down",
+     "x": 311.5,
+     "y": 90,
+     "button": "left",
+     "clicks": 1,
+     "mods": 0
+    }
+   }
+  },
+  {
+   "name": "input-wheel",
+   "direction": "client",
+   "hex": "337b2274223a22776865656c222c2278223a3634302c2279223a3430302c226478223a302c226479223a3132302c226d6f6473223a307d",
+   "value": {
+    "kind": "input",
+    "input": {
+     "t": "wheel",
+     "x": 640,
+     "y": 400,
+     "dx": 0,
+     "dy": 120,
+     "mods": 0
+    }
+   }
+  },
+  {
+   "name": "input-key",
+   "direction": "client",
+   "hex": "337b2274223a226b6579222c2274797065223a22646f776e222c226b6579223a2261222c22636f6465223a224b657941222c226b65795f636f6465223a36352c2274657874223a2261222c226d6f6473223a327d",
+   "value": {
+    "kind": "input",
+    "input": {
+     "t": "key",
+     "type": "down",
+     "key": "a",
+     "code": "KeyA",
+     "key_code": 65,
+     "text": "a",
+     "mods": 2
+    }
+   }
+  },
+  {
+   "name": "input-text-utf8",
+   "direction": "client",
+   "hex": "337b2274223a2274657874222c2274657874223a22d0bfd180d0b8d0b2d0b5d1822c20d0bcd0b8d18020e29c93227d",
+   "value": {
+    "kind": "input",
+    "input": {
+     "t": "text",
+     "text": "привет, мир ✓"
+    }
+   }
+  },
+  {
+   "name": "input-nav",
+   "direction": "client",
+   "hex": "337b2274223a226e6176222c22616374696f6e223a2275726c222c2275726c223a2268747470733a2f2f6578616d706c652e636f6d2f227d",
+   "value": {
+    "kind": "input",
+    "input": {
+     "t": "nav",
+     "action": "url",
+     "url": "https://example.com/"
+    }
+   }
+  }
+ ],
+ "malformed": [
+  {
+   "name": "empty",
+   "hex": ""
+  },
+  {
+   "name": "unknown-type",
+   "hex": "7f00"
+  },
+  {
+   "name": "terminal-frame-type",
+   "hex": "010000000000000000"
+  },
+  {
+   "name": "short-frame-header",
+   "hex": "210000000100"
+  },
+  {
+   "name": "frame-no-zero",
+   "hex": "2100000000008c7b22746162223a227431222c2274696572223a226c697665222c2277223a313238302c2268223a3830302c227677223a313238302c227668223a3830302c227363726f6c6c5f78223a302c227363726f6c6c5f79223a313435302c226f66667365745f746f70223a302c22706167655f7363616c65223a312c227473223a313739303433303135303732377dffd8ffe000104a46494600010100000100010000ffd9"
+  },
+  {
+   "name": "meta-longer-than-frame",
+   "hex": "210000000100c87b7d"
+  },
+  {
+   "name": "meta-not-an-object",
+   "hex": "210000000100025b5dffd8ffe000104a46494600010100000100010000ffd9"
+  },
+  {
+   "name": "frame-without-image",
+   "hex": "2100000001008c7b22746162223a227431222c2274696572223a226c697665222c2277223a313238302c2268223a3830302c227677223a313238302c227668223a3830302c227363726f6c6c5f78223a302c227363726f6c6c5f79223a313435302c226f66667365745f746f70223a302c22706167655f7363616c65223a312c227473223a313739303433303135303732377d"
+  },
+  {
+   "name": "event-not-json",
+   "hex": "227b6e6f"
+  },
+  {
+   "name": "event-no-type",
+   "hex": "227b22636f756e74223a317d"
+  },
+  {
+   "name": "ack-short",
+   "hex": "31000001"
+  },
+  {
+   "name": "ack-long",
+   "hex": "310000000109"
+  },
+  {
+   "name": "attach-not-object",
+   "hex": "305b315d"
+  },
+  {
+   "name": "input-no-t",
+   "hex": "337b2278223a317d"
+  }
+ ]
+}

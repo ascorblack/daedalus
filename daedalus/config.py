@@ -265,6 +265,13 @@ class Settings(BaseSettings):
     terminals_port_range: str = "8120-8139"
     """Ports a server started in a container terminal is published on; the compose file publishes the
     same range from the terminals service. The agent's own services use ``services_port_range``."""
+    browser_container_dir: Path | None = None
+    """The run directory of the browser daemon of the ``container`` environment (a volume this
+    container shares with the ``browser`` compose service): its endpoint, its token and its socket.
+    Unset = no container browser; an empty directory = the service is not running."""
+    browser_host_dir: Path | None = None
+    """The same for the ``host`` environment: natively, a directory the launcher gives the browser
+    daemon it starts beside the agent."""
 
     usd_per_day: float = 20.0
     """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
@@ -359,12 +366,15 @@ class Settings(BaseSettings):
     def sealed_everywhere(self) -> tuple[Path, ...]:
         """The part of the sealed set a command may not name even inside a container.
 
-        The terminal daemons' run directories. Their token opens a shell — on the host environment,
-        a shell on the operator's own machine, outside every wall the agent's container is — so
-        unlike the rest of the sealed set, a container is no boundary for it: the directory is
-        mounted into this container precisely so the app can reach the daemon.
+        The terminal daemons' and the browser daemons' run directories. A terminal daemon's token
+        opens a shell — on the host environment, a shell on the operator's own machine, outside every
+        wall the agent's container is. A browser daemon's token drives browsers holding the logins
+        made in them, with none of the policy's confirmations, and reads what any of them shows. So
+        unlike the rest of the sealed set, a container is no boundary for them: the directories are
+        mounted into this container precisely so the app can reach the daemons.
         """
-        return tuple(p for p in (self.terminals_container_dir, self.terminals_host_dir) if p is not None)
+        dirs = (self.terminals_container_dir, self.terminals_host_dir, self.browser_container_dir, self.browser_host_dir)
+        return tuple(p for p in dirs if p is not None)
 
     @property
     def skills_dir(self) -> Path:
@@ -1411,6 +1421,84 @@ class TerminalsConfig(BaseModel):
     model — a password prompt's surroundings, another project's secrets."""
 
 
+class BrowserRuleConfig(BaseModel):
+    """An operator's rule about sensitive browser actions on one site: ``allow`` lets the kinds named
+    through without asking, ``deny`` refuses them, ``ask`` asks where nothing else would."""
+
+    domain: str = Field(min_length=1, max_length=253)
+    """A host (``shop.example.com``) or every host under one (``*.example.com``)."""
+    kinds: list[Literal["credentials", "purchase", "send", "destroy", "accept", "upload", "cross_origin_post"]] = Field(default_factory=list)
+    """Empty = every kind."""
+    action: Literal["allow", "ask", "deny"] = "deny"
+    note: str = ""
+
+
+class BrowserConfig(BaseModel):
+    """The agent's browser: Chromium run by a browser daemon per environment."""
+
+    env: Literal["auto", "container", "host"] = "auto"
+    """Where an agent's browser runs: ``auto`` is the container's browser service where there is one
+    and the operator's machine otherwise (a native installation)."""
+    running_cap: int = Field(default=2, ge=1, le=32)
+    """Browsers that may run at once in one environment. The host gives it to each daemon on every
+    connection and whenever it changes, so it is the daemon's own limit; the load bar projects it."""
+    idle_close_minutes: int = Field(default=10, ge=0, le=24 * 60)
+    """A browser with no agent call, no person's input and nobody watching for this long is closed;
+    its profile, and so its logins, stay on disk. 0 = never."""
+    agent_wait_seconds: float = Field(default=60.0, ge=0, le=600)
+    """How long an agent's BrowserOpen waits in line when every browser is busy before it gives up."""
+    control_wait_seconds: float = Field(default=20.0, ge=0, le=60)
+    """How long an agent's call waits for a person who holds the browser to give it back."""
+    ticket_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    audit_retention_days: int = Field(default=90, ge=1)
+    closed_retention_hours: int = Field(default=72, ge=1)
+    """How long a closed group's row stays listed."""
+    lan_allow: list[str] = Field(default_factory=list)
+    """Addresses or prefixes on the local network the browser may reach after the operator's yes
+    (the network wall asks about each; it never lets metadata addresses through)."""
+    rules: list[BrowserRuleConfig] = Field(default_factory=list)
+    """The operator's rules about sensitive actions by site. A rule never allows ``credentials``:
+    typing into a sign-in is the operator's, however the site is trusted."""
+    record_frames: bool = False
+    """Whether a new browser records keyframes (one after every action, one every few seconds while
+    the page changes) for the action log's replay. Each browser can be switched from its panel; the
+    agent cannot switch it. The action log itself is always kept."""
+    record_takeover: bool = False
+    """Whether a recording goes on while the operator drives. Off: what a person does in the browser
+    is not pictured, as what they type is never recorded."""
+    record_retention_days: int = Field(default=7, ge=1, le=365)
+    record_max_mb: int = Field(default=500, ge=10, le=100_000)
+    """All the recorded keyframes of one environment together; past it the oldest go first."""
+    watch_mode: bool = False
+    """Watch mode: on the sites in ``watch_domains`` the agent acts only while the operator has the
+    browser open and in view. Off by default; the list is there to switch on."""
+    watch_domains: list[str] = Field(
+        default_factory=lambda: [
+            "mail.google.com",
+            "outlook.live.com",
+            "outlook.office.com",
+            "*.mail.yahoo.com",
+            "mail.yandex.ru",
+            "e.mail.ru",
+            "*.paypal.com",
+            "online.sberbank.ru",
+            "*.tbank.ru",
+            "*.gosuslugi.ru",
+            "*.gov.uk",
+            "*.irs.gov",
+        ],
+        max_length=200,
+    )
+    """Hosts (``mail.example.com``) or everything under a domain (``*.example.com``) watch mode covers."""
+    injection_monitor: bool = False
+    """A small model reads the text of every page the agent opens on a site new to its session, before
+    the agent does, and pauses the browser and asks the operator when the page looks like it is
+    talking to the agent. Off by default: it costs a model call per new site."""
+    injection_monitor_preset: str = ""
+    """The model preset the monitor asks; empty = a middle one of the table (the weaker of two), which
+    is what reading one page for one word needs."""
+
+
 class HeartbeatConfig(BaseModel):
     """A periodic unattended check driven by the HEARTBEAT.md file on the state volume."""
 
@@ -1540,6 +1628,7 @@ class RuntimeConfig(BaseModel):
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

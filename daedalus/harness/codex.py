@@ -255,13 +255,21 @@ class CodexAdapter:
             "tool_timeout_sec": max(spec.ask_hold_ms, spec.report_hold_ms) // 1000 + TIMEOUT_SLACK_S,
             "default_tools_approval_mode": "approve",
         }
+        sets: list[str] = []
+        for tools in spec.tool_sets:
+            # The launch directory is passed through too: the set's tools are read from a file there.
+            # No approval mode is set: whether Codex asks before one of them is its own policy's call,
+            # and the host asks the operator about what is sensitive in any case.
+            entry = {"command": "sh", "args": ["-c", tools.command()], "env_vars": [*TEAM_ENV, "DAEDALUS_LAUNCH_DIR"], "env": {"DAEDALUS_TOOLS_HOLD_MS": str(tools.hold_ms)}, "tool_timeout_sec": tools.hold_ms // 1000 + TIMEOUT_SLACK_S}
+            sets += ["-c", f"mcp_servers.{tools.server}={_toml(entry)}"]
         server = (
             "codex", "app-server", "--listen", socket,
             "-c", f"mcp_servers.daedalus_team={_toml(team)}",
+            *sets,
             "-c", f"projects.{_toml(spec.cwd)}.trust_level=\"trusted\"",
             "-c", "check_for_update_on_startup=false",
         )
-        files: dict[str, bytes] = {}
+        files: dict[str, bytes] = {tools.path: tools.file for tools in spec.tool_sets}
         if spec.team_skill:
             files[SKILL_FILE] = spec.team_skill.encode()
         argv = ("sh", "-c", WAIT_THEN_ATTACH, "codex-tui", f"{LAUNCH_DIR}/{THREAD_FILE}", socket, *TUI_SETTINGS)

@@ -14,9 +14,10 @@ import (
 	"time"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/basic"
-	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
+	"github.com/ascorblack/daedalus/ptyd/proto/server/clienttest"
+	protowire "github.com/ascorblack/daedalus/ptyd/proto/wire"
 )
 
 type attached struct {
@@ -25,7 +26,7 @@ type attached struct {
 }
 
 // nextFrame reads the next frame of channel ch, skipping other channels' frames.
-func nextFrame(t *testing.T, c *clienttest.Client, ch uint32) wire.Frame {
+func nextFrame(t *testing.T, c *clienttest.Client, ch uint32) protowire.Frame {
 	t.Helper()
 	deadline := time.After(10 * time.Second)
 	for {
@@ -112,7 +113,7 @@ func TestAttachOverTheSocket(t *testing.T) {
 	if len(info.Clients) != 0 || info.LastDetachAt == nil {
 		t.Fatalf("after detach %+v", info)
 	}
-	if e := f.callErr("terminal.detach", map[string]any{"channel": a.Channel}); e == nil || e.Code != wire.CodeNotFound {
+	if e := f.callErr("terminal.detach", map[string]any{"channel": a.Channel}); e == nil || e.Code != protowire.CodeNotFound {
 		t.Fatalf("detaching twice: %v", e)
 	}
 }
@@ -162,13 +163,13 @@ func TestAttachAndKeyboardValidation(t *testing.T) {
 		params map[string]any
 		code   int
 	}{
-		{"terminal.attach", map[string]any{"id": "nope", "client": map[string]any{}}, wire.CodeNotFound},
-		{"terminal.attach", map[string]any{"id": "val", "client": map[string]any{"kind": "robot"}}, wire.CodeInvalidParams},
-		{"terminal.attach", map[string]any{"id": "val", "client": map[string]any{"colour": "red"}}, wire.CodeInvalidParams},
-		{"terminal.detach", map[string]any{"channel": 99}, wire.CodeNotFound},
-		{"terminal.keyboard", map[string]any{"id": "val", "owner": "cat"}, wire.CodeInvalidParams},
-		{"terminal.keyboard", map[string]any{"id": "val", "owner": "human", "ttl_ms": -1}, wire.CodeInvalidParams},
-		{"terminal.keyboard", map[string]any{"id": "nope", "owner": "human"}, wire.CodeNotFound},
+		{"terminal.attach", map[string]any{"id": "nope", "client": map[string]any{}}, protowire.CodeNotFound},
+		{"terminal.attach", map[string]any{"id": "val", "client": map[string]any{"kind": "robot"}}, protowire.CodeInvalidParams},
+		{"terminal.attach", map[string]any{"id": "val", "client": map[string]any{"colour": "red"}}, protowire.CodeInvalidParams},
+		{"terminal.detach", map[string]any{"channel": 99}, protowire.CodeNotFound},
+		{"terminal.keyboard", map[string]any{"id": "val", "owner": "cat"}, protowire.CodeInvalidParams},
+		{"terminal.keyboard", map[string]any{"id": "val", "owner": "human", "ttl_ms": -1}, protowire.CodeInvalidParams},
+		{"terminal.keyboard", map[string]any{"id": "nope", "owner": "human"}, protowire.CodeNotFound},
 	} {
 		if e := f.callErr(c.method, c.params); e == nil || e.Code != c.code {
 			t.Errorf("%s %v: %v, want %d", c.method, c.params, e, c.code)
@@ -185,7 +186,7 @@ func TestAttachAndKeyboardValidation(t *testing.T) {
 	// A human holds the keyboard: an agent write that waits times out with keyboard_held.
 	e := f.callErr("terminal.write", map[string]any{"id": "val", "text": "x", "origin": map[string]any{"kind": "agent", "actor": "t"},
 		"timeout_ms": 100})
-	if e == nil || e.Code != wire.CodeKeyboardHeld {
+	if e == nil || e.Code != protowire.CodeKeyboardHeld {
 		t.Fatalf("write under a human grant: %v", e)
 	}
 	kb.Owner, kb.Until = "", time.Time{}
@@ -303,7 +304,7 @@ func TestAcceptanceTwoClientsOneStalled(t *testing.T) {
 		var r result
 		next, acked := int64(-1), int64(0)
 		for {
-			var fr wire.Frame
+			var fr protowire.Frame
 			select {
 			case fr = <-fastConn.Frames:
 			case <-stop:

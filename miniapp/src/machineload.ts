@@ -2,11 +2,11 @@
 // behind the load bar, computed here from one `GET /api/terminals/load` so the bar follows the cap as
 // the operator types instead of asking the host on every keystroke.
 //
-// The arithmetic is the host's own (daedalus/terminals/load.py, `project`), repeated on purpose and
+// The arithmetic is the host's own (daedalus/load.py, `project`), repeated on purpose and
 // tested against the same figures: memory is judged for the whole machine, because a machine runs out
 // of memory for everyone and not for terminals alone.
 
-import type { TerminalLoad } from "./api";
+import type { BrowserLoad, TerminalLoad } from "./api";
 
 export type Level = "ok" | "warn" | "bad";
 
@@ -92,4 +92,73 @@ export function roundBytes(n: number): { value: string; unit: "gb" | "mb" } {
   if (gb >= 10) return { value: String(Math.round(gb)), unit: "gb" };
   if (gb >= 1) return { value: gb.toFixed(1), unit: "gb" };
   return { value: String(Math.round(n / (1 << 20))), unit: "mb" };
+}
+
+/** One kind of workload on the shared track: what it holds now and what its cap would add. */
+export interface WorkloadShare {
+  cap: number;
+  running: number;
+  now: number;
+  extra: number;
+  atCap: number;
+}
+
+export interface WorkloadFigures {
+  total: number;
+  /** Everything on the machine now, both kinds included. */
+  machineNow: number;
+  /** The machine with both caps filled. */
+  machineAtCap: number;
+  memPercentNow: number;
+  memPercentAtCap: number;
+  cpuNow: number;
+  cpuAtCap: number;
+  level: Level;
+  cpuLevel: Level;
+  terminals: WorkloadShare | null;
+  browsers: WorkloadShare | null;
+  known: boolean;
+}
+
+function share(load: TerminalLoad | BrowserLoad | null, cap: number | undefined): WorkloadShare | null {
+  if (!load) return null;
+  const c = cap ?? load.cap;
+  const extra = Math.max(0, c - load.running) * load.likely.rss_bytes;
+  return { cap: c, running: load.running, now: load.used.rss_bytes, extra, atCap: load.used.rss_bytes + extra };
+}
+
+/**
+ * Terminals and browsers on one machine, each filled to its own cap and judged together, as the host's
+ * `project_workloads` does (daedalus/load.py): both fill the same memory, so two projections that are
+ * each "fine" alone can be too much at once. The caps are the ones being typed, when given.
+ */
+export function workloadFigures(terminals: TerminalLoad | null, browsers: BrowserLoad | null, caps: { terminals?: number; browsers?: number } = {}): WorkloadFigures {
+  const base = terminals ?? browsers;
+  const t = share(terminals, caps.terminals);
+  const b = share(browsers, caps.browsers);
+  const total = base ? Math.max(0, base.used.mem_total_bytes || 0) : 0;
+  const available = base ? Math.max(0, base.used.mem_available_bytes || 0) : 0;
+  const machineNow = total ? Math.max(0, total - available) : 0;
+  const machineAtCap = total ? machineNow + (t?.extra ?? 0) + (b?.extra ?? 0) : 0;
+  const cpus = base?.used.cpus || 0;
+  const cpuNow = base?.used.machine_cpu_percent || 0;
+  const extraCpu = (load: TerminalLoad | BrowserLoad | null, s: WorkloadShare | null) => (load && s && cpus ? (Math.max(0, s.cap - load.running) * load.likely.cpu_percent) / cpus : 0);
+  const cpuAtCap = cpuNow + extraCpu(terminals, t) + extraCpu(browsers, b);
+  const warn = base?.thresholds?.warn ?? 70;
+  const bad = base?.thresholds?.bad ?? 90;
+  const memPercentAtCap = total ? (100 * machineAtCap) / total : 0;
+  return {
+    total,
+    machineNow,
+    machineAtCap,
+    memPercentNow: total ? (100 * machineNow) / total : 0,
+    memPercentAtCap,
+    cpuNow,
+    cpuAtCap,
+    level: level(memPercentAtCap, warn, bad),
+    cpuLevel: level(cpuAtCap, warn, bad),
+    terminals: t,
+    browsers: b,
+    known: total > 0,
+  };
 }

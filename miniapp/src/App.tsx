@@ -53,6 +53,7 @@ const SettingsScreen = lazy(retried(() => import("./screens/Settings").then((m) 
 const HealthScreen = lazy(retried(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen }))));
 const MemoryScreen = lazy(retried(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
 const TerminalsScreen = lazy(retried(() => import("./screens/Terminals").then((m) => ({ default: m.TerminalsScreen }))));
+const BrowserFullScreen = lazy(retried(() => import("./screens/BrowserFull").then((m) => ({ default: m.BrowserFullScreen }))));
 const TerminalFullScreen = lazy(retried(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
 const HarnessesScreen = lazy(retried(() => import("./screens/Harnesses").then((m) => ({ default: m.HarnessesScreen }))));
 const ServicesScreen = lazy(retried(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
@@ -485,6 +486,7 @@ export function App() {
         {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} selected={route.detail} />}
         {route.screen === "terminals" && !route.detail && <TerminalsScreen toast={showToast} project={project} projects={projectList} />}
         {route.screen === "terminals" && route.detail && <TerminalFullScreen id={route.detail} beside={route.query.get("with")} toast={showToast} />}
+        {route.screen === "browser" && route.detail && <BrowserFullScreen id={route.detail} toast={showToast} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
         {route.screen === "harnesses" && <HarnessesScreen toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
@@ -507,7 +509,7 @@ export function App() {
   const pinned = <MainEntry current={false} />;
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
-  const terminalOpen = route.screen === "terminals" && !!route.detail;
+  const terminalOpen = (route.screen === "terminals" || route.screen === "browser") && !!route.detail;
   // A project on a phone has its own four tabs in the place of the app's (project/phone.tsx); a
   // session inside it is a detail with a back of its own and no bar under it.
   const projectBar = !wide && focusProject ? phoneTab(focusView(route.page, route.inner)) : null;

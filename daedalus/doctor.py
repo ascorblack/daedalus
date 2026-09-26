@@ -70,7 +70,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _terminals, _components, _keyproxy, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _terminals, _browser, _components, _keyproxy, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -621,6 +621,72 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         # A terminal's socket is refused unless it comes from the app's own origin, and Telegram's
         # webview connects from the Mini App's address, which nothing but this setting names.
         out.append(Check("terminals in Telegram", False, "MINIAPP_PUBLIC_URL is empty, so a terminal opened inside Telegram is refused", "warn", "set MINIAPP_PUBLIC_URL to the address the bot's menu button opens"))
+    return out
+
+
+BROWSER_FIXES = {
+    # An empty run directory in a compose install: the browser service is behind a profile, off
+    # until the operator turns it on, and an image built before it existed has no daemon in it.
+    "not_installed_container": "start the browser service: add COMPOSE_PROFILES=browser to .env, then docker compose -f deploy/compose.yaml --env-file .env up -d --build browser",
+    "not_installed_host": "this build of the launcher carries no browserd; a release build does",
+    "not_running_container": "start it: docker compose -f deploy/compose.yaml --env-file .env up -d browser (its log: docker compose logs browser)",
+    "not_running_host": "restart the launcher; the daemon's log is runtime/logs/browserd.log in the data folder",
+    "permission_denied": "the browser service's run directory belongs to its own user; this process must run as root, or as that user",
+    "protocol_mismatch": "recreate the browser service from this build's image (docker compose up -d browser), which ends its browsers",
+}
+
+# What stands between a page and the rest of the installation, in each environment. It is said out
+# loud because the two are not equal: natively the daemon's proxy is the only wall.
+BROWSER_WALLS = {
+    "container": "a network of its own with no route to the key proxy, the agent or the terminals, and the daemon's proxy inside it",
+    "host": "the daemon's proxy only: no container around it, so the proxy's rules are the whole wall between a page and this machine's ports and LAN",
+}
+
+
+async def _browser(ctx: DoctorContext) -> list[Check]:
+    """Each configured browser environment: whether its daemon answers, which Chromium it runs, whether
+    Chromium's sandbox is on, and what walls a page is behind."""
+    run_dirs = {"container": ctx.settings.browser_container_dir, "host": ctx.settings.browser_host_dir}
+    service = ctx.extensions.get("browser")
+    out = []
+    for env, run_dir in run_dirs.items():
+        if run_dir is None:
+            continue
+        name = f"browser ({env})"
+        # The running application's own connection when there is one, as for the terminals.
+        if service is not None:
+            status = next(e for e in service.environments() if e["env"] == env)
+            reason, detail, info = status["reason"], status["detail"], service.links[env].info
+            failed = "" if status["available"] else reason
+        else:
+            client = PtydClient(env, run_dir, label="browser service", lock="browserd.lock")
+            failed, detail, info = "", "", {}
+            try:
+                await client.connect()
+                info = await client.call("daemon.info", timeout=_timeout(ctx))
+            except Unavailable as exc:
+                failed, detail = exc.reason or "unreachable", exc.detail
+            except RpcError as exc:
+                failed, detail = "unreachable", exc.message
+            finally:
+                await client.close()
+        if failed:
+            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(failed, failed)
+            fix = BROWSER_FIXES.get(f"{failed}_{env}") or BROWSER_FIXES.get(failed, "") or BROWSER_FIXES.get(f"not_running_{env}", "")
+            detail = "the browser service has never run here" if failed == "not_installed" and env == "container" else detail
+            out.append(Check(name, False, f"{label}: {detail}", "info" if failed == "not_installed" else "warn", fix))
+            continue
+        chromium = info.get("chromium") or {}
+        if chromium.get("path"):
+            browser = f"Chromium {chromium.get('version') or '(version unknown)'}, {chromium.get('kind') or 'unknown'}"
+        else:
+            browser = f"no Chromium: {chromium.get('error') or 'none found'}"
+        out.append(Check(name, bool(chromium.get("path")), f"browserd {info.get('version')} available, {browser}", "ok" if chromium.get("path") else "warn",
+                         "" if chromium.get("path") else ("rebuild the browser service from the :browser image target" if env == "container" else "daedalus-desktop install browser")))
+        sandbox = str((info.get("capabilities") or {}).get("sandbox") or "unknown")
+        if sandbox not in ("ok", "unknown"):
+            out.append(Check(f"browser sandbox ({env})", False, sandbox, "warn", "the browser service needs seccomp=unconfined (deploy/compose.yaml)" if env == "container" else "see the browser section of desktop/README.md"))
+        out.append(Check(f"browser walls ({env})", True, BROWSER_WALLS[env], "info"))
     return out
 
 

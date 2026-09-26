@@ -232,6 +232,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 | Files & shell | `Exec` (inside a bubblewrap sandbox — the default on a native install where a namespace probe succeeds, optional in a container, which is a boundary already; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
 | Web | `WebFetch`, `WebSearch` — DuckDuckGo out of the box with no key at all; a self-hosted SearXNG behind a profile; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
+| Browser | `BrowserOpen`, `BrowserSnapshot`, `BrowserAct`, `BrowserText`, `BrowserLook`, … — a real Chromium you can watch live and take over, driven by an outline of the page with refs; logins kept per project; page content fenced as data; passwords and payments left to you (`BrowserHandoff`); a purchase, a message sent, a deletion or an upload asked about first. Command-line staff get the same tools through their launch's MCP entry. Only on an installation with a browser daemon ([`docs/architecture/browser.md`](docs/architecture/browser.md)) |
 | Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
 | Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share; `TerminalRead` — the screen, output and commands of the session's own terminals, read-only |
@@ -349,6 +350,7 @@ checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .
 | `telegram` | the local Bot API server: files up to 2 GB instead of 20 MB (it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org/apps) | ~66 MB |
 | `search` | a self-hosted SearXNG. Without it `WebSearch` goes to DuckDuckGo directly; with it, SearXNG is the backend the tool falls back to | ~382 MB |
 | `selfdev` | the rebuilder, the only container that can reach Docker. Needed only to build a new agent image, which is what a change to the image's own recipe asks for | ~237 MB |
+| `browser` | the agent's browser: `browserd` and Chromium from the `:browser` image target, on a network of its own ([below](#the-agents-browser)) | the `:browser` tag |
 
 The browser skills — driving a page with Playwright, drawing with Pillow — are not in the default
 image either: they are two thirds of one and most sessions never open a page. Run the `:browser` tag
@@ -391,6 +393,51 @@ agent. What survives what:
   [SYS_ADMIN]` with unconfined seccomp and AppArmor — the same widening the agent's container accepts
   for `Exec`'s sandbox. Without them the toggle shows as unavailable, with the reason, and terminals
   open unsandboxed.
+
+### The agent's browser
+
+A Chromium the agent drives and you watch live in the app: the `browser` service, the same image's
+`browser` target (`ghcr.io/ascorblack/daedalus:browser`) started as `browserd`, the browser daemon.
+It is behind a profile, so an installation that never browses pulls nothing extra: add
+`COMPOSE_PROFILES=browser` to `.env` (it then holds for every compose command, the rebuilder's
+included) and run `docker compose -f deploy/compose.yaml --env-file .env up -d --build`. Until then
+`daedalus doctor` says the browser is not installed and names that line.
+
+- **Its walls.** The service is on a network of its own, `browser`, with **no route to the key proxy,
+  SearXNG, the agent or the terminals**, and it mounts no workspace and no project folder: a file
+  reaches a page, or leaves one, only through the host. Inside it, every connection Chromium makes
+  goes through the daemon's own proxy, which resolves names itself and refuses private and LAN
+  addresses, cloud metadata, and the installation's own ports, whatever a page or a redirect asks
+  for. The agent's services are the exception, by design: `http://127.0.0.1:8103` in the browser
+  opens the service published on the Docker host, and no other port there.
+  [docs/architecture/browser.md](docs/architecture/browser.md) has the rules.
+- **Its privileges.** It runs as an ordinary user (uid 1001) with every capability dropped, a
+  read-only root filesystem and `seccomp=unconfined`, which is what Chromium's own sandbox needs to
+  give each page its own user namespace. Nothing else is widened — not `SYS_ADMIN`, not AppArmor,
+  which the sandbox needs left in place on hosts that restrict unprivileged user namespaces.
+- **What survives what.** Like the terminals, it outlives the agent: `docker restart`, a rebuild
+  and the agent's own restarts leave every browser open. Recreating it — `docker compose up -d
+  browser` after the image changed, or **Update** in the app — closes every browser. The profiles,
+  and so the logins you made in them, stay in the `browser-state` volume; the app says how many
+  browsers the update closes before it does.
+- **Its size.** Memory is capped at `BROWSER_MEMORY_LIMIT` (3 GB): two browsers with eight tabs each
+  measured under 1.2 GB. Settings → Browser sets how many run at once and when an idle one closes,
+  and shows what they cost beside the terminals on one load bar.
+- **What a page can still do to the agent.** A page may try to talk the agent into something: text
+  addressed to it, a fake system message, an instruction hidden off screen. The agent is told that
+  page text is data, not the operator's word, but a model can still be fooled. What the walls promise
+  is what an obeyed page **cannot** reach: the key proxy, your local network and this installation's
+  ports (the network wall), a password or payment field (the agent cannot type into one), a purchase,
+  a message sent, a deletion or an upload (each asked about first), and, with an allowlist, any site
+  off it — a link or redirect the page follows there is stopped and the agent told. It can still waste
+  the agent's time on public pages. For more, Settings → Browser has **watch mode** (on the sites you
+  list, the agent acts only while you have its browser open) and an **injection monitor** (a small
+  model reads each new site's page before the agent and pauses on one that talks to it); both are off
+  until you turn them on.
+- **What is recorded.** The action log always: what the agent did, what it was refused, what a page
+  did on its own. Keyframes of the pages only when you switch recording on — for one browser from its
+  menu, or for every new one in Settings — kept a week within 500 MB, masked like any screenshot, and
+  never while you drive unless you choose so.
 
 ### The host terminal (optional)
 
@@ -447,7 +494,8 @@ Nothing here is a tier: it is the same program, and each row is a real consequen
 | **Isolation** | no container boundary: `Exec` runs as you, behind the policy rules, the approval gates and — on Linux where bubblewrap actually runs, which is now probed rather than assumed — bubblewrap, which confines what a command writes and not what it reads. Two rules exist only here: the installation's own files (the provider keys, the whole state directory, the launcher, its environment file and its runtime) are refused to read as well as to write, and a path in your home folder outside every project is a question you answer once | the container's edge, as on a server | the container's edge |
 | **Telegram** | `api.telegram.org`, so files are capped at 20 MB in and out | the local Bot API server behind `--profile telegram`: 2 GB | the same profile |
 | **Self-development** | `local`: the agent commits into the checkout the app runs from and the change applies on a restart, with a preflight on a copy of itself first and an automatic rollback if it cannot stay up | `local` by default; `server` with a GitHub token | `server`: a worktree, a pull request you approve in the chat, a merge, a rebuild |
-| **Browser skills** | `daedalus-desktop install browser`, ~100 MB into the folder | the `:browser` tag | the `:browser` tag |
+| **Browser skills** | `daedalus-desktop install browser`, into the folder | the `:browser` tag | the `:browser` tag |
+| **The agent's browser** | `browserd` beside the launcher, Chromium from `install browser`. **The daemon's proxy is the only wall** between a page and your machine's ports and LAN | the `browser` service: a network of its own, not root, no folders, and the proxy inside it | the same |
 | **Reach** | your machine only: services a session starts bind `127.0.0.1` | the same | a domain, a PWA, Telegram's Mini App |
 | **When you close it** | the agent stops, and a run in flight is drained, snapshotted and resumed on the next start | it keeps running and comes back with the machine | it keeps running |
 

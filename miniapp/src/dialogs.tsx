@@ -342,17 +342,24 @@ export function Popover({ anchor, onClose, children, className, align = "left", 
 
 // ── toast ────────────────────────────────────────────────────────────────────────────────
 
-type ToastState = { text: string; undo?: () => void; id: number };
+type ToastState = { text: string; undo?: () => void; action?: { label: string; run: () => void }; id: number };
 type ToastUpdate = (f: (cur: ToastState | null) => ToastState | null) => void;
 let toastSetter: ToastUpdate | null = null;
 let toastSeq = 0;
 
-/** A short status line at the bottom; with `undo`, a button that calls it before the timer runs out. */
-export function toast(text: string, opts: { undo?: () => void; ms?: number } = {}): void {
-  if (!toastSetter) return;
+/** A short status line at the bottom; with `undo`, a button that calls it before the timer runs out,
+ *  and with `action`, a button of its own words (a browser that opened offers "View"). */
+export function toast(text: string, opts: { undo?: () => void; action?: { label: string; run: () => void }; ms?: number } = {}): number {
+  if (!toastSetter) return 0;
   const id = ++toastSeq;
-  toastSetter(() => ({ text, undo: opts.undo, id }));
-  window.setTimeout(() => toastSetter?.((cur) => (cur && cur.id === id ? null : cur)), opts.ms ?? (opts.undo ? 6000 : 2600));
+  toastSetter(() => ({ text, undo: opts.undo, action: opts.action, id }));
+  window.setTimeout(() => toastSetter?.((cur) => (cur && cur.id === id ? null : cur)), opts.ms ?? (opts.undo || opts.action ? 6000 : 2600));
+  return id;
+}
+
+/** Takes one toast away early, if it is still the one on screen: its offer was taken another way. */
+export function dismissToast(id: number): void {
+  toastSetter?.((cur) => (cur && cur.id === id ? null : cur));
 }
 
 export function ToastHost() {
@@ -370,6 +377,11 @@ export function ToastHost() {
       {state.undo && (
         <button className="btn small ghost" onClick={() => { state.undo?.(); setState(null); }}>
           {t("common.undo")}
+        </button>
+      )}
+      {state.action && (
+        <button className="btn small ghost toast-action" onClick={() => { state.action?.run(); setState(null); }}>
+          {state.action.label}
         </button>
       )}
     </div>
