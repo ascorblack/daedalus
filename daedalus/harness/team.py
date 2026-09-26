@@ -63,6 +63,8 @@ def mandatory_block(facts: TeamFacts) -> str:
             "Never ask the person at this terminal: nobody reads it. A question goes to AskOrchestrator; if its answer is "
             "pending, end your turn — the answer arrives as your next message.",
             f"When the task's done-when is met, {done}. A turn that ends without a Report leaves your team guessing.",
+            "Files handed to you are in .agents/inbox/<task>/ of your folder. To hand files back, keep them in your folder "
+            "and name their paths in Report's artifacts; a file only on another machine reaches nobody.",
             f"The {SKILL_NAME} skill, where you have skills, has examples of good reports and when to ask.",
         ]
     )

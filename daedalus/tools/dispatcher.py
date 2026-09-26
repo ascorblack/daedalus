@@ -1,5 +1,5 @@
 """The main orchestrator's tools: see the projects, hand them work, follow it, cancel it, create a
-project, and pass on an answer the operator gave in words.
+project, pass on an answer the operator gave in words, and read its own files.
 
 They are not ``TOOLS`` of this package: three of them share a name with another role's tool (the
 voice concierge's ``Delegate`` and ``Projects``, the project orchestrator's ``Answer``), so they are
@@ -51,11 +51,24 @@ async def projects(context: ToolContext, project: str | None = None) -> ToolResu
         "full hand-over — what the operator wants, in their words where they matter, and what finished looks like. "
         "title is a few words for the card. dispatch_id instead adds a follow-up to a dispatch already open (a correction, "
         "a detail, what a blocked one was waiting for) rather than a second dispatch for the same job. A project whose "
-        "orchestrator is off is refused, unless the operator asked for it to be switched on (enable_orchestrator=true)."
+        "orchestrator is off is refused, unless the operator asked for it to be switched on (enable_orchestrator=true). "
+        "files: handles (att:…) of the operator's files this work needs; the project gets them under the same handles."
     ),
 )
-async def delegate(context: ToolContext, project: str, text: str, title: str = "", dispatch_id: str | None = None, enable_orchestrator: bool = False) -> ToolResult:
-    return await _call(context, "delegate", project=project, text=text, title=title, dispatch_id=dispatch_id, enable_orchestrator=enable_orchestrator)
+async def delegate(context: ToolContext, project: str, text: str, title: str = "", dispatch_id: str | None = None, enable_orchestrator: bool = False, files: list[str] | None = None) -> ToolResult:
+    return await _call(context, "delegate", project=project, text=text, title=title, dispatch_id=dispatch_id, enable_orchestrator=enable_orchestrator, files=files)
+
+
+@tool(
+    name="Files",
+    description=(
+        "Your files: the operator's attachments in this chat and what projects reported back, each with a handle att:…. "
+        "op='list' (default) lists them; op='read' with file (a handle) shows its lines (offset, limit). Pass one to a "
+        "project with Delegate(files=[…]) or CreateProject(files=[…])."
+    ),
+)
+async def files(context: ToolContext, op: str = "list", file: str = "", offset: int = 1, limit: int = 200) -> ToolResult:
+    return await _call(context, "files", op=op, file=file, offset=offset, limit=limit)
 
 
 @tool(
@@ -118,6 +131,7 @@ class CreateProject(Tool):
                     "goal": {"type": "string", "description": "What it is for."},
                     "create_missing": {"type": "boolean", "description": "Make folders that do not exist yet."},
                     "start_orchestrator": {"type": "boolean", "description": "Switch its orchestrator on and have it write the brief (default true)."},
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "Handles (att:…) of the operator's files the new project starts with; its orchestrator gets them with dispatch #1."},
                 },
                 required=["name"],
             ),
@@ -135,6 +149,7 @@ class CreateProject(Tool):
             goal=str(arguments.get("goal") or ""),
             create_missing=bool(arguments.get("create_missing")),
             start_orchestrator=bool(arguments.get("start_orchestrator", True)),
+            files=[str(f) for f in arguments.get("files") or [] if isinstance(f, str)],
         )
 
 
@@ -153,7 +168,7 @@ async def answer(context: ToolContext, ask_id: str, quote: str, text: str = "") 
 
 def build() -> list[Tool]:
     """The main orchestrator's own tools, guarded like every discovered tool."""
-    return [_guarded(t() if isinstance(t, type) else t) for t in (projects, delegate, progress, cancel, CreateProject, answer)]
+    return [_guarded(t() if isinstance(t, type) else t) for t in (projects, delegate, progress, cancel, CreateProject, answer, files)]
 
 
 __all__ = ["build"]

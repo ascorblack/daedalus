@@ -19,6 +19,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import re
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -34,6 +36,7 @@ from daedalus.harness.capabilities import CAPABILITIES
 from daedalus.harness.health import ChannelHealth, channel_health
 from daedalus.host import prompts
 from daedalus.host.events import AppEvent, EventFilter
+from daedalus.host.handoff import Delivered, Handoff, box_name
 from daedalus.host.launch_queue import Admission, Entry, LaunchQueue, MachineCapacity, TerminalsCapacity
 from daedalus.host.staff_daedalus import DaedalusStaffRuntime
 from daedalus.host.worktrees import StaffWorktrees, Worktree, WorktreeError
@@ -48,6 +51,7 @@ from daedalus.staff_runtime import (
     StartRequest,
     UsageSnapshot,
 )
+from daedalus.stores.files import FileRefused, StoredFile, file_ref
 from daedalus.stores.projects import Project, ProjectFolder
 from daedalus.stores.staff import (
     ACTIVE_STATUSES,
@@ -83,6 +87,9 @@ ABNORMAL = ("error", "no_signal")
 SETTLED_TASK = ("review", "done", "dropped")
 """A task its member has handed in or that is over: whatever the member does now is not the task's
 work, and its silence is nobody's concern."""
+RECOVERED_KEY = "handoff:inbox_briefs_recovered"
+INBOX_PATH_RE = re.compile(r"(/[^\s\"'`<>]*?/inbox/[^\s\"'`<>]+)")
+"""A path to a file in an inbox, as a brief written before handles existed names it."""
 SENT_BACK = "sent back by the "
 """How a rejection from review is written into a task's notes (see ``review.py``)."""
 
@@ -170,7 +177,10 @@ class Team:
         self.runtimes: dict[str, StaffRuntime] = {"daedalus": DaedalusStaffRuntime(self.manager)}
         # A host folder in Docker is worked in through the host terminal bridge; the service is
         # looked up per call, so a bridge installed after the start is used without a restart.
-        self.worktrees = StaffWorktrees(self.manager.projects.local_env, host=HostBridge(lambda: cast("Terminals | None", app.extensions.get("terminals"))))
+        self.host_bridge = HostBridge(lambda: cast("Terminals | None", app.extensions.get("terminals")))
+        self.worktrees = StaffWorktrees(self.manager.projects.local_env, host=self.host_bridge)
+        self.handoff = Handoff(self.manager.files, local_env=self.manager.projects.local_env, host=self._host_files)
+        """Files handed to members before the brief that names them, and their artifacts taken back."""
         self.ingress = Ingress(self)
         self._capacity = capacity
         """A fixed :class:`MachineCapacity` for tests; otherwise the terminals service is asked each time."""
@@ -196,6 +206,36 @@ class Team:
         request of no project, which it settles itself."""
 
     # -- lookups -----------------------------------------------------------------------------------
+
+    def _host_files(self) -> Any:
+        """The host bridge when this installation has a host terminal at all; ``None`` otherwise, so a
+        refusal can say "there is none" rather than "it is not answering"."""
+        terminals: Any = self.app.extensions.get("terminals")
+        if terminals is None or not terminals.configured("host"):
+            return None
+        return self.host_bridge
+
+    async def cwd_of(self, live: LiveSession) -> tuple[ProjectFolder, str]:
+        """The folder a live session works in, and its working directory there: its worktree, else the
+        folder. What a member was handed lies under it, in ``.agents/inbox/``."""
+        project = await self.project(live.staff.project_id)
+        folder = project.folder(live.session.folder_id) if live.session.folder_id else None
+        folder = folder or self.folder_for(project, live.staff, None)
+        state = self.manager.live_state(live.session.session_id) if live.session.session_id else None
+        if state is not None and live.staff.harness == "daedalus":
+            return folder, str(state.workspace)
+        return folder, live.session.worktree_path or str(folder.path)
+
+    async def hand_files(self, member: Staff, files: list[StoredFile], *, folder: ProjectFolder, cwd: str, task_id: str | None, by: str) -> list[Delivered]:
+        """Put files where the member can open them; a :class:`StaffError` naming why when they cannot
+        be, so nothing is sent that names a file the member does not have."""
+        if not files:
+            return []
+        try:
+            self.handoff.check_target(folder)
+            return await self.handoff.deliver(files, env=folder.env, cwd=cwd, box=box_name(task_id), actor=by, member=member.name)
+        except FileRefused as exc:
+            raise StaffError(f"the files for {member.name} could not be delivered: {exc}") from exc
 
     def capacity(self) -> MachineCapacity | None:
         if self._capacity is not None:
@@ -499,6 +539,13 @@ class Team:
             available = await runtime.available(folder.env)
             if not available.ok and not terminal:
                 raise StaffError(f"{member.name} cannot start: {available.reason}")
+        if await self.manager.files.of_task(task.id):
+            # Said now, not when the queue reaches it: a folder nobody can put the task's files in is a
+            # refusal the assigner can act on.
+            try:
+                self.handoff.check_target(folder)
+            except FileRefused as exc:
+                raise StaffError(f"task {task.id} carries files, and they cannot reach {member.name}: {exc}") from exc
         if task.assignee_staff_id != member.id:
             await self._set_assignee(task, member.id, actor=by)
         entry = Entry(project.id, member.id, member.name, task.id, task.priority, terminal, by, env=folder.env)
@@ -531,6 +578,9 @@ class Team:
                 worktree = await self.worktrees.prepare(folder, member.name, task.id, task.title)
             except WorktreeError as exc:
                 raise StaffError(f"no worktree for {member.name} in {folder.path}: {exc}") from exc
+        # Before the session exists: the brief names these copies, so a start whose files cannot be
+        # put in place does not start at all.
+        delivered = await self.hand_files(member, await self.manager.files.of_task(task.id), folder=folder, cwd=str(worktree.cwd if worktree else folder.path), task_id=task.id, by=by)
         token = secrets.token_urlsafe(32)
         session = await self.manager.staff.claim_session(
             member.id,
@@ -544,7 +594,7 @@ class Team:
             team_token_hash=_hash(token),
         )
         await self.publish("staff.status", {"status": "starting", "previous": None, "actor": by}, member=member)
-        first = self.first_message(member, task, folder, worktree, predecessor, by)
+        first = self.first_message(member, task, folder, worktree, predecessor, by, delivered)
         try:
             recorded = await self.manager.staff.add_message(member.id, first, origin=by, mode="queue", staff_session_id=session.id)
             first_id = recorded.id
@@ -600,13 +650,15 @@ class Team:
         """
         member = live.staff
         predecessor = next((s for s in await self.manager.staff.sessions(member.id, limit=20) if s.task_id == task.id and s.id != live.id), None)
+        _, cwd = await self.cwd_of(live)
+        delivered = await self.hand_files(member, await self.manager.files.of_task(task.id), folder=folder, cwd=cwd, task_id=task.id, by=by)
         session = await self.manager.staff.retask(live.id, task.id)
         if session is None:
             return None
         if session.pause_requested:
             await self.manager.staff.request_pause(session.id, False)  # a new assignment resumes a paused member
         live = LiveSession(member, session)
-        text = prompts.STAFF_NEXT_TASK + self.first_message(member, task, folder, None, predecessor, by)
+        text = prompts.STAFF_NEXT_TASK + self.first_message(member, task, folder, None, predecessor, by, delivered)
         try:
             message_id = (await self.manager.staff.add_message(member.id, text, origin=by, mode="queue", staff_session_id=session.id)).id
         except StaffError:
@@ -659,7 +711,7 @@ class Team:
         subagents = self.app.extensions.get("subagents")
         return subagents.persona(name) if subagents is not None else None
 
-    def first_message(self, member: Staff, task: BoardTask, folder: ProjectFolder, worktree: Worktree | None, predecessor: StaffSession | None, by: str) -> str:
+    def first_message(self, member: Staff, task: BoardTask, folder: ProjectFolder, worktree: Worktree | None, predecessor: StaffSession | None, by: str, delivered: list[Delivered] | None = None) -> str:
         before = ""
         if predecessor is not None:
             why = predecessor.end_reason or predecessor.status
@@ -680,15 +732,25 @@ class Team:
             folder=worktree.cwd if worktree is not None else folder.path,
             branch=f"\nBranch: {worktree.branch} (from {worktree.base_ref})" if worktree is not None else "",
             predecessor=before,
+            files=prompts.STAFF_FILES.format(lines="\n".join(d.line() for d in delivered)) if delivered else "",
         )
 
     # -- control ---------------------------------------------------------------------------------------
 
-    async def tell(self, member: Staff, text: str, *, mode: str = "queue", by: str = "operator") -> dict[str, Any]:
-        """Say something to a member's live session; returns the message and its receipt."""
+    async def tell(self, member: Staff, text: str, *, mode: str = "queue", by: str = "operator", files: list[StoredFile] | None = None) -> dict[str, Any]:
+        """Say something to a member's live session; returns the message and its receipt. ``files`` are
+        put where the member can open them first, and the message ends with their paths; they also
+        stay with the session's task, so a restart of it hands them over again."""
         live = await self.live_of(member)
         if live is None:
             raise StaffError(f"{member.name} has no live session; assign a task to start one")
+        delivered: list[Delivered] = []
+        if files:
+            folder, cwd = await self.cwd_of(live)
+            delivered = await self.hand_files(member, files, folder=folder, cwd=cwd, task_id=live.session.task_id, by=by)
+            if live.session.task_id:
+                await self.manager.files.attach_to_task(live.session.task_id, files, actor=by)
+            text = text.rstrip() + "\n\n" + prompts.STAFF_FILES.format(lines="\n".join(d.line() for d in delivered)).strip()
         if live.session.pause_requested:
             await self.manager.staff.request_pause(live.id, False)
         message = await self.manager.staff.add_message(member.id, text, origin=by, mode=mode, staff_session_id=live.id)
@@ -698,7 +760,7 @@ class Team:
         except Exception as exc:  # noqa: BLE001 — a failed delivery is recorded on the message, not raised past it
             receipt = Receipt("failed", str(exc)[:500])
         await self.ingress.message_state(message.id, receipt.state, receipt.error)
-        return {"message_id": message.id, "state": receipt.state, "error": receipt.error, "degraded_to": receipt.degraded_to}
+        return {"message_id": message.id, "state": receipt.state, "error": receipt.error, "degraded_to": receipt.degraded_to, "files": [d.path for d in delivered]}
 
     async def interrupt(self, member: Staff) -> None:
         live = await self.live_of(member)
@@ -1230,8 +1292,84 @@ class Team:
                     logger.exception("settling the idle sessions of %s failed", getattr(runtime, "kind", "a runtime"))
         return moved
 
+    async def recover_named_files(self) -> int:
+        """Once: give members the files their open briefs name by an orchestrator's own inbox path.
+
+        Before files travelled by handle, an orchestrator was told where an attachment lay in its own
+        working directory and wrote that path into briefs, where no member could open it (a member on
+        the host has no such directory at all). For each open task whose brief names a file of its
+        project orchestrator's inbox that is still there, the file becomes the project's, goes with the
+        task from now on, and a member already working on it gets it at once with a message naming the
+        copy. Only files of that one inbox are taken, so a brief cannot pull in anything else.
+        """
+        if await self.manager.db.kv_get(RECOVERED_KEY):
+            return 0
+        workspaces = os.path.realpath(self.manager.settings.workspaces_dir)
+        rows = await self.manager.db.fetchall("SELECT id, project_id, brief_json, assignee_staff_id FROM board_tasks WHERE status IN ('todo', 'doing', 'blocked')")
+        taken = 0
+        for row in rows:
+            project = await self.manager.projects.get(row["project_id"]) if row["project_id"] else None
+            if project is None or not project.settings.orchestrator.session_id:
+                continue
+            inboxes = await self._orchestrator_inboxes(project)
+            if not inboxes:
+                continue
+            try:
+                brief = json.loads(row["brief_json"] or "{}")
+            except ValueError:
+                continue
+            text = " ".join(str(v) for v in brief.values()) if isinstance(brief, dict) else ""
+            found: list[StoredFile] = []
+            for path in dict.fromkeys(p.rstrip(".,;:)") for p in INBOX_PATH_RE.findall(text)):
+                real = os.path.realpath(path)
+                if not real.startswith(workspaces + os.sep) or not any(real.startswith(inbox + os.sep) for inbox in inboxes) or not os.path.isfile(real):
+                    continue
+                try:
+                    found.append(await self.manager.files.add_path(Path(real), name=os.path.basename(real), origin="operator", origin_ref=path, scope=project.id, actor="system"))
+                except FileRefused as exc:
+                    logger.warning("the file %s named by task %s was not taken: %s", path, row["id"], exc)
+            if not found:
+                continue
+            await self.manager.files.attach_to_task(row["id"], found, actor="system")
+            taken += len(found)
+            member = await self.manager.staff.get(row["assignee_staff_id"]) if row["assignee_staff_id"] else None
+            live = await self.live_of(member) if member is not None else None
+            if live is None or live.session.task_id != row["id"]:
+                continue  # handed over with the brief at its next start
+            try:
+                await self.tell(
+                    live.staff,
+                    "The file your brief names by a path you could not open is now in your own folder; use this copy.",
+                    by="orchestrator",
+                    files=found,
+                )
+            except StaffError as exc:
+                logger.warning("could not hand %s the files of task %s: %s", live.staff.name, row["id"], exc)
+        await self.manager.db.kv_set(RECOVERED_KEY, True)
+        return taken
+
+    async def _orchestrator_inboxes(self, project: Project) -> list[str]:
+        """The inbox of each orchestrator session the project has had, real paths."""
+        rows = await self.manager.db.fetchall(
+            "SELECT id, metadata FROM sessions WHERE project_id = ? AND (json_extract(metadata, '$.orchestrator_of') IS NOT NULL OR json_extract(metadata, '$.orchestrator_retired_of') IS NOT NULL)",
+            (project.id,),
+        )
+        out = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+                workspace = self.manager.workspace_of(row["id"], metadata, project)
+            except (RuntimeError, ValueError):
+                continue
+            out.append(os.path.realpath(workspace / "inbox"))
+        return out
+
     async def loop(self) -> None:
         await asyncio.sleep(FIRST_PUMP_SECONDS)
+        try:
+            await self.recover_named_files()
+        except Exception:  # noqa: BLE001 — a one-off repair must not stop the team's tick
+            logger.exception("recovering files named by open briefs failed")
         while True:
             try:
                 await self.tick()
@@ -1451,12 +1589,40 @@ class Ingress:
         refs = [str(a)[:300] for a in (artifacts or []) if str(a).strip()][:20]
         if refs:
             payload["refs"] = refs
+            kept, notes = await self._take_in(live, refs)
+            if kept:
+                payload["files"] = [file_ref(f) for f in kept]
+                told += "; kept for the team: " + ", ".join(f.short() for f in kept)
+            if notes:
+                told += "; not kept: " + "; ".join(notes)
         if task is not None:
             payload["task_id"] = task.id
         if call_id:
             payload["call_id"] = call_id
         await self.team.publish("staff.report", payload, member=live.staff, session_id=live.session_id)
         return told
+
+    async def _take_in(self, live: LiveSession, refs: list[str]) -> tuple[list[StoredFile], list[str]]:
+        """A member's artifacts that are files in the project's folders, taken into the project's store
+        so the orchestrator can read them and pass them on and the operator can download them — the
+        member's folder may be on a machine neither of them reaches. What cannot be taken is said."""
+        folder, cwd = await self.team.cwd_of(live)
+        project = await self.team.project(live.staff.project_id)
+        check = None
+        if live.staff.harness == "daedalus":
+            services = self.manager.locator_services(live.session.session_id or "")
+
+            def check(path: Path) -> str:
+                if services is None:
+                    return ""
+                if not services.contains(path) or services.is_protected(path):
+                    return f"{path} is outside what {live.staff.name} may read"
+                return ""
+
+        try:
+            return await self.team.handoff.fetch(refs, env=folder.env, cwd=cwd, project=project, actor=f"staff:{live.staff.name}", origin_ref=f"{live.staff.name}:{live.session.task_id or ''}", check=check)
+        except FileRefused as exc:
+            return [], [str(exc)]
 
     async def _reported(self, live: LiveSession, call_id: str) -> bool:
         """Whether a report with this call id was already published: the host restarted after acting

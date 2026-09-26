@@ -3,9 +3,12 @@
 // itself; everything else is the row alone. One card per file, whatever the trace above it shows.
 
 import { Icon, IconName } from "./icons";
-import { AuthImg, PreviewSource, canPreview, previewKind } from "./preview";
+import { AuthImg, PreviewSource, canPreview, downloadHref, previewKind } from "./preview";
 import type { Artifact } from "./turns";
 import { t } from "./i18n";
+import { bytes } from "./format";
+import { useQuery } from "./store";
+import { filesKey, handleIds, keptBase, type KeptFile } from "./keptfiles";
 
 /** The line icon for a file, by what the viewer would make of it. */
 export function fileIcon(name: string): IconName {
@@ -50,7 +53,7 @@ export type ArtifactCardProps = {
 export function ArtifactCard({ item, src, downloadUrl, onOpen }: ArtifactCardProps) {
   const image = previewKind(item.name) === "image";
   const openable = canPreview(item.name);
-  const meta = [item.size, extOf(item.name), t(item.how === "wrote" ? "turn.artifact.wrote" : "turn.artifact.sent")].filter(Boolean).join(" · ");
+  const meta = [item.size, extOf(item.name), t(`turn.artifact.${item.how}`)].filter(Boolean).join(" · ");
   const open = () => (openable ? onOpen(src) : window.open(downloadUrl, "_blank", "noreferrer"));
   return (
     <div className={`artifact ${image ? "image" : ""}`} data-path={item.path}>
@@ -76,6 +79,27 @@ export function ArtifactCard({ item, src, downloadUrl, onOpen }: ArtifactCardPro
           <AuthImg src={src} alt={item.name} className="tool-image" onClick={() => onOpen(src)} />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The files a message names by handle, as cards: what the operator attached, what a member handed
+ * back, what an orchestrator passed on. Nothing is drawn until the host says what the handles are,
+ * and a handle it does not know draws nothing.
+ */
+export function KeptFiles({ text, onOpen }: { text: string | null | undefined; onOpen: (src: PreviewSource) => void }) {
+  const ids = handleIds(text);
+  const { data } = useQuery<{ files: KeptFile[] }>(filesKey(ids), { staleMs: 60000 });
+  const files = data?.files ?? [];
+  if (!files.length) return null;
+  return (
+    <div className="artifacts kept-files" aria-label={t("files.kept")}>
+      {files.map((f) => {
+        const src: PreviewSource = { base: keptBase(f.id), path: f.name };
+        const item: Artifact = { callId: f.id, path: f.handle, name: f.name, how: "kept", caption: t(`files.origin.${f.origin}`), size: bytes(f.size) };
+        return <ArtifactCard key={f.id} item={item} src={src} downloadUrl={downloadHref(src.base, src.path)} onOpen={onOpen} />;
+      })}
     </div>
   );
 }

@@ -136,8 +136,10 @@ async def tasks(
     description=(
         "Look into the project's files, read-only, when you must check something yourself. op: 'read' (path, offset, "
         "limit lines), 'ls' (path), 'find' (glob pattern), 'search' (regex pattern), 'git_log' (ref, path, limit), "
-        "'git_diff' (ref or range such as main..agent/ira/t1, path), 'git_status'. folder: id or label (default the "
-        "primary folder); paths are relative to it. Output is bounded; narrow the path to see more."
+        "'git_diff' (ref or range such as main..agent/ira/t1, path), 'git_status', 'files' (the project's kept files: "
+        "the operator's attachments and what staff reported back, each with a handle att:…). folder: id or label "
+        "(default the primary folder); paths are relative to it. path='att:…' reads a kept file. Output is bounded; "
+        "narrow the path to see more."
     ),
 )
 async def peek(context: ToolContext, op: str, path: str = "", folder: str | None = None, pattern: str = "", ref: str = "", offset: int = 1, limit: int = 200) -> ToolResult:
@@ -228,11 +230,13 @@ async def withdraw_questions(context: ToolContext, ids: list[str], reason: str) 
     description=(
         "Tell the operator something that matters — a task done, a decision, a blocker — as a notification on their "
         "phone and an entry in the journal. kind: progress, done, blocked or decision. Not a running commentary: "
-        "routine progress goes in the journal. dispatch_id: the main orchestrator's dispatch it answers, if any."
+        "routine progress goes in the journal. dispatch_id: the main orchestrator's dispatch it answers, if any. files: "
+        "handles (att:…) of what the operator should get — a staff member's report, a document — shown to them as "
+        "downloads and passed to the main orchestrator with the report."
     ),
 )
-async def project_report(context: ToolContext, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> ToolResult:
-    return await _call(context, "project_report", text=text, title=title, kind=kind, task_id=task_id, dispatch_id=dispatch_id)
+async def project_report(context: ToolContext, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None, files: list[str] | None = None) -> ToolResult:
+    return await _call(context, "project_report", text=text, title=title, kind=kind, task_id=task_id, dispatch_id=dispatch_id, files=files)
 
 
 @tool(
@@ -314,8 +318,10 @@ async def dismiss(context: ToolContext, staff: str, release: bool = False, keep_
         "Hand a member a task: task_id of a task on the board, or title plus the brief for a new one. The brief has "
         "four parts, each a real sentence, on the task or given here: objective (what and why), deliverable (what "
         "exists when done), boundaries (where to work, what not to touch), done_when (a check anyone can run). "
-        "folder, priority (1 first … 5) and depends_on are optional. It starts now or waits in the project's queue; "
-        "the answer says which and why."
+        "folder, priority (1 first … 5) and depends_on are optional. files: handles (att:…) or paths in the project's "
+        "folders; the host copies each where the member can open it before the brief is sent, and the brief names "
+        "that copy — never put a path of your own into a brief. It starts now or waits in the project's queue; the "
+        "answer says which and why."
     ),
 )
 async def assign(
@@ -330,10 +336,11 @@ async def assign(
     folder: str | None = None,
     priority: int | None = None,
     depends_on: list[str] | None = None,
+    files: list[str] | None = None,
 ) -> ToolResult:
     return await _call(
         context, "assign", staff=staff, task_id=task_id, title=title, objective=objective, deliverable=deliverable, boundaries=boundaries,
-        done_when=done_when, folder=folder, priority=priority, depends_on=depends_on,
+        done_when=done_when, folder=folder, priority=priority, depends_on=depends_on, files=files,
     )
 
 
@@ -341,12 +348,13 @@ async def assign(
     name="Tell",
     description=(
         "Say something to a member's live session. mode: queue (default; read when the current turn ends), steer "
-        "(joins the turn now), interrupt (stops the turn and sends it). Returns the delivery receipt: queued, written, "
-        "submitted, acknowledged or failed."
+        "(joins the turn now), interrupt (stops the turn and sends it). files: handles (att:…) or paths in the project's "
+        "folders, copied where the member can open them; the message names the copies. Returns the delivery receipt: "
+        "queued, written, submitted, acknowledged or failed."
     ),
 )
-async def tell(context: ToolContext, staff: str, text: str, mode: str = "queue") -> ToolResult:
-    return await _call(context, "tell", staff=staff, text=text, mode=mode)
+async def tell(context: ToolContext, staff: str, text: str, mode: str = "queue", files: list[str] | None = None) -> ToolResult:
+    return await _call(context, "tell", staff=staff, text=text, mode=mode, files=files)
 
 
 @tool(

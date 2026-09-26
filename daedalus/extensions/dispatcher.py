@@ -34,8 +34,10 @@ from daedalus.extensions.dispatcher_telegram import DispatcherTelegram
 from daedalus.extensions.dispatches import SETUP_BY, Dispatches
 from daedalus.extensions.notifications import Draft
 from daedalus.host.events import AppEvent, EventFilter
+from daedalus.host.peek import PeekRefused, text_window
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
 from daedalus.stores.dispatches import Dispatch, DispatchError
+from daedalus.stores.files import HANDOVER_MAX_FILES, MAIN, FileRefused, StoredFile, human_size, refs_line
 from daedalus.stores.projects import BRIEF_SECTIONS, Project, ProjectError
 from daedalus.stores.staff import Ask, StaffError
 
@@ -489,11 +491,11 @@ class Dispatcher:
                 brief = await self.manager.projects.brief(project.id)
                 goals = _one_line(brief["goals"].body, 240) if "goals" in brief else ""
                 return f"{name} finished its setup ({dispatch}): {said}" + (f" — goals: {goals}" if goals else "") + f" — the project is at /app/project/{project.id}"
-            return f"{name} closed {dispatch} as {status}: {said}"
+            return f"{name} closed {dispatch} as {status}: {said}{refs_line(p.get('files'))}"
         if event.type == "dispatch.stalled":
             return f"{dispatch} of {name} has been quiet for {p.get('minutes')} min and nobody there is working — tell the operator; do not prod the project yourself"
         if event.type == "dispatch.message":
-            return f"{name} reported {p.get('kind')} on {dispatch}: {_one_line(str(p.get('text') or ''), 600)}"
+            return f"{name} reported {p.get('kind')} on {dispatch}: {_one_line(str(p.get('text') or ''), 600)}{refs_line(p.get('files'))}"
         if event.type == "ask.answered":
             ask = await self._ask_by_ref(str(p.get("request_ref") or ""))
             outcome = str((ask.resolution or {}).get("outcome") or "") if ask is not None else ""
@@ -711,17 +713,33 @@ async def _project_detail(d: Dispatcher, project: Project, now: datetime) -> str
     return "\n".join(lines)
 
 
-async def op_delegate(d: Dispatcher, session_id: str, *, project: str, text: str, title: str = "", dispatch_id: str | None = None, enable_orchestrator: bool = False) -> str:
+async def main_files(d: Dispatcher, refs: list[str] | None) -> list[StoredFile]:
+    """The main orchestrator's files a hand-over names, each checked before anything is handed over."""
+    wanted = [str(r).strip() for r in refs or [] if str(r or "").strip()]
+    if len(wanted) > HANDOVER_MAX_FILES:
+        raise ValueError(f"{len(wanted)} files in one hand-over; at most {HANDOVER_MAX_FILES}")
+    found = []
+    for ref in wanted:
+        try:
+            found.append(await d.manager.files.in_scope(ref, MAIN))
+        except FileRefused as exc:
+            raise ValueError(f"{exc}; Files() lists them") from exc
+    return list({f.id: f for f in found}.values())
+
+
+async def op_delegate(d: Dispatcher, session_id: str, *, project: str, text: str, title: str = "", dispatch_id: str | None = None, enable_orchestrator: bool = False, files: list[str] | None = None) -> str:
     body = (text or "").strip()
     if not body:
         raise ValueError("say what the project is to do")
+    handed = await main_files(d, files)
+    carried = f"; with {len(handed)} file{'s' if len(handed) > 1 else ''}, now the project's under the same handle{'s' if len(handed) > 1 else ''}" if handed else ""
     if dispatch_id:
         dispatch = await d.find_dispatch(dispatch_id)
         target = await d.find_project(project) if project else None
         if target is not None and target.id != dispatch.project_id:
             raise ValueError(f"dispatch {dispatch.id} belongs to another project")
-        dispatch = await d.dispatches.follow_up(dispatch, body)
-        return f"added to dispatch {dispatch.id} (#{dispatch.seq}, {dispatch.status}); its orchestrator has it now"
+        dispatch = await d.dispatches.follow_up(dispatch, body, files=handed)
+        return f"added to dispatch {dispatch.id} (#{dispatch.seq}, {dispatch.status}){carried}; its orchestrator has it now"
     target = await d.find_project(project)
     if not target.settings.orchestrator.enabled:
         if not enable_orchestrator:
@@ -732,8 +750,31 @@ async def op_delegate(d: Dispatcher, session_id: str, *, project: str, text: str
         if d.orchestrators is None:
             raise ValueError("orchestrators are not running on this installation")
         target = await d.orchestrators.enable(target.id, by="dispatcher")
-    dispatch = await d.dispatches.create(target, text=body, title=title, from_session=session_id)
-    return f"dispatch {dispatch.id} (#{dispatch.seq}) handed to {target.name}; its orchestrator is woken with it. You are told when it reports; do not check on it."
+    dispatch = await d.dispatches.create(target, text=body, title=title, from_session=session_id, files=handed)
+    return f"dispatch {dispatch.id} (#{dispatch.seq}) handed to {target.name}{carried}; its orchestrator is woken with it. You are told when it reports; do not check on it."
+
+
+async def op_files(d: Dispatcher, session_id: str, *, op: str = "list", file: str = "", offset: int = 1, limit: int = 200) -> str:
+    """The main orchestrator's own files: the operator's attachments in its chat and what projects
+    reported back. It reads them; it never opens a project's folders."""
+    if op == "list":
+        listed = await d.manager.files.listing(MAIN, limit=30)
+        if not listed:
+            return "No files yet. The operator's attachments in this chat and the files projects report back are kept here, each with a handle (att:…)."
+        return "\n".join(["Your files, newest first (pass one to a project with Delegate(files=[…])):", *(f"- {f.handle} {f.name} ({f.mime}, {human_size(f.size)}; from the {f.origin})" for f in listed)])
+    if op != "read":
+        raise ValueError("op is list or read")
+    if not file:
+        raise ValueError("read needs file: a handle att:…")
+    try:
+        stored = await d.manager.files.in_scope(file, MAIN)
+    except FileRefused as exc:
+        raise ValueError(f"{exc}; Files() lists them") from exc
+    try:
+        body = text_window(await d.manager.files.read(stored), stored.name, offset=offset, limit=limit)
+    except PeekRefused as exc:
+        raise ValueError(str(exc)) from exc
+    return f"{stored.handle} {stored.name} ({stored.mime}, {stored.size} bytes):\n{body}"
 
 
 async def op_progress(d: Dispatcher, session_id: str, *, dispatch_id: str | None = None, project: str | None = None) -> str:
@@ -825,6 +866,7 @@ OPERATIONS: dict[str, Any] = {
     "progress": op_progress,
     "cancel": op_cancel,
     "answer": op_answer,
+    "files": op_files,
 }
 
 

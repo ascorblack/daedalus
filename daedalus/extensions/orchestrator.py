@@ -39,6 +39,7 @@ from daedalus.host.peek import BridgedFolderAccess, FolderAccess, LocalFolderAcc
 from daedalus.host.session_runner import HOME_KEY, WorkspaceUnreachable, home_of
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
 from daedalus.staff_runtime import ReadRequest
+from daedalus.stores.files import refs_line
 from daedalus.stores.projects import BRIEF_SECTIONS, OrchestratorSettings, Project, ProjectError, ProjectFolder
 from daedalus.stores.staff import ACTIVE_STATUSES, HARNESS_NAMES, Ask, Staff
 
@@ -890,7 +891,7 @@ class Orchestrators:
                 name = member.name if member else ""
                 ending = "ended a turn with a question and no report" if p.get("kind") == "needs_input" else "finished a turn without a report"
                 return f"{who(member)} {ending}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\" — ReadStaff(\"{name}\") for the whole turn"
-            return f"{who(member)} reported {p.get('kind')}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\""
+            return f"{who(member)} reported {p.get('kind')}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\"{refs_line(p.get('files'))}"
         if kind == "staff.channel":
             if p.get("team_tools") == "missing":
                 return f"{who(member)}'s team tools are not connected: {_one_line(str(p.get('detail') or ''), 200)}. They keep working, but will not Report or AskOrchestrator; Tell and ReadStaff still work"
@@ -943,7 +944,7 @@ class Orchestrators:
                 return f"[from the main orchestrator] dispatch {p.get('dispatch_id') or ''} is cancelled: {text}"
             what = "follow-up on dispatch" if kind == "dispatch.message" else "dispatch"
             number = f" #{p.get('seq')}" if kind == "dispatch.created" and p.get("seq") else ""
-            return f"[from the main orchestrator] {what} {p.get('dispatch_id') or ''}{number}{': ' + title if title else ''}: {text}"
+            return f"[from the main orchestrator] {what} {p.get('dispatch_id') or ''}{number}{': ' + title if title else ''}: {text}{refs_line(p.get('files'))}"
         return kind
 
     @staticmethod

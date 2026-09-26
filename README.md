@@ -739,11 +739,29 @@ subscription window used. Calls nobody priced are counted in `unpriced`, never a
 rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
 the same numbers.
 
+**Files between the operator, the orchestrators and staff.** A path means something in one place
+only — an orchestrator's inbox in the agent's container does not exist on the host where a
+command-line member works — so files travel by *handle*, `att:<id>`. A file you attach in the main chat
+or a project orchestrator's chat is kept by the host (the bytes in the blob store) and the model is
+told its handle; the main orchestrator reads its files with `Files` and passes them on with
+`Delegate(files=…)` or `CreateProject(files=…)`, and the project gets the same handle. A project
+orchestrator reads one with `Peek(path="att:…")` (`Peek(op="files")` lists them) and hands it to a
+member with `Assign(files=…)` or `Tell(files=…)`, which also take paths in the project's folders. The
+host copies each file into the member's own folder, `.agents/inbox/<task>/` (a `.gitignore` of `*`
+there keeps it out of git), before the brief that names that path: directly for a member of the
+agent's own environment, through the host terminal's `fs.write` for a member on the host — which
+writes nowhere but such an inbox. A member names its results in `Report(artifacts=…)`; files among
+them are copied back and become the project's handles, which the orchestrator can pass on and put in
+`ProjectReport(files=…)` for you and the main orchestrator. Every handle in a chat is a file card you
+can download or preview (`GET /api/files?ids=…`, `GET /api/files/{id}/download`); `GET /api/files/{id}`
+lists where a file may be used and every time it moved, with who, where, its size and its hash. One
+file is at most 50 MB, one hand-over at most 20 files.
+
 **The main orchestrator.** One chat, the home of the app's orchestration mode (the rail's
 Orchestration item; on a phone, the first row of that mode's list), where you say "in Bakery, add a
 gluten-free menu": it hands the work to that project's orchestrator as a *dispatch* and follows it. It
 never touches files, staff or a board; its tools are `Projects`, `Delegate`, `Progress`, `Cancel`,
-`CreateProject` and `Answer`, beside `Notify`, `StaySilent` and the history tools. A dispatch wakes the
+`CreateProject`, `Answer` and `Files`, beside `Notify`, `StaySilent` and the history tools. A dispatch wakes the
 project's orchestrator at once and is closed by exactly one `ProjectReport` with its id (done or
 blocked); a progress report is a message on it. The main orchestrator is woken only by those reports
 and by a dispatch that went quiet for `dispatcher.stalled_minutes` (30) while nobody in its project

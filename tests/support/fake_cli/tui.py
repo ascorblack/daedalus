@@ -258,7 +258,7 @@ def usage_error(cli: str, message: str) -> None:
 
 # -- the scripted model ------------------------------------------------------------------------------
 
-_DIRECTIVE = re.compile(r"(?:^|\s)(echo|perm|ask|fail|slow|report|askorch):(.*)$|(?:^|\s)(silent)\s*$", re.S)
+_DIRECTIVE = re.compile(r"(?:^|\s)(echo|perm|ask|fail|slow|report|askorch|cat):(.*)$|(?:^|\s)(silent)\s*$", re.S)
 SELF_CHECK = "Call the Report tool with kind checkpoint and note self-check"
 _POINTER = re.compile(r"Read the message in (\S+?)(?: and act on it)?\.?(?:\s|$)")
 
@@ -976,8 +976,13 @@ class McpClient:
 
 
 def report_arguments(arg: str) -> dict[str, Any]:
-    kind, _, note = arg.partition(":")
-    return {"kind": kind.strip() or "checkpoint", "note": note.strip() or f"{kind.strip() or 'checkpoint'} from the fake"}
+    """``kind:note``, and ``|path`` after the note for each artifact named."""
+    kind, _, rest = arg.partition(":")
+    note, *artifacts = [p.strip() for p in rest.split("|")]
+    out: dict[str, Any] = {"kind": kind.strip() or "checkpoint", "note": note or f"{kind.strip() or 'checkpoint'} from the fake"}
+    if artifacts:
+        out["artifacts"] = [a for a in artifacts if a]
+    return out
 
 
 def ask_arguments(arg: str) -> dict[str, Any]:

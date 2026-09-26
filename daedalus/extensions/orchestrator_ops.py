@@ -8,16 +8,19 @@ first call. The results are text for the model: short, with the ids it needs for
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daedalus.extensions import wakeups
 from daedalus.extensions.notifications import Draft
 from daedalus.extensions.watches import WatchRefused
-from daedalus.host.peek import PeekRefused
+from daedalus.host.peek import LocalFolderAccess, PeekRefused, text_window
 from daedalus.staff_runtime import LiveSession
+from daedalus.stores.files import HANDOVER_MAX_FILES, MAIN, FileRefused, human_size, parse_handle
 from daedalus.stores.projects import BRIEF_SECTIONS, OPERATOR_ONLY_SECTIONS, Project, ProjectError, ProjectFolder
 from daedalus.stores.staff import HARNESS_NAMES, Ask, StaffError
 
@@ -28,7 +31,7 @@ BRIEF_BODY_MAX = 20_000
 JOURNAL_TEXT_MAX = 4000
 REPORT_TEXT_MAX = 4000
 REPORT_KINDS = ("progress", "done", "blocked", "decision")
-PEEK_OPS = ("read", "ls", "find", "search", "git_log", "git_diff", "git_status")
+PEEK_OPS = ("read", "ls", "find", "search", "git_log", "git_diff", "git_status", "files")
 TASK_OPS = ("list", "get", "create", "update", "move")
 FOLDER_OPS = ("list", "add", "update", "remove")
 TEAM_MESSAGES = 5
@@ -321,11 +324,59 @@ async def tasks(
 # -- looking into the files ------------------------------------------------------------------------
 
 
+FILES_LISTED = 30
+
+
+async def project_files(orch: Orchestrators, project: Project) -> str:
+    """The project's files, newest first: what Peek(op='files') shows."""
+    store = orch.manager.files
+    listed = await store.listing(project.id, limit=FILES_LISTED)
+    if not listed:
+        return f"{project.name} has no files yet. The operator's attachments in this chat and the files staff report back are kept here, each with a handle (att:…)."
+    lines = [f"- {f.handle} {f.name} ({f.mime}, {human_size(f.size)}; from the {f.origin}, {f.created_at[:16].replace('T', ' ')})" for f in listed]
+    return "\n".join([f"{project.name}'s files, newest first (read one with Peek(op='read', path='att:…'); hand one over with Assign or Tell files=[…]):", *lines])
+
+
+async def read_kept(orch: Orchestrators, scope: str, handle_text: str, *, offset: int, limit: int) -> str:
+    """A kept file's lines, for a scope that may use its handle."""
+    try:
+        stored = await orch.manager.files.in_scope(handle_text, scope)
+    except FileRefused as exc:
+        raise Refused(str(exc)) from exc
+    data = await orch.manager.files.read(stored)
+    try:
+        body = text_window(data, stored.name, offset=offset, limit=limit)
+    except PeekRefused as exc:
+        raise Refused(str(exc)) from exc
+    return f"{stored.handle} {stored.name} ({stored.mime}, {stored.size} bytes):\n{body}"
+
+
+def _own_workspace(orch: Orchestrators, session_id: str, path: str) -> LocalFolderAccess | None:
+    """The orchestrator's own working directory, when ``path`` is inside it: where a host project's
+    orchestrator keeps what the operator attached before handles existed, which no project folder holds."""
+    state = orch.manager.live_state(session_id)
+    services = orch.manager.locator_services(session_id)
+    if state is None or services is None or not path.startswith("/"):
+        return None
+    own = Path(os.path.realpath(state.workspace))
+    wanted = Path(os.path.realpath(path))
+    if wanted != own and own not in wanted.parents:
+        return None
+    return LocalFolderAccess(own, services)
+
+
 async def peek(orch: Orchestrators, project: Project, session_id: str, *, op: str, path: str = "", folder: str | None = None, pattern: str = "", ref: str = "", offset: int = 1, limit: int = 200) -> str:
     if op not in PEEK_OPS:
         raise Refused(f"op is one of {', '.join(PEEK_OPS)}")
+    if op == "files":
+        return await project_files(orch, project)
+    if parse_handle(path) is not None and (path.strip().startswith("att:") or not folder):
+        if op not in ("read", "ls"):
+            raise Refused(f"{path} is a kept file: read it with op='read'")
+        return await read_kept(orch, project.id, path, offset=offset, limit=limit)
+    own = _own_workspace(orch, session_id, path) if not folder and op in ("read", "ls", "find", "search") else None
+    access = own if own is not None else orch.folder_access(project, _folder(project, folder), session_id)
     target = _folder(project, folder)
-    access = orch.folder_access(project, target, session_id)
     try:
         if op == "read":
             if not path:
@@ -494,7 +545,7 @@ async def withdraw_questions(orch: Orchestrators, project: Project, session_id: 
     return f"withdrew {', '.join(withdrawn)}; the operator sees each one go with your reason.{tail}"
 
 
-async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> str:
+async def project_report(orch: Orchestrators, project: Project, session_id: str, *, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None, files: list[str] | None = None) -> str:
     """``dispatch_id`` names the main orchestrator's hand-over this report answers: a done or blocked
     report closes it, a progress or decision report is a message on it. Either reaches the main
     orchestrator, which tells the operator in its chat; the project's own notification is then quiet,
@@ -507,16 +558,29 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
     if len(body) > REPORT_TEXT_MAX:
         raise Refused(f"a report is at most {REPORT_TEXT_MAX} characters; the journal holds the detail")
     headline = " ".join((title or "").split())[:120] or f"{project.name}: {kind}"
+    attached = []
+    for ref in [str(f) for f in files or [] if str(f or "").strip()][:HANDOVER_MAX_FILES]:
+        try:
+            attached.append(await orch.manager.files.in_scope(ref, project.id))
+        except FileRefused as exc:
+            raise Refused(str(exc)) from exc
     dispatches = orch.app.extensions.get("dispatches")
     closed = ""
     if dispatch_id:
         if dispatches is None:
             raise Refused("dispatches are not running on this installation; report without dispatch_id")
         try:
-            dispatch = await dispatches.report(project, dispatch_id.strip(), kind=kind, text=body, title=(title or "").strip())
+            dispatch = await dispatches.report(project, dispatch_id.strip(), kind=kind, text=body, title=(title or "").strip(), files=attached)
         except ValueError as exc:
             raise Refused(str(exc)) from exc
         closed = f"; dispatch {dispatch.id} is {dispatch.status}" if dispatch.status != "open" else f"; added to dispatch {dispatch.id}"
+    elif attached:
+        # No dispatch to carry them: still the operator's to download from the report, and the main
+        # orchestrator's to read if the operator asks it about them.
+        for stored in attached:
+            await orch.manager.files.grant(stored, MAIN, actor="orchestrator", target="report")
+    if attached:
+        body += "\n\nFiles: " + ", ".join(f.short() for f in attached)
     refs: dict[str, Any] = {"kind": kind}
     if task_id:
         refs["task_id"] = task_id

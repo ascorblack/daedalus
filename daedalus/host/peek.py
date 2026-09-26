@@ -88,6 +88,17 @@ def numbered(window: Sequence[str], start: int, count: int) -> str:
     return clip("\n".join(lines) or "(empty)") + tail
 
 
+def text_window(data: bytes, name: str, *, offset: int = 1, limit: int = 200) -> str:
+    """Lines of a kept file (an attachment, a staff member's artifact) as Peek shows a folder's: the
+    same numbering and bounds. A binary file is described, not printed: it can still be handed on."""
+    if b"\x00" in data[:8192]:
+        raise PeekRefused(f"{name} is a binary file ({len(data)} bytes); it cannot be shown here, but it can be handed on with files=[…]")
+    start = max(1, int(offset)) - 1
+    count = max(1, min(int(limit), READ_MAX_LINES))
+    lines = data.decode("utf-8", errors="replace").splitlines(keepends=True)
+    return numbered(lines[start : start + count + 1], start, count)
+
+
 def check_ref(ref: str) -> str:
     ref = ref.strip()
     if ref and not _REF_RE.match(ref):
@@ -427,4 +438,4 @@ class BridgedFolderAccess:
         return clip(out.strip() or "(clean)")
 
 
-__all__ = ["BridgedFolderAccess", "FolderAccess", "HostFiles", "LocalFolderAccess", "PeekRefused", "UnreachableFolder", "check_ref", "clip", "numbered"]
+__all__ = ["BridgedFolderAccess", "FolderAccess", "HostFiles", "LocalFolderAccess", "PeekRefused", "UnreachableFolder", "check_ref", "clip", "numbered", "text_window"]

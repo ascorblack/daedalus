@@ -21,10 +21,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daedalus.extensions.dispatcher import OPERATIONS, TITLE, Dispatcher
+from daedalus.extensions.dispatcher import OPERATIONS, TITLE, Dispatcher, main_files
 from daedalus.extensions.dispatches import SETUP_BY
 from daedalus.extensions.notifications import ActionConflict, ActionOutcome, ActionRefused
 from daedalus.extensions.staff import AlreadyAnswered
+from daedalus.stores.files import StoredFile, human_size
 from daedalus.stores.projects import FolderSpec, ProjectError, ProjectSettings, normalise_root
 from daedalus.stores.staff import Ask, StaffError
 from daedalus.terminals.model import EnvUnavailable
@@ -129,7 +130,7 @@ class ProjectMaker:
 
     # -- the card ---------------------------------------------------------------------------------
 
-    async def propose(self, session_id: str, *, name: str, folders: list[dict[str, Any]] | None, goal: str, create_missing: bool, start_orchestrator: bool) -> Ask:
+    async def propose(self, session_id: str, *, name: str, folders: list[dict[str, Any]] | None, goal: str, create_missing: bool, start_orchestrator: bool, files: list[str] | None = None) -> Ask:
         label = " ".join(unescaped(name or "").split())[:80]
         if not label:
             raise ValueError("a project needs a name")
@@ -145,9 +146,12 @@ class ProjectMaker:
             # projects. The card says so, and the store still refuses one that nests in another's.
             also = await self.manager.projects.holders(found["path"])
             checked.append({**found, "readonly": bool(raw.get("readonly")), "label": unescaped(str(raw.get("label") or ""))[:60], "also_in": also})
-        return await self._card(session_id, name=label, folders=checked, goal=" ".join(unescaped(goal or "").split())[:1000], create_missing=create_missing, start_orchestrator=start_orchestrator)
+        handed = await main_files(self.dispatcher, files)
+        if handed and not start_orchestrator:
+            raise ValueError("files go to a new project's orchestrator with its first dispatch; with start_orchestrator=false nobody would receive them")
+        return await self._card(session_id, name=label, folders=checked, goal=" ".join(unescaped(goal or "").split())[:1000], create_missing=create_missing, start_orchestrator=start_orchestrator, files=handed)
 
-    async def _card(self, session_id: str, *, name: str, folders: list[dict[str, Any]], goal: str, create_missing: bool, start_orchestrator: bool) -> Ask:
+    async def _card(self, session_id: str, *, name: str, folders: list[dict[str, Any]], goal: str, create_missing: bool, start_orchestrator: bool, files: list[StoredFile] | None = None) -> Ask:
         text = f"Create the project {name}?"
         for folder in folders:
             what = "make" if folder.get("missing") else "use"
@@ -158,8 +162,10 @@ class ProjectMaker:
             text += "\n· a new folder of the installation's own"
         if goal:
             text += f"\nGoal: {goal}"
+        if files:
+            text += "\nWith the files: " + ", ".join(f"{f.name} ({human_size(f.size)})" for f in files)
         text += "\nIts orchestrator is switched on and asked to survey the folders and write the brief." if start_orchestrator else "\nIts orchestrator stays off."
-        detail = {"name": name, "folders": folders, "goal": goal, "create_missing": create_missing, "start_orchestrator": start_orchestrator, "options": OPTIONS}
+        detail = {"name": name, "folders": folders, "goal": goal, "create_missing": create_missing, "start_orchestrator": start_orchestrator, "options": OPTIONS, "files": [f.id for f in files or []]}
         ask = await self.manager.asks.open(None, origin="dispatcher", kind="project", text=text, routed_to="operator", detail=detail)
         ref = f"dispatcher:main:{ask.id}"
         await self.manager.db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.event_ref', ?) WHERE id = ?", (ref, ask.id))
@@ -251,7 +257,11 @@ class ProjectMaker:
         await self.manager.projects.set_setup(project.id, SETUP_BY)
         project = await orchestrators.enable(project.id, by="dispatcher")
         survey = SURVEY + (f"\nThe operator's goal for it: {detail['goal']}" if detail.get("goal") else "")
-        dispatch = await self.dispatcher.dispatches.create(project, text=survey, title="Survey the folders and write the brief", from_session=await self.dispatcher.session_id(), kind="setup")
+        # The same handles the main orchestrator was given: the card kept their ids, not the bytes.
+        files = await self.manager.files.many(str(i) for i in detail.get("files") or [])
+        if files:
+            survey += "\nThe operator's files for it are yours now: read them with Peek(path='att:…')."
+        dispatch = await self.dispatcher.dispatches.create(project, text=survey, title="Survey the folders and write the brief", from_session=await self.dispatcher.session_id(), kind="setup", files=files)
         return f"created {project.name} ({project.id}), switched its orchestrator on and handed it dispatch {dispatch.id} (#1): survey the folders and write the brief"
 
     async def resolve_action(self, req: Any) -> ActionOutcome:
@@ -293,11 +303,12 @@ async def op_create_project(
     goal: str = "",
     create_missing: bool = False,
     start_orchestrator: bool = True,
+    files: list[str] | None = None,
 ) -> str:
     maker: Any = d.app.extensions.get("dispatcher_projects")
     if maker is None:
         raise ValueError("creating projects is not available on this installation")
-    ask = await maker.propose(session_id, name=name, folders=folders, goal=goal, create_missing=create_missing, start_orchestrator=start_orchestrator)
+    ask = await maker.propose(session_id, name=name, folders=folders, goal=goal, create_missing=create_missing, start_orchestrator=start_orchestrator, files=files)
     return f"asked the operator to confirm as [{ask.short_id}] — a card in this chat; nothing is created until they answer, and the answer arrives as an event. Tell them in one line what you asked."
 
 

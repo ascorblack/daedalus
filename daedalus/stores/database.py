@@ -1302,6 +1302,54 @@ ALTER TABLE asks ADD COLUMN title TEXT NOT NULL DEFAULT '';
 """)
 
 
+# Files handed between the operator, the orchestrators and staff travel by handle, not by path: a
+# path means something in one environment only. The bytes are in the blob store; a row names them,
+# the scopes (the main orchestrator, a project) that may use the handle, the tasks that carry them,
+# and every movement of one — who, what, where, the size and the hash.
+MIGRATIONS.append("""
+CREATE TABLE files (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    origin_ref TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE file_access (
+    file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (file_id, scope)
+);
+CREATE INDEX file_access_by_scope ON file_access(scope, added_at);
+CREATE TABLE task_files (
+    task_id TEXT NOT NULL REFERENCES board_tasks(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, file_id)
+);
+CREATE INDEX task_files_by_file ON task_files(file_id);
+CREATE TABLE file_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    file_id TEXT REFERENCES files(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    env TEXT NOT NULL DEFAULT '',
+    size INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX file_transfers_by_file ON file_transfers(file_id, id);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

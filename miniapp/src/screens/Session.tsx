@@ -12,7 +12,8 @@ import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, activityS
 import { Explorer } from "../explorerpanel";
 import { DiffView } from "../previewparts";
 import { looksLikeDiff } from "../diff";
-import { ArtifactCard } from "../artifact";
+import { ArtifactCard, KeptFiles } from "../artifact";
+import { withoutAttachedList } from "../keptfiles";
 import { InlineMedia, mediaCopyText, splitMediaAnswer } from "../media";
 import { Answer, Composer, ComposerHandle } from "../composerbox";
 import { Approval, QueuedSteer, pendingApproval, readSteers, steersAfter } from "../composer";
@@ -1473,14 +1474,16 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
     <div className={`turn ${turn.note?.kind === "loop" ? "loop-turn" : ""} ${folded && !live ? "folded" : ""}`} id={seq ? `m${seq}` : undefined}>
       {/* The project's events the orchestrator was woken with are the news of the chat: a card, open. */}
       {turn.user && turn.note?.kind === "events" && <EventCard text={turn.note.body} />}
+      {turn.user && turn.note?.kind === "events" && !live && <KeptFiles text={turn.note.body} onOpen={preview} />}
       {turn.user && turn.note && turn.note.kind !== "events" && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} run={turn.note.kind === "loop" && !live ? { folded, toggle: () => setFolded(!folded) } : undefined} />}
       <div className="turn-content" hidden={folded && !live}>
       {turn.user && !turn.note && (
         <div className="msg-wrap">
           <div className="msg user">
             {inbound && <span className="msg-origin">{t("turn.origin.inbound", { source: inbound })}</span>}
-            <Md text={turn.user.text} cacheKey={live ? undefined : `u${seq ?? turn.key}`} />
+            <Md text={withoutAttachedList(turn.user.text)} cacheKey={live ? undefined : `u${seq ?? turn.key}`} />
           </div>
+          <KeptFiles text={turn.user.text} onOpen={preview} />
           {/* Under the message, not beside it: a row beside the bubble is off-screen on a phone. */}
           <MessageActions
             text={turn.user.text}
@@ -1523,6 +1526,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             : <InlineMedia key={part.presentation.id} sessionId={sessionId} presentation={part.presentation} />)}
         </div>
       ) : <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />)}
+      {turn.answer && !live && <KeptFiles text={turn.answer} onOpen={preview} />}
       {artifacts.length > 0 && (
         <div className="artifacts" aria-label={t("turn.artifacts")}>
           {artifacts.map((a) => {

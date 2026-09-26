@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from daedalus.extensions.orchestrator_ops import Refused, _folder
 from daedalus.staff_runtime import LiveSession, ReadRequest
+from daedalus.stores.files import FileRefused, StoredFile
 from daedalus.stores.projects import Project, ProjectFolder
 from daedalus.stores.staff import HARNESS_NAMES, HARNESSES, ISOLATIONS, MESSAGE_MODES, Staff, StaffBusy, StaffError
 
@@ -263,12 +264,14 @@ async def assign(
     folder: str | None = None,
     priority: int | None = None,
     depends_on: list[str] | None = None,
+    files: list[str] | None = None,
 ) -> str:
     team = _team(orch)
     board = orch.board
     if board is None:
         raise Refused("the board is not available on this installation")
     member = await _member(orch, project, staff)
+    handed = await _files(orch, project, session_id, files)
     given = {k: v.strip() for k, v in (("objective", objective), ("deliverable", deliverable), ("boundaries", boundaries), ("done_when", done_when)) if v is not None and v.strip()}
     target = _folder(project, folder) if folder else None
     existing: dict[str, Any] | None = None
@@ -304,6 +307,10 @@ async def assign(
             raise Refused(f"task {task['id']} is being worked on in its folder; release its worker before moving it")
         # The board has no folder of its own to set; the team reads the task's folder at the start.
         await orch.manager.db.execute("UPDATE board_tasks SET folder_id = ? WHERE id = ?", (target.id, task["id"]))
+    if handed:
+        # On the task, not on this call: a task that waits in the queue, or is started again after a
+        # crash, is handed its files at every start.
+        await orch.manager.files.attach_to_task(task["id"], handed, actor="orchestrator")
     try:
         launched = await team.assign(member, task["id"], by="orchestrator")
     except KeyError as exc:
@@ -311,14 +318,33 @@ async def assign(
     except StaffError as exc:
         raise Refused(f"task {task['id']} stays on the board, unstarted: {exc}") from exc
     if launched.get("state") == "started":
-        return f"{member.name} started on {task['id']} \"{task['title']}\""
-    return f"{member.name} will start {task['id']} \"{task['title']}\" when it is their turn: queue position {launched.get('position')} — {launched.get('detail')}"
+        return f"{member.name} started on {task['id']} \"{task['title']}\"" + await _delivered_note(orch, task["id"], handed)
+    waits = " The files are copied to them when they start." if handed else ""
+    return f"{member.name} will start {task['id']} \"{task['title']}\" when it is their turn: queue position {launched.get('position')} — {launched.get('detail')}{waits}"
+
+
+async def _files(orch: Orchestrators, project: Project, session_id: str, refs: list[str] | None) -> list[StoredFile]:
+    """The files a hand-over names, all checked before anything is written or sent."""
+    if not refs:
+        return []
+    try:
+        return await _team(orch).handoff.resolve(refs, project=project, actor="orchestrator")
+    except FileRefused as exc:
+        raise Refused(str(exc)) from exc
+
+
+async def _delivered_note(orch: Orchestrators, task_id: str, handed: list[StoredFile]) -> str:
+    """Where the member got the files, from the delivery records: the orchestrator learns the member
+    has them, not a path it should repeat — the brief already names them."""
+    if not handed:
+        return ""
+    return f"; {len(handed)} file{'s' if len(handed) > 1 else ''} copied where they can open it{'' if len(handed) == 1 else ' them'}, and the brief names {'it' if len(handed) == 1 else 'them'}"
 
 
 # -- talking and reading -------------------------------------------------------------------------------------
 
 
-async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff: str, text: str, mode: str = "queue") -> str:
+async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff: str, text: str, mode: str = "queue", files: list[str] | None = None) -> str:
     if mode not in MESSAGE_MODES:
         raise Refused(f"mode is one of {', '.join(MESSAGE_MODES)}")
     body = (text or "").strip()
@@ -327,11 +353,14 @@ async def tell(orch: Orchestrators, project: Project, session_id: str, *, staff:
     if len(body) > TELL_MAX:
         raise Refused(f"a message is at most {TELL_MAX} characters; put the detail in the task or the journal")
     member = await _member(orch, project, staff)
+    handed = await _files(orch, project, session_id, files)
     try:
-        receipt = await _team(orch).tell(member, body, mode=mode, by="orchestrator")
+        receipt = await _team(orch).tell(member, body, mode=mode, by="orchestrator", files=handed)
     except StaffError as exc:
         raise Refused(str(exc)) from exc
     line = f"message {receipt['message_id']} to {member.name}: {receipt['state']}"
+    if receipt.get("files"):
+        line += f", with {len(receipt['files'])} file{'s' if len(receipt['files']) > 1 else ''} copied where they can open {'it' if len(receipt['files']) == 1 else 'them'}"
     if receipt.get("degraded_to"):
         line += f" (their executor cannot {mode}; it was sent as {receipt['degraded_to']})"
     if receipt.get("error"):

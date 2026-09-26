@@ -1091,7 +1091,7 @@ file writes, no subagents. An allowlist rather than a list of refusals, so a too
 an orchestrator's until someone decides it should be."""
 
 
-DISPATCHER_TOOLS = ["Projects", "Delegate", "Progress", "Cancel", "CreateProject", "Answer", "Notify", "StaySilent", "HistorySearch", "HistoryExpand", "Recall"]
+DISPATCHER_TOOLS = ["Projects", "Delegate", "Progress", "Cancel", "CreateProject", "Answer", "Files", "Notify", "StaySilent", "HistorySearch", "HistoryExpand", "Recall"]
 """Everything the main orchestrator may call. It routes the operator's words to projects and follows
 what it handed over; it never touches files, staff or a board itself, and it never blocks on a
 question (no AskUser: a main orchestrator paused on a question could not hear its projects report).

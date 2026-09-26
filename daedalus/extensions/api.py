@@ -54,7 +54,7 @@ from daedalus.config import (
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
-from daedalus.extensions import api_harnesses, api_projects, api_staff
+from daedalus.extensions import api_files, api_harnesses, api_projects, api_staff
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature, webhook_facts
@@ -1431,6 +1431,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     api_harnesses.register(api, app, auth)
     # One staff member's session as its runtime sees it: the staff view's reads.
     api_staff.register(api, app, auth)
+    # The files orchestration keeps by handle: the cards a chat draws, their bytes, the audit.
+    api_files.register(api, app, auth)
 
     # -- staff: the named members of a project's team ------------------------------------------
 

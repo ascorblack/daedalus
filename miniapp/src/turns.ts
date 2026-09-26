@@ -377,7 +377,8 @@ export type Artifact = {
   callId: string;
   path: string;
   name: string;
-  how: "wrote" | "sent";
+  /** Written by the turn, sent by it, or a file kept by handle that the text names (`att:…`). */
+  how: "wrote" | "sent" | "kept";
   caption: string;
   /** The size as the tool's answer reported it, when it did. */
   size: string | null;

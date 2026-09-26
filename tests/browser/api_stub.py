@@ -203,7 +203,12 @@ def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
         return 404, "application/json", json.dumps({"detail": "no such notification"})
     if path in GATES:
         return 200, "application/json", json.dumps(GATES[path])
+    if method.upper() == "GET" and path == "/api/files":
+        # Handles a harness did not invent name no file: the chat draws no card for them.
+        return 200, "application/json", json.dumps({"files": []})
     parts = path.split("/")
+    if method.upper() == "GET" and len(parts) == 5 and parts[2] == "projects" and parts[4] == "files":
+        return 200, "application/json", json.dumps({"files": []})
     if method.upper() == "GET" and len(parts) == 5 and parts[2] == "projects" and parts[4] == "usage":
         # A project nobody invented spend for spent nothing; a harness with a team answers it itself.
         nothing = {w: {"usd": 0.0, "tokens": 0, "unpriced": 0} for w in ("today", "week", "all")}

@@ -222,6 +222,18 @@ class FakeAgent:
             tool_id = "toolu_" + new_id().replace("-", "")[:24]
             answer = await self.question(spec["question"], spec.get("options", []), tool_id)
             await self.assistant(f"You chose: {answer}")
+        elif kind == "cat":
+            # A file the brief names, opened where this CLI runs: what proves a handed-over file arrived.
+            tool_id = "toolu_" + new_id().replace("-", "")[:24]
+            target = arg if arg.startswith("/") else os.path.join(self.cwd, arg)
+            try:
+                with open(target, encoding="utf-8") as handle:
+                    first = handle.readline().strip()
+            except OSError as exc:
+                first = f"cannot open: {exc.strerror}"
+            self.log("opened", path=target, first=first)
+            await self.tool("Read", {"file_path": target}, tool_id, output=first)
+            await self.assistant(f"read {arg}: {first}")
         elif kind == "fail":
             await pause(0.2)
             raise TurnFailed(arg or "unknown")

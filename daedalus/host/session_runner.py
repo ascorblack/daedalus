@@ -83,6 +83,8 @@ from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
 from daedalus.stores.dispatches import DispatchStore
+from daedalus.stores.files import MAIN as MAIN_FILES
+from daedalus.stores.files import FileRefused, FileStore
 from daedalus.stores.media import MediaStore
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
 from daedalus.stores.projects import Project, ProjectFolder, ProjectSettings, ProjectStore
@@ -478,6 +480,8 @@ class SessionManager:
             personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
         )
         self.asks = AsksStore(db)
+        self.files = FileStore(db, self.blobs)
+        """Files handed between the operator, the orchestrators and staff, by handle (``att:<id>``)."""
         self.dispatches = DispatchStore(db)
         """The main orchestrator's hand-overs to projects: what a project orchestrator's state lists
         and what its reports close."""
@@ -2581,11 +2585,57 @@ class SessionManager:
                     logger.exception("run-started hook failed")
             return run_id
 
+    def file_scope(self, state: SessionState) -> str | None:
+        """Where an attachment of this session is kept by handle: the main orchestrator's ``main``, a
+        project orchestrator's project; ``None`` for a session that works in its own folder."""
+        if self.is_dispatcher(state):
+            return MAIN_FILES
+        if self.is_orchestrator(state):
+            return str(state.metadata.get("orchestrator_of") or state.metadata.get("orchestrator_retired_of") or "") or None
+        return None
+
+    async def _keep_attachments(self, state: SessionState, text: str, attachments: Sequence[Attachment], scope: str) -> tuple[str, list[tuple[str, str]]]:
+        """An orchestrator's attachments go to the store, not its inbox, and it is told their handles.
+
+        An orchestrator never opens a file where it lies: it reads it through Peek or Files and hands
+        it to staff, who work in another folder or on another machine. A path in its inbox named
+        nothing they could open — a host project's orchestrator once passed its container inbox path to
+        a member on the host — so the message names the handle, which means the same file everywhere.
+        """
+        lines: list[str] = []
+        image_refs: list[tuple[str, str]] = []
+        actor = "operator"
+        for attachment in attachments:
+            name = Path(attachment.name or attachment.path.name).name
+            try:
+                stored = await self.files.add_path(
+                    attachment.path, name=name, mime=attachment.mime_type, origin="operator", origin_ref=state.session.id, scope=scope, actor=actor
+                )
+            except FileRefused as exc:
+                lines.append(f"- {name}: not kept — {exc}")
+                continue
+            attachment.stored_name = stored.name
+            attachment.content_sha256 = stored.sha256
+            lines.append(f"- {stored.line()}")
+            if stored.mime.startswith("image/"):
+                meta = await self.blobs.put(TENANT, await self.files.read(stored), content_type=stored.mime)
+                image_refs.append((meta.ref, stored.mime))
+        how = (
+            "Read one with Files(op='read', file=…); pass them to a project with Delegate(files=[…])."
+            if scope == MAIN_FILES
+            else "Read one with Peek(op='read', path=…); hand them to staff with Assign or Tell (files=[…])."
+        )
+        body = (text.strip() + "\n\n" if text.strip() else "") + "Attached files (kept by handle; " + how + "):\n" + "\n".join(lines)
+        return body, image_refs
+
     async def _ingest_attachments(
         self, state: SessionState, text: str, attachments: Sequence[Attachment]
     ) -> tuple[str, list[tuple[str, str]]]:
         if not attachments:
             return text, []
+        scope = self.file_scope(state)
+        if scope:
+            return await self._keep_attachments(state, text, attachments, scope)
         inbox = state.workspace / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []

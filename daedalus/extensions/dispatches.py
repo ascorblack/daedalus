@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.stores.dispatches import CLOSED, Dispatch, DispatchError
+from daedalus.stores.files import MAIN, StoredFile, file_ref
 from daedalus.stores.projects import Project
 from daedalus.stores.staff import ACTIVE_STATUSES, Ask
 
@@ -83,31 +85,45 @@ class Dispatches:
 
     # -- opening and following up ----------------------------------------------------------------
 
-    async def create(self, project: Project, *, text: str, title: str = "", from_session: str = "", kind: str = "work") -> Dispatch:
-        """A new dispatch for the project; its orchestrator is woken with it at once."""
+    async def create(self, project: Project, *, text: str, title: str = "", from_session: str = "", kind: str = "work", files: Sequence[StoredFile] = ()) -> Dispatch:
+        """A new dispatch for the project; its orchestrator is woken with it at once. ``files`` are the
+        main orchestrator's, made the project's here, so the handles the orchestrator is told open."""
         dispatch = await self.store.create(project.id, text=text, title=title, from_session=from_session, kind=kind)
+        refs = await self._share(files, project.id, dispatch.id)
         await self.manager.projects.record(
             project.id, "system", "dispatch",
-            f"The main orchestrator handed over dispatch {dispatch.id} (#{dispatch.seq}){': ' + dispatch.title if dispatch.title else ''}: {_one_line(dispatch.text, 600)}",
-            {"dispatch_id": dispatch.id},
+            f"The main orchestrator handed over dispatch {dispatch.id} (#{dispatch.seq}){': ' + dispatch.title if dispatch.title else ''}: {_one_line(dispatch.text, 600)}"
+            + (f" — files: {', '.join(f.short() for f in files)}" if files else ""),
+            {"dispatch_id": dispatch.id, **({"files": [r["id"] for r in refs]} if refs else {})},
         )
         await self._publish(
             "dispatch.created",
-            {"dispatch_id": dispatch.id, "seq": dispatch.seq, "title": dispatch.title, "text": dispatch.text, "kind": dispatch.kind, "from_session": from_session, "actor": "dispatcher"},
+            {"dispatch_id": dispatch.id, "seq": dispatch.seq, "title": dispatch.title, "text": dispatch.text, "kind": dispatch.kind, "from_session": from_session, "actor": "dispatcher", **({"files": refs} if refs else {})},
             project.id,
         )
         return dispatch
 
-    async def follow_up(self, dispatch: Dispatch, text: str, *, author: str = "dispatcher") -> Dispatch:
+    async def _share(self, files: Sequence[StoredFile], scope: str, dispatch_id: str, *, actor: str = "dispatcher") -> list[dict[str, Any]]:
+        """Grant files to the scope that receives them with a dispatch (the project going down, the main
+        orchestrator coming back up), and name them as an event carries them."""
+        refs = []
+        for stored in files:
+            await self.manager.files.grant(stored, scope, actor=actor, target=f"dispatch {dispatch_id}")
+            refs.append(file_ref(stored))
+        return refs
+
+    async def follow_up(self, dispatch: Dispatch, text: str, *, author: str = "dispatcher", files: Sequence[StoredFile] = ()) -> Dispatch:
         """More for an open dispatch — a correction, a detail, the answer it was blocked on. A blocked
         dispatch opens again with it; a done or cancelled one is over, and new work is a new dispatch."""
         if dispatch.status in CLOSED:
             raise DispatchError(f"dispatch {dispatch.id} is {dispatch.status}; hand the project new work as a new dispatch")
         reopened = await self.store.reopen(dispatch.id) if dispatch.status == "blocked" else False
-        message = await self.store.add_message(dispatch.id, author=author, kind="message", text=text)
+        refs = await self._share(files, dispatch.project_id, dispatch.id, actor=author)
+        body = text + (f"\n\nFiles: {', '.join(f.short() for f in files)}" if files else "")
+        await self.store.add_message(dispatch.id, author=author, kind="message", text=body)
         await self._publish(
             "dispatch.message",
-            {"dispatch_id": dispatch.id, "author": author, "kind": "message", "text": message.text, "title": dispatch.title, "actor": author},
+            {"dispatch_id": dispatch.id, "author": author, "kind": "message", "text": text, "title": dispatch.title, "actor": author, **({"files": refs} if refs else {})},
             dispatch.project_id,
         )
         if reopened:
@@ -138,7 +154,7 @@ class Dispatches:
 
     # -- the project's reports -------------------------------------------------------------------------
 
-    async def report(self, project: Project, dispatch_id: str, *, kind: str, text: str, title: str = "") -> Dispatch:
+    async def report(self, project: Project, dispatch_id: str, *, kind: str, text: str, title: str = "", files: Sequence[StoredFile] = ()) -> Dispatch:
         """A ``ProjectReport`` on a dispatch: progress and decisions are its messages, done and blocked
         close it. Refused for another project's dispatch and for one that is already over."""
         dispatch = await self.store.get(dispatch_id)
@@ -149,16 +165,19 @@ class Dispatches:
         if not dispatch.open:
             raise DispatchError(f"dispatch {dispatch.id} is already {dispatch.status}; it takes no more reports")
         body = (f"{title.strip()}\n" if title.strip() else "") + text.strip()
-        await self.store.add_message(dispatch.id, author="orchestrator", kind=kind, text=body)
+        # Made the main orchestrator's before the report is heard of, so the handles it is told open.
+        refs = await self._share(files, MAIN, dispatch.id, actor="orchestrator")
+        kept = body + (f"\n\nFiles: {', '.join(f.short() for f in files)}" if files else "")
+        await self.store.add_message(dispatch.id, author="orchestrator", kind=kind, text=kept)
         if kind in ("done", "blocked"):
-            if not await self.store.close(dispatch.id, kind, body):
+            if not await self.store.close(dispatch.id, kind, kept):
                 current = await self.store.get(dispatch.id)
                 raise DispatchError(f"dispatch {dispatch.id} is already {current.status if current else 'gone'}")
-            await self._closed(dispatch, kind, body, by="orchestrator")
+            await self._closed(dispatch, kind, body, by="orchestrator", files=refs)
         else:
             await self._publish(
                 "dispatch.message",
-                {"dispatch_id": dispatch.id, "author": "orchestrator", "kind": kind, "text": body[:4000], "title": dispatch.title, "actor": "orchestrator"},
+                {"dispatch_id": dispatch.id, "author": "orchestrator", "kind": kind, "text": body[:4000], "title": dispatch.title, "actor": "orchestrator", **({"files": refs} if refs else {})},
                 project.id,
             )
         current = await self.store.get(dispatch.id)
@@ -195,8 +214,8 @@ class Dispatches:
             reopened.append(dispatch)
         return reopened
 
-    async def _closed(self, dispatch: Dispatch, status: str, result: str, *, by: str) -> None:
-        await self._publish("dispatch.closed", {"dispatch_id": dispatch.id, "status": status, "result": result[:4000], "by": by, "title": dispatch.title, "seq": dispatch.seq, "kind": dispatch.kind, "actor": by}, dispatch.project_id)
+    async def _closed(self, dispatch: Dispatch, status: str, result: str, *, by: str, files: list[dict[str, Any]] | None = None) -> None:
+        await self._publish("dispatch.closed", {"dispatch_id": dispatch.id, "status": status, "result": result[:4000], "by": by, "title": dispatch.title, "seq": dispatch.seq, "kind": dispatch.kind, "actor": by, **({"files": files} if files else {})}, dispatch.project_id)
         await self._publish("dispatch.updated", {"dispatch_id": dispatch.id, "status": status, "change": "closed", "actor": by}, dispatch.project_id)
         await self.manager.projects.record(dispatch.project_id, "system", "dispatch", f"Dispatch {dispatch.id} (#{dispatch.seq}) closed as {status} by the {by}.", {"dispatch_id": dispatch.id})
         # Only a cancelled dispatch takes its orchestrator's questions with it. Withdrawing them on "done"

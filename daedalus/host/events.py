@@ -196,6 +196,15 @@ class StaffStatus(TypedDict):
     actor: NotRequired[str]
 
 
+class FileRef(TypedDict):
+    """A kept file an event hands on (``daedalus.stores.files``): its handle is ``att:<id>``."""
+
+    id: str
+    name: str
+    mime: str
+    size: int
+
+
 class StaffReport(TypedDict):
     kind: Literal["checkpoint", "needs_input", "stuck", "done", "turn_done"]
     """``turn_done`` is only ever implicit: a command-line member's turn that ended with no report."""
@@ -207,6 +216,8 @@ class StaffReport(TypedDict):
     implicit: NotRequired[bool]
     """Made by the host from the turn's last message because the member did not report; ``needs_input``
     when that message ends by asking something."""
+    files: NotRequired[list[FileRef]]
+    """The artifacts the host took in from the member's folder, kept as the project's files."""
 
 
 class StaffChannel(TypedDict):
@@ -291,6 +302,8 @@ class DispatchCreated(TypedDict):
     kind: str
     """``work``, or ``setup``: the survey that writes a new project's brief."""
     from_session: NotRequired[str]
+    files: NotRequired[list[FileRef]]
+    """Files the main orchestrator handed over with it, now the project's."""
 
 
 class DispatchMessage(TypedDict):
@@ -299,6 +312,7 @@ class DispatchMessage(TypedDict):
     """``dispatcher`` (a follow-up for the project) · ``orchestrator`` (a progress report) · ``operator`` · ``system``."""
     kind: str
     text: str
+    files: NotRequired[list[FileRef]]
 
 
 class DispatchUpdated(TypedDict):
@@ -313,6 +327,7 @@ class DispatchClosed(TypedDict):
     """``done`` · ``blocked`` · ``cancelled``."""
     result: str
     by: NotRequired[str]
+    files: NotRequired[list[FileRef]]
 
 
 class DispatchStalled(TypedDict):
