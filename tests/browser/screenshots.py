@@ -1713,7 +1713,8 @@ def run() -> int:
         shot(page, "usage", "usage", settle=1500)
         shot(page, "memory", "memory")
         # The settings index, because the language switch is its first row.
-        shot(page, "settings", "settings")
+        # Settings is a centred stage of its own now, with no `.screen` to wait for.
+        shot(page, "settings", "settings", wait=".settings-stage")
         shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
         shot(page, "settings-notifications", "settings/notifications", wait=".nmatrix", settle=600)
         shot(page, "settings-terminals", "settings/terminals", wait=".loadbar-track", settle=600)
@@ -1756,11 +1757,97 @@ def run() -> int:
     staff = run_staff()
     harnesses = run_harnesses()
     main = run_main()
-    return run_focus() or notifications or phone or staff or harnesses or main
+    browser = run_browser()
+    return run_focus() or notifications or phone or staff or harnesses or main or browser
+
+
+def run_browser() -> int:
+    """The agent's browser (``ONLY=browser``): the corner preview beside the chat, the Browser tab live
+    with the agent's cursor, the operator driving, and the phone's sheet and takeover."""
+    from browser_stub import BrowserStub, render_scenes, wait_frames
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        scenes = render_scenes(browser)
+        bs = BrowserStub(scenes)
+        bs.add("g1", scene="shop", owner_id=S1, acting=True)
+        bs.act("g1", "click", "size", name="5 kg", element="the 5 kg size option")
+
+        def page_for(context):  # type: ignore[no-untyped-def]
+            page = context.new_page()
+            page.route("**/api/**", stub)
+            bs.install(page)
+            return page
+
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = page_for(desk)
+        page.goto(f"{BASE}/agents/{S1}?panel=details&token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".bp-pip", timeout=15000)
+        wait_frames(page, ".bp-pip", 1)
+        page.wait_for_timeout(600)
+        bs.act("g1", "click", "add", name="Add to cart", element="the Add to cart button")
+        page.wait_for_timeout(260)
+        page.screenshot(path=str(OUT / "browser-pip.png"))
+        print("wrote browser-pip")
+
+        page.goto(f"{BASE}/agents/{S1}?panel=browser&token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".panel .bp .bv[data-state='live']", timeout=15000)
+        wait_frames(page, ".panel .bp", 1)
+        page.locator(".panel .bp-log-head").click()
+        page.wait_for_timeout(500)
+        bs.act("g1", "type", "search", name="Search", element="the shop's search field", text_len=15, text="whole rye flour")
+        page.wait_for_timeout(280)
+        page.screenshot(path=str(OUT / "session-browser.png"))
+        print("wrote session-browser")
+
+        page.locator(".panel .bp-control.take").click()
+        page.wait_for_selector(".panel .bv.driving", timeout=5000)
+        # Out of the way of every tooltip: the empty foot of the panel's stage.
+        page.mouse.move(1300, 800)
+        page.wait_for_timeout(500)
+        page.screenshot(path=str(OUT / "session-browser-takeover.png"))
+        print("wrote session-browser-takeover")
+        page.locator(".panel .bp-control.give").click()
+        page.locator(".bp-give textarea").fill("Signed in; carry on from the cart." if LANG == "en" else "Я вошёл, продолжай с корзины.")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "session-browser-giveback.png"))
+        print("wrote session-browser-giveback")
+        page.locator(".bp-give button[type='submit']").click()
+        page.wait_for_timeout(300)
+        desk.close()
+
+        # The phone: a login the agent cannot do, so the button and the sheet are amber.
+        bs.navigate("g1", "signin")
+        bs.needs_you("g1", "login", "Sign in to accounts.example.com")
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        phone.add_init_script("try { localStorage.setItem('daedalus.browser.announced', JSON.stringify(['g1'])); } catch (e) {}")
+        page = page_for(phone)
+        page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+        page.wait_for_selector(".browser-headbtn", timeout=15000)
+        wait_frames(page, ".browser-headbtn", 1)
+        page.wait_for_timeout(500)
+        page.screenshot(path=str(OUT / "phone-browser-head.png"))
+        print("wrote phone-browser-head")
+        page.locator(".browser-headbtn").tap()
+        page.wait_for_selector(".panel-sheet .bp .bv[data-state='live']", timeout=15000)
+        wait_frames(page, ".panel-sheet .bp", 1)
+        page.wait_for_timeout(600)
+        page.screenshot(path=str(OUT / "phone-browser.png"))
+        print("wrote phone-browser")
+        page.locator(".panel-sheet .bp-control.take").tap()
+        page.wait_for_selector(".bp-drive .bv.driving", timeout=5000)
+        wait_frames(page, ".bp-drive", 1)
+        page.wait_for_timeout(700)
+        page.screenshot(path=str(OUT / "phone-browser-takeover.png"))
+        print("wrote phone-browser-takeover")
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_browser() if only == "browser" else run_harnesses() if only == "harnesses" else run_staff() if only == "staff" else run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_main() if only == "main" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

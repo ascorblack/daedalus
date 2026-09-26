@@ -32,6 +32,10 @@ import type { TerminalState } from "../terminal/instance";
 import { errorText } from "../ui";
 import { FeedView, useTurns } from "./FeedView";
 import { HealthLine } from "./health";
+import { BrowserTab } from "../browser/BrowserPanel";
+import { deviceSaving, useBrowsers } from "../browser/data";
+import { BrowserHeadButton } from "../browser/phone";
+import { BrowserPip } from "../browser/pip";
 import { attention, canAlways, channelWords, composerWhen, defaultMode, keyboardBlocks, listRows, nowChoice, openRequests, outboxRows, turnFacts, type StaffViewMode } from "./model";
 
 const enc = encodeURIComponent;
@@ -90,6 +94,9 @@ export function StaffView({ projectId, staffId, wide, toast, onBack }: { project
   const [reveal, setReveal] = useState(0);
   const [terminalState, setTerminalState] = useState<TerminalState | null>(null);
   const messages = useStaffMessages(staffId, MESSAGES_N);
+  // A member's browser (a CLI's through its tools entry): a tab beside its session once it has one.
+  const browsers = useBrowsers({ staff: staffId });
+  const hasBrowser = browsers.groups.length > 0;
   const need = attention(messages);
   const live = !!session;
   const feed = useTurns(staffId, live);
@@ -142,10 +149,21 @@ export function StaffView({ projectId, staffId, wide, toast, onBack }: { project
   }
   const flagged = need.failed.length > 0 ? need.failed.length : need.pending.length;
   const flaggedText = need.failed.length > 0 ? plural("staff.attention.failed", need.failed.length) : plural("staff.attention.pending", need.pending.length);
+  // The corner card and the header's thumbnail both open the Browser tab beside the member.
+  function showBrowser() {
+    setTab("browser");
+    if (!wide) return setSheet(true);
+    if (!side) {
+      save(SIDE_KEY, "open");
+      setSide(true);
+    }
+  }
   const panel = (
     <StaffPanel projectId={projectId} staffId={staffId} name={member.name} view={view ?? null} notes={member.notes} instructions={member.instructions} taskId={session?.task_id ?? null}
-      tab={tab} onTab={setTab} messages={messages} reveal={reveal} toast={toast} />
+      tab={tab === "browser" && !hasBrowser ? "session" : tab} onTab={setTab} messages={messages} reveal={reveal} toast={toast}
+      browser={hasBrowser ? <BrowserTab groups={browsers.groups} toast={toast} phone={!wide} /> : null} />
   );
+  const browserInView = (wide ? side : sheet) && tab === "browser";
   const outbox = outboxRows(messages);
 
   return (
@@ -164,6 +182,7 @@ export function StaffView({ projectId, staffId, wide, toast, onBack }: { project
           <button className={shown === "terminal" ? "on" : ""} aria-pressed={shown === "terminal"} data-mode="terminal" disabled={!terminalId} title={terminalId ? undefined : t("staff.mode.noterminal")} onClick={() => pick("terminal")}>{t("staff.mode.terminal")}</button>
         </div>
         <div className="head-actions">
+          {!wide && hasBrowser && <BrowserHeadButton groups={browsers.groups} onOpen={showBrowser} streaming={!sheet} saving={deviceSaving(true)} />}
           {flagged > 0 && (
             <button
               className={`staff-attention ${need.failed.length > 0 ? "failed" : "pending"}`}
@@ -200,6 +219,7 @@ export function StaffView({ projectId, staffId, wide, toast, onBack }: { project
       </StaffHeader>
       <div className={`chat-body ${wide && side ? "with-staff-aside" : ""}`}>
         <div className="chat-main">
+          {wide && !browserInView && <BrowserPip groups={browsers.groups} onOpen={showBrowser} />}
           {shown === "terminal" && terminalId ? (
             <div className="staff-term">
               <TerminalView id={terminalId} visible env={launch?.env ?? undefined} onState={(_, state) => setTerminalState(state)} />
@@ -342,7 +362,7 @@ function StaffComposer({ staffId, name, caps, live, toast }: { staffId: string; 
   );
 }
 
-type SideTab = "session" | "changes" | "notes";
+type SideTab = "session" | "changes" | "notes" | "browser";
 
 type PanelProps = {
   projectId: string;
@@ -358,20 +378,24 @@ type PanelProps = {
   /** Bumped by the header's marker: the Messages section is scrolled into view. */
   reveal: number;
   toast: (text: string) => void;
+  /** The member's browser, when it has had one: a fourth tab. */
+  browser: ReactNode;
 };
 
 /** The column beside the member (a sheet on a phone): its session and messages, what it changed, its notes. */
-function StaffPanel({ projectId, staffId, name, view, notes, instructions, taskId, tab, onTab: setTab, messages, reveal, toast }: PanelProps) {
+function StaffPanel({ projectId, staffId, name, view, notes, instructions, taskId, tab, onTab: setTab, messages, reveal, toast, browser }: PanelProps) {
+  const tabs: SideTab[] = browser ? ["session", "changes", "notes", "browser"] : ["session", "changes", "notes"];
   return (
-    <div className="staff-panel">
+    <div className={`staff-panel ${tab === "browser" ? "with-browser" : ""}`}>
       <div className="panel-tabs" role="tablist">
-        {(["session", "changes", "notes"] as SideTab[]).map((name) => (
+        {tabs.map((name) => (
           <button key={name} role="tab" className={`panel-tab ${tab === name ? "on" : ""}`} aria-selected={tab === name} data-tab={name} onClick={() => setTab(name)}>
             <span>{t(`staff.tab.${name}`)}</span>
           </button>
         ))}
       </div>
-      <div className="panel-body staff-panel-body">
+      <div className={`panel-body staff-panel-body ${tab === "browser" ? "tab-browser" : ""}`}>
+        {tab === "browser" && browser}
         {tab === "session" && <SessionTab staffId={staffId} view={view} messages={<MessagesSection staffId={staffId} name={name} messages={messages} reveal={reveal} toast={toast} />} />}
         {tab === "changes" && <ChangesTab projectId={projectId} staffId={staffId} taskId={taskId} />}
         {tab === "notes" && (

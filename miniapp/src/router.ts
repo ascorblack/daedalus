@@ -6,12 +6,12 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "orchestration";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "harnesses" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "orchestration" | "browser";
 
 export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "terminals", "harnesses", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 /** Orchestration is a mode of its own rather than a destination of the menu: its item on the rail
  *  (its tab on a phone) goes there, and so does everything that belongs to it. */
-const INNER: Screen[] = ["orchestration"];
+const INNER: Screen[] = ["orchestration", "browser"];
 
 /** Orchestration mode's home on a desktop: the main orchestrator's chat. */
 export const ORCHESTRATION = `${BASE}/orchestration`;
@@ -163,7 +163,8 @@ export function useRoute(): Route {
   return route;
 }
 
-/** Legacy addresses still reach the right screen: /app/#settings, /app/?startapp=session_<id>,
+/** Legacy addresses still reach the right screen: /app/#settings, /app/?startapp=session_<id>
+ *  (and `browser_<id>`, the same session with its Browser tab),
  *  /app/project/<id>. A bare /app opens the mode this device was last in, orchestration at
  *  `orchestrationHome` (the main chat on a desktop, the list on a phone). */
 export function migrateLegacyLocation(startParam?: string | null, mode?: "agents" | "orchestration", orchestrationHome = ORCHESTRATION): void {
@@ -182,7 +183,14 @@ export function migrateLegacyLocation(startParam?: string | null, mode?: "agents
     return;
   }
   const m = startParam ? /^session_([A-Za-z0-9_-]+)$/.exec(startParam) : null;
-  if (m) navigate(sessionPath(m[1]), { replace: true });
+  if (m) {
+    navigate(sessionPath(m[1]), { replace: true });
+    return;
+  }
+  // "The browser needs you" in Telegram opens the session with its Browser tab: a start parameter
+  // carries only letters, digits, _ and -, so the panel cannot travel as a query.
+  const b = startParam ? /^browser_([A-Za-z0-9_-]+)$/.exec(startParam) : null;
+  if (b) navigate(sessionPath(b[1]) + "?panel=browser", { replace: true });
 }
 
 /** Scroll offsets of the list screens, restored when the reader comes back. */

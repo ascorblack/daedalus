@@ -39,7 +39,7 @@ func TestATerminalsServiceSeesEveryFolderTheAgentSees(t *testing.T) {
 	if _, err := addMounts(p, []string{"/home/someone/work/bakery", "/home/someone/work/photos"}); err != nil {
 		t.Fatal(err)
 	}
-	body := withProjectMounts(p, fmt.Sprintf(overrideYAML, "img", "img", "img"))
+	body := withProjectMounts(p, fmt.Sprintf(overrideYAML, "img", "img", "img", "img"))
 	for _, service := range []string{"daedalus", "terminals"} {
 		at := strings.Index(body, "  "+service+":\n")
 		if at < 0 {
@@ -51,7 +51,8 @@ func TestATerminalsServiceSeesEveryFolderTheAgentSees(t *testing.T) {
 			t.Fatalf("%s does not start with the two mounts:\n%s", service, body)
 		}
 	}
-	for _, service := range []string{"keyproxy", "telegram-bot-api"} {
+	// The browser least of all: a page reaches a file only through the host and the session's walls.
+	for _, service := range []string{"keyproxy", "browser", "telegram-bot-api"} {
 		at := strings.Index(body, "  "+service+":\n")
 		if at < 0 {
 			t.Fatalf("the override has no %s service:\n%s", service, body)

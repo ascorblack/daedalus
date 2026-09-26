@@ -12,7 +12,8 @@ import (
 // One name is filled in three times: the key proxy and the terminals service are the same image as
 // the agent, each started with a different command into a container of its own. The compose file
 // already says so; naming it here as well is what keeps a desktop install from building an image the
-// published one would have done.
+// published one would have done. The browser service is the image's other target, published as the
+// `:browser` tag; it runs only when the env file turns its profile on (composeArgs).
 //
 // The local Bot API server needs Telegram API credentials to run at all, so it sits behind a
 // profile; daedalus depends on it with required:false, which is what lets the stack come up with
@@ -30,6 +31,8 @@ services:
     image: %s
   terminals:
     image: %s
+  browser:
+    image: %s
   telegram-bot-api:
     profiles: ["telegram"]
 `
@@ -37,6 +40,6 @@ services:
 // WriteOverride writes the override file. It is rewritten on every start because the image name
 // belongs to the launcher's version, not to the operator's folder.
 func WriteOverride(p Paths) error {
-	body := fmt.Sprintf(overrideYAML, agentImage(), agentImage(), agentImage())
+	body := fmt.Sprintf(overrideYAML, agentImage(), agentImage(), agentImage(), browserImage())
 	return os.WriteFile(p.Override, []byte(withProjectMounts(p, body)), 0o644) // projects: the folders the operator added (desktop/projects.go)
 }

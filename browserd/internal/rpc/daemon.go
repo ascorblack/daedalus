@@ -14,6 +14,7 @@ import (
 
 	"github.com/ascorblack/daedalus/browserd/internal/browser"
 	"github.com/ascorblack/daedalus/browserd/internal/config"
+	"github.com/ascorblack/daedalus/browserd/internal/netwall"
 	"github.com/ascorblack/daedalus/browserd/internal/page"
 	"github.com/ascorblack/daedalus/browserd/internal/version"
 	"github.com/ascorblack/daedalus/browserd/internal/view"
@@ -33,6 +34,8 @@ type Daemon struct {
 	Page      *page.Model
 	Events    *events.Log
 	Log       *slog.Logger
+	// Net is the network wall; nil serves no net.* methods.
+	Net *netwall.Browsers
 
 	sampler *procstat.Sampler
 }
@@ -73,6 +76,7 @@ func (d *Daemon) Register(s *server.Server) {
 		s.Handle(name, h)
 	}
 	d.registerPage(s)
+	d.registerNet(s)
 }
 
 // decode reads params strictly: an unknown field is an error, so a misspelt parameter is never

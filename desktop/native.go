@@ -262,7 +262,7 @@ type child interface {
 }
 
 // Native is the whole of the native installation the launcher owns: the runtime it downloads, the
-// supervisor it keeps alive, the key proxy beside it and the terminal daemon.
+// supervisor it keeps alive, the key proxy beside it, and the terminal and browser daemons.
 type Native struct {
 	paths Paths
 	log   func(string, ...any)
@@ -270,6 +270,7 @@ type Native struct {
 	supervisor child
 	keyproxy   child
 	ptyd       child
+	browserd   child
 	git        string
 
 	// What the progress page is told: which piece of a start this is, and how far through the one
@@ -546,6 +547,8 @@ func supervisorEnv(p Paths, base []string, settings map[string]string) []string 
 	// The host terminals: the daemon the launcher runs writes its endpoint and token here. Always
 	// given, daemon or not — the directory then says why there is none.
 	add("TERMINALS_HOST_DIR", ptydRunDir(p))
+	// The browser daemon, the same way.
+	add("BROWSER_HOST_DIR", browserdRunDir(p))
 	// The Mini App as a release archive carries it, beside the launcher. It is not the checkout's
 	// own miniapp/dist: that is the thing this would be a fallback for, and pointing one at the
 	// other makes the fallback a no-op that looks like a copy.
@@ -653,6 +656,15 @@ func (n *Native) Start(ctx context.Context) error {
 		n.ptyd.Start(ctx)
 		waitForPtyd(ctx, ptydRunDir(n.paths), 5*time.Second)
 	}
+	// The browser daemon after it, by the same reasoning. It starts no Chromium until the agent
+	// opens a browser, so it is up in a moment.
+	if n.browserd == nil {
+		n.browserd = n.newBrowserd(ctx)
+	}
+	if n.browserd != nil {
+		n.browserd.Start(ctx)
+		waitForPtyd(ctx, browserdRunDir(n.paths), 5*time.Second)
+	}
 	n.keyproxy.Start(ctx)
 	n.supervisor.Start(ctx)
 	n.enter(StageStart)
@@ -752,11 +764,12 @@ const nativeReadyTimeout = 90 * time.Second
 // cannot stop. A run in flight is not lost — the supervisor gives the bot 25 seconds to drain, the
 // run is snapshotted, and it resumes on the next start.
 //
-// The supervisor goes first, so the agent detaches from its terminals cleanly and records them as
-// ended rather than finding a daemon gone under it; then the terminal daemon, which ends every host
-// terminal; then the key proxy, which the agent needed until it stopped.
+// The supervisor goes first, so the agent detaches from its terminals and browsers cleanly and
+// records them as ended rather than finding a daemon gone under it; then the browser daemon, which
+// closes every browser; then the terminal daemon, which ends every host terminal; then the key
+// proxy, which the agent needed until it stopped.
 func (n *Native) Stop(ctx context.Context) {
-	for _, c := range []child{n.supervisor, n.ptyd, n.keyproxy} {
+	for _, c := range []child{n.supervisor, n.browserd, n.ptyd, n.keyproxy} {
 		if c != nil {
 			c.Stop(ctx)
 		}
@@ -765,7 +778,7 @@ func (n *Native) Stop(ctx context.Context) {
 	// once, when it is built, while APIPort and WaitReadyNative read the env file every time: a stop,
 	// an edit to the ports and a start would otherwise bring the old ports back up and then wait on
 	// the new ones, which is a launcher hanging on a port nothing is serving.
-	n.supervisor, n.keyproxy, n.ptyd = nil, nil, nil
+	n.supervisor, n.keyproxy, n.ptyd, n.browserd = nil, nil, nil, nil
 }
 
 // Running counts what is answering rather than what this process started. A `status` from a second
@@ -782,8 +795,10 @@ func (n *Native) Running() int {
 			count++
 		}
 	}
-	if ptydAnswers(ptydRunDir(n.paths)) {
-		count++
+	for _, run := range []string{ptydRunDir(n.paths), browserdRunDir(n.paths)} {
+		if ptydAnswers(run) {
+			count++
+		}
 	}
 	return count
 }
@@ -873,7 +888,7 @@ func (n *Native) SupervisorReachable() bool {
 }
 
 // InstallExtra fetches one of the optional pieces: node, for the four skills that shell out to npx
-// and for rebuilding the Mini App, the headless browser the browser skills drive, or the engine that
+// and for rebuilding the Mini App, the browsers the agent and the browser skills drive, or the engine that
 // recognises speech on this machine. None of the three is part of a first run, because an
 // installation that never uses them should never pay for them.
 func (n *Native) InstallExtra(ctx context.Context, name string) error {
@@ -887,9 +902,11 @@ func (n *Native) InstallExtra(ctx context.Context, name string) error {
 		return err
 	case "browser":
 		// Playwright checks and unpacks its own browsers, so there is no second table for them here;
-		// what this decides is where they land, which is inside the installation's folder.
-		n.log("installing the headless browser (about 100 MB)")
-		cmd := exec.CommandContext(ctx, uvBinary(n.paths), "run", "--frozen", "--extra", "browser", "python", "-m", "playwright", "install", "chromium-headless-shell")
+		// what this decides is where they land, which is inside the installation's folder. Both of
+		// its Chromium builds: the full one the browser daemon runs, and the headless shell the
+		// browser skills drive, which Playwright's headless launch looks for and will not do without.
+		n.log("installing the browsers (about 320 MB to download, 650 MB on disk)")
+		cmd := exec.CommandContext(ctx, uvBinary(n.paths), "run", "--frozen", "--extra", "browser", "python", "-m", "playwright", "install", "chromium")
 		cmd.Dir = n.paths.Bot
 		cmd.Env = append(n.runtimeEnv(), "PLAYWRIGHT_BROWSERS_PATH="+n.paths.RuntimeBrowsers)
 		if out, err := runCmd(cmd); err != nil {

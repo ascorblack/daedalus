@@ -41,7 +41,7 @@ def _browser() -> str:
     return (
         f"{', '.join(missing)} not installed in this image. The default image leaves the browser tools out — "
         "they are a third of its size and most sessions never open a page. They are the `browser` extra: run the "
-        "`:browser` tag of the agent image, or `uv sync --extra browser && playwright install chromium-headless-shell` "
+        "`:browser` tag of the agent image, or `uv sync --extra browser && playwright install chromium` "
         "outside a container."
     )
 

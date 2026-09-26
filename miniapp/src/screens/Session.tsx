@@ -38,6 +38,11 @@ import { StaffHeader, StaffMessages, useMember } from "../project/staff";
 import { BriefPage, FoldersPage, WakeupsPage } from "../project/pages";
 import { ProjectBoard } from "../board/ProjectBoard";
 import { useMain } from "../main/data";
+import { deviceSaving, useBrowsers } from "../browser/data";
+import { BrowserTab } from "../browser/BrowserPanel";
+import { BrowserPip } from "../browser/pip";
+import { BrowserHeadButton, useFirstOpenToast } from "../browser/phone";
+import { pipGroup } from "../browser/model";
 import { orchestrationPathOf } from "../mode";
 
 /**
@@ -101,7 +106,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
   const route = useRoute();
   const phone = !useMedia("(min-width: 1024px)");
   const panelContext = focus ? focus.kind : main ? "main" : "session";
-  const panelTabs = tabsFor(panelContext);
+  // The session's browsers: the Browser tab is offered only once it has had one.
+  const browsers = useBrowsers(id ? { session: id } : null);
+  const hasBrowser = browsers.groups.length > 0;
   // In focus mode the panel's tab is written into the project's own address, so opening the board
   // beside the orchestrator does not leave the project for the agents list. The main chat keeps its
   // panel in orchestration's home for the same reason. Written as the session's plain address, every
@@ -115,6 +122,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
     [focus?.projectId, focus?.kind, id, main],
   );
   const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane, context: panelContext, at: panelAt });
+  const panelTabs = tabsFor(panelContext, { browser: hasBrowser || panel.state.tab === "browser" });
+  const browserShown = pipGroup(browsers.groups);
+  const openBrowser = useCallback(() => panel.open("browser"), [panel.open]);
+  useFirstOpenToast(browsers.groups, phone && panel.state.tab !== "browser", openBrowser);
   const orchestrating = focus?.kind === "orchestrator";
   // A link from before orchestration mode, a notification or the palette may name an orchestrated
   // session by its plain address; only the session itself says where it belongs, so the move waits
@@ -1060,6 +1071,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
               {waiting > 0 && <span className="count">{waiting}</span>}
             </button>
           )}
+          {phone && browserShown && <BrowserHeadButton groups={browsers.groups} onOpen={openBrowser} streaming={panel.state.tab !== "browser"} saving={deviceSaving(true)} />}
           <TerminalButton dock={terminalDock} phone={phone} />
           {!phone && <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
@@ -1098,6 +1110,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
 
       <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
+          {!phone && panel.state.tab !== "browser" && !(panel.state.expanded && panel.state.tab) && <BrowserPip groups={browsers.groups} onOpen={openBrowser} />}
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
               {!detail && <TurnSkeleton />}
@@ -1193,8 +1206,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
                 folders: <FoldersPage projectId={focus.projectId} compact toast={toast} />,
               } : {}),
               ...(questionScope ? { questions: <QuestionsPanel scope={questionScope} toast={toast} /> } : {}),
+              browser: <BrowserTab groups={browsers.groups} toast={toast} phone={phone} />,
             }}
             badges={questionScope && waiting ? { questions: waiting } : undefined}
+            marks={browserShown ? { browser: browserShown.needs_you ? "attn" : browserShown.acting ? "busy" : undefined } : undefined}
             details={hasDetails ? (ids) =>
               <SessionDetails
                 ids={ids}

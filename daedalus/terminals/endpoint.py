@@ -78,7 +78,8 @@ def read_endpoint(run_dir: Path, *, label: str = "terminal service", lock: str =
         if note.is_file():
             with contextlib.suppress(OSError):
                 raise EndpointMissing("not_installed", note.read_text(encoding="utf-8").strip()[:300] or f"the {label} is not available") from None
-        if any((run_dir / name).exists() for name in (TOKEN_FILE, lock)):
+        # Either daemon keeps its run directory the same way, under its own lock's name.
+        if any((run_dir / name).exists() for name in (TOKEN_FILE, lock, "ptyd.lock", "browserd.lock")):
             raise EndpointMissing("not_running", f"the {label} in {run_dir} is not running") from None
         raise EndpointMissing("not_installed", f"no {label} has run in {run_dir}{owned_by_root(run_dir)}") from None
     except OSError as exc:
