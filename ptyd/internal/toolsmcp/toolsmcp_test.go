@@ -1,4 +1,4 @@
-package teammcp
+package toolsmcp
 
 import (
 	"bufio"

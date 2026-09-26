@@ -206,7 +206,10 @@ class OpenCodeAdapter:
             },
             "permission": permission,
         }
-        files: dict[str, bytes] = {}
+        # OpenCode runs every MCP tool unasked; the host asks the operator about what is sensitive.
+        for tools in spec.tool_sets:
+            config["mcp"][tools.server] = {"type": "local", "command": ["sh", "-c", tools.command()], "environment": {"DAEDALUS_TOOLS_HOLD_MS": str(tools.hold_ms)}, "timeout": tools.hold_ms + TIMEOUT_SLACK_MS}
+        files: dict[str, bytes] = {tools.path: tools.file for tools in spec.tool_sets}
         if spec.team_block:
             files[SYSTEM_FILE] = spec.team_block.encode()
             config["instructions"] = [f"{LAUNCH_DIR}/{SYSTEM_FILE}"]

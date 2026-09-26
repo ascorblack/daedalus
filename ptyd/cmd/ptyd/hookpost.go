@@ -4,10 +4,11 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/hooks"
-	"github.com/ascorblack/daedalus/ptyd/internal/teammcp"
+	"github.com/ascorblack/daedalus/ptyd/internal/toolsmcp"
 )
 
 // hookPost is `ptyd hook-post <name> [--wait-ms N]`, run by a CLI inside a launch.
@@ -22,13 +23,40 @@ func hook(args []string) int {
 }
 
 // teamMCP is `ptyd team-mcp`, the team tools' MCP server on stdio, started by a CLI from its
-// per-launch MCP configuration.
+// per-launch MCP configuration: `tools-mcp --set team` under the name every launch already uses.
 func teamMCP() int {
+	return serveTools(toolsmcp.TeamSet, "ptyd team-mcp")
+}
+
+// toolsMCP is `ptyd tools-mcp --set <name>`: one set of Daedalus's tools as an MCP server on stdio,
+// the team's or one the host describes in the launch's `tools/<name>.json`.
+func toolsMCP(args []string) int {
+	set := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--set" && i+1 < len(args):
+			set = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--set="):
+			set = strings.TrimPrefix(args[i], "--set=")
+		default:
+			os.Stderr.WriteString("ptyd tools-mcp: unknown argument " + args[i] + "\n")
+			return 2
+		}
+	}
+	if set == "" {
+		os.Stderr.WriteString("ptyd tools-mcp: --set <name> is required\n")
+		return 2
+	}
+	return serveTools(set, "ptyd tools-mcp")
+}
+
+func serveTools(set, name string) int {
 	// The CLI ends its MCP servers with SIGTERM once it closes their stdin; either ends the session.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if err := teammcp.Serve(ctx, os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
-		os.Stderr.WriteString("ptyd team-mcp: " + err.Error() + "\n")
+	if err := toolsmcp.ServeSet(ctx, set, os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
+		os.Stderr.WriteString(name + ": " + err.Error() + "\n")
 		return 1
 	}
 	return 0

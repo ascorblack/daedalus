@@ -802,6 +802,33 @@ The server inherits its environment from the CLI. A CLI that gives its MCP serve
 environment (Codex) must be told to pass `DAEDALUS_HOOK_URL`, `DAEDALUS_HOOK_TOKEN` and the two
 holds through.
 
+### Other tool sets: `ptyd tools-mcp --set <name>`
+
+`team-mcp` is the `team` set of `ptyd tools-mcp`, whose wire is unchanged. Any other set is read
+from the launch: `$DAEDALUS_LAUNCH_DIR/tools/<name>.json`, a launch file the host writes, so the host
+changes its tools without a new daemon:
+
+```
+{"server": "daedalus_browser", "instructions": "…", "hold_ms": 330000, "unanswered": "…",
+ "tools": [{"name", "description", "inputSchema"}, …]}
+```
+
+- The server names itself `server` (default `daedalus_<name>`) and lists the tools as they are
+  written; a tool without a name or a schema is left out. A set whose file cannot be read still
+  serves, with no tools, and every call says why; the reason is on stderr. `<name>` is 1–32 of
+  `a-z 0-9 _ -`, starting with a letter.
+- A call is checked only as far as its arguments being an object with the schema's `required` names
+  present; the host checks the rest. It is posted to the hook listener as `tools` with the body
+  `{"set", "tool", "arguments", "call_id"}`, held for `DAEDALUS_TOOLS_HOLD_MS`, else the file's
+  `hold_ms`, else 330 s — above the host's five-minute hold on a question to the operator, which a
+  call may be waiting on — and capped by the listener. The replies are read as for the team; silence
+  (204) is **an error**, `unanswered` (default: the action may or may not have happened; look before
+  trying again), never a success.
+- On `initialize` and `tools/list` it posts, unheld, `{"set", "tool": "hello", "stage", "client"?}`
+  to `tools`. `DAEDALUS_TEAM_URL` is never used for a set other than `team`.
+
+The browser is such a set (`browser`, server `daedalus_browser`): see `browser.md`, The host side.
+
 ### `net.dial`
 
 `{target, launch_id}` → `{channel}`: a byte stream on its own channel. `unix:<name>` is a socket in

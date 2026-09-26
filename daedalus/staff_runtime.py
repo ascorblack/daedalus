@@ -243,8 +243,10 @@ class TeamIngress(Protocol):
         """``starting · working · turn_done_unseen · idle · error · no_signal``; ``question`` and
         ``permission`` are set by the two calls below, ``exited`` by ending the session."""
 
-    async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str) -> str:
-        """A permission the executor asks for; routed by the project's autonomy. Returns the request's id."""
+    async def permission(self, live: LiveSession, request_ref: str, tool: str, summary: str, *, route: str | None = None, risk: str = "routine") -> str:
+        """A permission the executor asks for; routed by the project's autonomy, or to ``route`` when
+        the request names who decides it (a browser's sensitive action: the operator). Returns the
+        request's id."""
 
     async def question(self, live: LiveSession, request_ref: str, text: str, options: list[str], *, call_id: str | None = None) -> str:
         """A question the executor's own dialog asks; routed like a permission. Returns the request's id.

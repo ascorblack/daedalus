@@ -157,6 +157,11 @@ class Handoff:
         data = await self._read(folder.env, path, allowed=[str(f.path) for f in project.folders if f.env == folder.env])
         return await self.files.add(data, name=PurePosixPath(path).name, origin="folder", origin_ref=path, scope=project.id, actor=actor)
 
+    async def read(self, env: str, path: str, *, allowed: Sequence[str]) -> bytes:
+        """The bytes of a file of ``env`` inside ``allowed``, read locally or through the host bridge;
+        a refusal says why. What a member's browser uploads is read here, under the member's walls."""
+        return await self._read(env, path, allowed=allowed)
+
     async def _read(self, env: str, path: str, *, allowed: Sequence[str], check: Callable[[Path], str] | None = None) -> bytes:
         """The bytes of a file of ``env`` inside ``allowed``; a refusal says why."""
         if env == self.local_env:

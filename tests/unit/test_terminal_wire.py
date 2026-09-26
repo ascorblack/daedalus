@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from daedalus.terminals import load
+from daedalus import load
 from daedalus.terminals.endpoint import EndpointMissing, read_endpoint, remember_hook_port, sealed_ports
 from daedalus.terminals.wire import BrowserFrame, FrameError, decode_browser, decode_frame, encode_browser, encode_frame
 

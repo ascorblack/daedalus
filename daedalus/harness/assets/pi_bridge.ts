@@ -16,6 +16,9 @@
  * - it gives the model the team's two tools, `Report` and `AskOrchestrator`, speaking the wire
  *   contract of the daemon's `team-mcp` (the other CLIs' route to the same tools): a post to
  *   `$DAEDALUS_HOOK_URL/team?wait_ms=<hold>` with a call id, the host's reply as the result;
+ * - it gives the model the tools of each set named in `$DAEDALUS_TOOL_SETS` (the browser's), read
+ *   from `$DAEDALUS_LAUNCH_DIR/tools/<set>.json` and speaking the wire of the daemon's `tools-mcp`:
+ *   a post to `$DAEDALUS_HOOK_URL/tools` with the set, the tool, its arguments and a call id;
  * - it answers pi's project-trust question for the launch, which the operator settled by choosing
  *   the folder.
  *
@@ -29,7 +32,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 
@@ -39,6 +42,9 @@ const DIAL_DIR = process.env.DAEDALUS_DIAL_DIR ?? "";
 const LAUNCH = process.env.DAEDALUS_LAUNCH_ID || "nolaunch";
 const ASK_HOLD_MS = Number(process.env.DAEDALUS_ASK_HOLD_MS || 300_000);
 const REPORT_HOLD_MS = Number(process.env.DAEDALUS_REPORT_HOLD_MS || 15_000);
+const LAUNCH_DIR = process.env.DAEDALUS_LAUNCH_DIR ?? "";
+const TOOL_SETS = (process.env.DAEDALUS_TOOL_SETS ?? "").split(",").map((name) => name.trim()).filter((name) => /^[a-z][a-z0-9_-]{0,31}$/.test(name));
+const TOOLS_HOLD_MS = Number(process.env.DAEDALUS_TOOLS_HOLD_MS || 330_000);
 /** A post to the listener gives up after this beyond its hold: the host being away must never
  * stall a turn. */
 const EVENT_TIMEOUT_MS = 10_000;
@@ -123,6 +129,43 @@ async function teamCall(tool: "report" | "ask", fields: Json, fallback: string, 
   if (result.status === 429) throw new Error("too many calls at once; wait a moment and call again");
   const reply = replyText(result.text);
   throw new Error(`the team refused the call (${result.status}): ${reply.text}`);
+}
+
+type SetTool = { name: string; description: string; inputSchema: Record<string, unknown> };
+type SetFile = { unanswered?: string; hold_ms?: number; tools?: SetTool[] };
+
+/** A tool set the host wrote into the launch; a set that cannot be read gives no tools, and the
+ * host, which hears no hello from it, says so. */
+function readSet(name: string): SetFile | undefined {
+  if (!LAUNCH_DIR) return undefined;
+  try {
+    return JSON.parse(readFileSync(join(LAUNCH_DIR, "tools", `${name}.json`), "utf8")) as SetFile;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One call of a set's tool, on the wire of the daemon's `tools-mcp`. Silence is never a success:
+ * the action may or may not have happened, and the model is told to look before it tries again. */
+async function setCall(set: string, tool: string, args: Json, unanswered: string, holdMs: number, signal?: AbortSignal): Promise<string> {
+  calls += 1;
+  const body = { set, tool, arguments: args, call_id: `${CALL_PREFIX}:${calls}` };
+  let result: { status: number; text: string };
+  try {
+    result = await postJson("tools", body, holdMs, signal);
+  } catch (error) {
+    if (signal?.aborted) throw new Error("the call was cancelled");
+    throw new Error("Daedalus could not be reached; the action was not taken");
+  }
+  if (result.status >= 200 && result.status < 300) {
+    const reply = replyText(result.text);
+    if (!reply.text) throw new Error(unanswered);
+    if (reply.error) throw new Error(reply.text);
+    return reply.text;
+  }
+  if (result.status === 401 || result.status === 410) throw new Error(GONE);
+  if (result.status === 429) throw new Error("too many calls at once; wait a moment and call again");
+  throw new Error(`Daedalus refused the call (${result.status}): ${replyText(result.text).text}`);
 }
 
 function text(value: string) {
@@ -255,6 +298,26 @@ export default function (pi: ExtensionAPI) {
       return text(await teamCall("ask", fields, EXPIRED, ASK_HOLD_MS, signal));
     },
   });
+
+  for (const set of TOOL_SETS) {
+    const file = readSet(set);
+    if (!file) continue;
+    const unanswered = file.unanswered || "Daedalus did not answer in time; look at the result before trying again.";
+    for (const tool of file.tools ?? []) {
+      if (!tool?.name || !tool.inputSchema) continue;
+      pi.registerTool({
+        name: tool.name,
+        label: tool.name,
+        description: tool.description,
+        // The host's own JSON schema, as the MCP route gives it to the other CLIs.
+        parameters: Type.Unsafe<Json>(tool.inputSchema),
+        async execute(_id, params, signal) {
+          return text(await setCall(set, tool.name, (params ?? {}) as Json, unanswered, TOOLS_HOLD_MS, signal));
+        },
+      });
+    }
+    postJson("tools", { set, tool: "hello", stage: "extension", client: { name: "pi" } }, 0).catch(() => undefined);
+  }
 
   function startSocket(): void {
     if (server || !DIAL_DIR) return;

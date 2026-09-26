@@ -647,26 +647,35 @@ async def _browser(ctx: DoctorContext) -> list[Check]:
     """Each configured browser environment: whether its daemon answers, which Chromium it runs, whether
     Chromium's sandbox is on, and what walls a page is behind."""
     run_dirs = {"container": ctx.settings.browser_container_dir, "host": ctx.settings.browser_host_dir}
+    service = ctx.extensions.get("browser")
     out = []
     for env, run_dir in run_dirs.items():
         if run_dir is None:
             continue
         name = f"browser ({env})"
-        client = PtydClient(env, run_dir)
-        try:
-            await client.connect()
-            info = await client.call("daemon.info", timeout=_timeout(ctx))
-        except Unavailable as exc:
-            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(exc.reason, exc.reason or "unreachable")
-            fix = BROWSER_FIXES.get(f"{exc.reason}_{env}") or BROWSER_FIXES.get(exc.reason, "")
-            detail = "the browser service has never run here" if exc.reason == "not_installed" and env == "container" else exc.detail
-            out.append(Check(name, False, f"{label}: {detail}", "info" if exc.reason == "not_installed" else "warn", fix))
+        # The running application's own connection when there is one, as for the terminals.
+        if service is not None:
+            status = next(e for e in service.environments() if e["env"] == env)
+            reason, detail, info = status["reason"], status["detail"], service.links[env].info
+            failed = "" if status["available"] else reason
+        else:
+            client = PtydClient(env, run_dir, label="browser service", lock="browserd.lock")
+            failed, detail, info = "", "", {}
+            try:
+                await client.connect()
+                info = await client.call("daemon.info", timeout=_timeout(ctx))
+            except Unavailable as exc:
+                failed, detail = exc.reason or "unreachable", exc.detail
+            except RpcError as exc:
+                failed, detail = "unreachable", exc.message
+            finally:
+                await client.close()
+        if failed:
+            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(failed, failed)
+            fix = BROWSER_FIXES.get(f"{failed}_{env}") or BROWSER_FIXES.get(failed, "") or BROWSER_FIXES.get(f"not_running_{env}", "")
+            detail = "the browser service has never run here" if failed == "not_installed" and env == "container" else detail
+            out.append(Check(name, False, f"{label}: {detail}", "info" if failed == "not_installed" else "warn", fix))
             continue
-        except RpcError as exc:
-            out.append(Check(name, False, f"unreachable: {exc.message}", "warn", BROWSER_FIXES.get(f"not_running_{env}", "")))
-            continue
-        finally:
-            await client.close()
         chromium = info.get("chromium") or {}
         if chromium.get("path"):
             browser = f"Chromium {chromium.get('version') or '(version unknown)'}, {chromium.get('kind') or 'unknown'}"

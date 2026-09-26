@@ -860,7 +860,7 @@ class NotificationService:
             ))
 
 
-ROUTED_EVENTS = ("run.finished", "ask.", "permission.", "staff.status", "task.moved", "terminal.notify", "presence")
+ROUTED_EVENTS = ("run.finished", "ask.", "permission.", "staff.status", "task.moved", "terminal.notify", "presence", "browser.needs_you", "browser.returned", "browser.closed")
 
 
 class NotificationRouter:
@@ -884,6 +884,9 @@ class NotificationRouter:
             "task.moved": self._task_moved,
             "terminal.notify": self._terminal_notify,
             "presence": self._presence,
+            "browser.needs_you": self._browser_needs_you,
+            "browser.returned": self._browser_settled,
+            "browser.closed": self._browser_settled,
         }.get(event.type)
         if handler is not None:
             await handler(event)
@@ -980,6 +983,37 @@ class NotificationRouter:
 
     async def _permission_resolved(self, event: AppEvent) -> None:
         await self.service.resolve(str(event.payload["request_ref"]), str(event.payload.get("decision") or "answered"), via=str(event.payload.get("via") or ""))
+
+    async def _browser_needs_you(self, event: AppEvent) -> None:
+        """The agent handed its browser over, or a page asked for what only a person gives. Urgent, and
+        answered in the app: the link opens the owner's chat on its Browser tab."""
+        p = event.payload
+        group = str(p.get("group_id") or "")
+        body = "\n".join(part for part in (str(p.get("what") or "").strip(), str(p.get("url") or "").strip()) if part)
+        if event.staff_id and event.project_id and not event.session_id:
+            link = f"/app/project/{event.project_id}/staff/{event.staff_id}?panel=browser"
+        else:
+            link = f"{self._session_link(event.session_id)}?panel=browser" if event.session_id else ""
+        # A link that opens the Mini App on the owner's Browser tab: from a chat, a lock screen or a
+        # phone the operator is not at the app, and "needs you" is a thing to open at once.
+        front = self.service._front()
+        bot = str(getattr(front, "username", "") or "")
+        public = str(getattr(getattr(self.manager, "settings", None), "miniapp_public_url", "") or "").rstrip("/")
+        if event.session_id and bot:
+            body += f"\n{render('browser.open', self._lang())}: https://t.me/{bot}?startapp=browser_{event.session_id}"
+        elif public and link:
+            base = public[: -len("/app")] if public.endswith("/app") else public
+            body += f"\n{render('browser.open', self._lang())}: {base}{link}"
+        ref = f"browser:{group}"
+        await self.service.post(Draft(
+            "question", render("browser.needs_you", self._lang(), title=str(p.get("title") or "")), body, kind="browser_needs_you", tone="warning", level="urgent",
+            session_id=event.session_id, project_id=event.project_id, staff_id=event.staff_id, link=link,
+            actions=(Action("open", render("open", self._lang()), "primary"),), request_ref=ref, dedupe_key=ref, source="browser",
+        ))
+
+    async def _browser_settled(self, event: AppEvent) -> None:
+        """Given back or closed: whatever the browser asked of the operator is over."""
+        await self.service.resolve(f"browser:{event.payload.get('group_id') or ''}", "answered", via=str(event.payload.get("by") or ""))
 
     async def _staff_name(self, staff_id: str | None) -> str:
         if not staff_id:

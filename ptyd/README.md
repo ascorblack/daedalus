@@ -15,6 +15,7 @@ go build ./cmd/ptyd
 ./ptyd hook-post Stop < body.json   # inside a launch: post a hook, print the reply
 ./ptyd hook Stop < body.json        # a CLI's command hook: the same, and always exit 0
 ./ptyd team-mcp                     # inside a launch: the team tools' MCP server on stdio
+./ptyd tools-mcp --set browser      # inside a launch: a set of tools the host describes, on stdio
 ```
 
 The protocol, the run directory, the events and the guarantees about the output are specified in
@@ -37,7 +38,7 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `internal/ptyproc` | PTY start, resize, signals, ending a process tree; on Windows a pseudoconsole (ConPTY) and a job object |
 | `internal/sidechan` | `exec.run` and its program list, `fs.*` with its roots and deny list, `net.dial` |
 | `internal/hooks` | launches (token, overlay files, dial directory, ports), the loopback hook listener with held replies, `hook-post` and `hook` |
-| `internal/teammcp` | `team-mcp`: the team tools (`Report`, `AskOrchestrator`) as an MCP server on stdio, posting to the hook listener |
+| `internal/toolsmcp` | `tools-mcp --set <name>` (and `team-mcp`, the `team` set): Daedalus's tools as an MCP server on stdio — the team's (`Report`, `AskOrchestrator`) compiled in, any other set read from the launch's `tools/<name>.json` — posting each call to the hook listener |
 | `internal/wire` | the terminal frames an attachment carries; `testdata/frames.json` is shared byte for byte with the app |
 | `internal/logx` | the log and the journal of agent writes |
 

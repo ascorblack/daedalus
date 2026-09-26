@@ -41,6 +41,7 @@ EXTENSIONS = (
     "daedalus.extensions.voice",
     "daedalus.extensions.terminals",
     "daedalus.extensions.harness",
+    "daedalus.extensions.browser",
     "daedalus.extensions.watches",
     "daedalus.extensions.api",
 )
@@ -54,9 +55,10 @@ def enabled(app: Application) -> tuple[str, ...]:
     is not installed and nothing it would have registered exists.
     """
     mode = app.manager.capabilities.selfdev.mode if app.manager is not None else "off"
-    if mode == "off":
-        return tuple(name for name in EXTENSIONS if name != "daedalus.extensions.selfdev")
-    return EXTENSIONS
+    browser = app.manager.capabilities.browser.configured if app.manager is not None else False
+    # A browser likewise: without a browser daemon told of, there is no browser, no tools and no routes.
+    skipped = {name for name, off in (("daedalus.extensions.selfdev", mode == "off"), ("daedalus.extensions.browser", not browser)) if off}
+    return tuple(name for name in EXTENSIONS if name not in skipped)
 
 
 FATAL = ("daedalus.extensions.notifications",)

@@ -58,7 +58,7 @@ class Channel:
         if self.closed:
             return
         if not payload:
-            self._finish("closed by the terminal service")
+            self._finish(f"closed by the {self.client.label}")
             return
         self._queued += len(payload)
         if self._queued > self.limit:
@@ -93,6 +93,7 @@ class Channel:
         if not self.closed:
             self._finish("closed by the host")
             self.client._channels.pop(self.id, None)
+            self.client._closing.add(self.id)
             with contextlib.suppress(Unavailable, OSError):
                 await self.client._send(self.id, b"")
 
@@ -102,9 +103,15 @@ EventHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class PtydClient:
-    def __init__(self, env: str, run_dir: Path, *, on_notification: EventHandler | None = None) -> None:
+    def __init__(self, env: str, run_dir: Path, *, on_notification: EventHandler | None = None, label: str = "terminal service", outdated: str = "recreate the terminals service, which ends its terminals", lock: str = "ptyd.lock") -> None:
         self.env = env
         self.run_dir = run_dir
+        self.label = label
+        """What the daemon is called in the messages the operator reads: the browser daemon speaks the
+        same framing and handshake, and its failures must not read as the terminals'."""
+        self.outdated = outdated
+        """What to do about a daemon that speaks an older protocol, in the operator's terms."""
+        self.lock = lock
         self.on_notification = on_notification
         self.hello: dict[str, Any] = {}
         self._reader: asyncio.StreamReader | None = None
@@ -112,6 +119,10 @@ class PtydClient:
         self._write_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._channels: dict[int, Channel] = {}
+        self._closing: set[int] = set()
+        """Channels this side closed whose answering close has not come back yet. Only those empty
+        frames are answers; any other close of a channel not in the table is the daemon closing one
+        this side has not claimed yet, and dropping it left the caller a channel that never ended."""
         self._next_id = 0
         self._notifications: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
         self._tasks: list[asyncio.Task[None]] = []
@@ -129,7 +140,7 @@ class PtydClient:
     async def connect(self) -> dict[str, Any]:
         """Open the socket, present the token and wait for ``hello``; raises ``Unavailable``."""
         try:
-            endpoint = read_endpoint(self.run_dir)
+            endpoint = read_endpoint(self.run_dir, label=self.label, lock=self.lock)
         except EndpointMissing as exc:
             raise Unavailable(self.env, exc.reason, exc.detail) from None
         try:
@@ -138,11 +149,11 @@ class PtydClient:
             else:
                 reader, writer = await asyncio.wait_for(asyncio.open_connection(endpoint.host, endpoint.port, limit=wire.MAX_PAYLOAD + 64), HANDSHAKE_TIMEOUT)
         except PermissionError as exc:
-            raise Unavailable(self.env, "permission_denied", permission_detail(endpoint.path or self.run_dir, exc)) from None
+            raise Unavailable(self.env, "permission_denied", permission_detail(endpoint.path or self.run_dir, exc, self.label)) from None
         except (OSError, TimeoutError) as exc:
             # The endpoint file says a daemon listens and nothing answers: it died without its
             # shutdown (a killed container), and the next one will rewrite the file.
-            raise Unavailable(self.env, "not_running", f"the terminal service does not answer at {self.run_dir}: {exc}") from None
+            raise Unavailable(self.env, "not_running", f"the {self.label} does not answer at {self.run_dir}: {exc}") from None
         try:
             writer.write(wire.encode_frame(wire.CONTROL, endpoint.token))
             await writer.drain()
@@ -152,22 +163,22 @@ class PtydClient:
             writer.close()
             # A wrong token is answered by a close after a second. The usual cause is a token file
             # read in the moment a restarting daemon replaced it; the next attempt reads the new one.
-            raise Unavailable(self.env, "refused", "the terminal service refused this host's token") from None
+            raise Unavailable(self.env, "refused", f"the {self.label} refused this host's token") from None
         except (OSError, TimeoutError, ValueError, wire.FrameError) as exc:
             writer.close()
-            raise Unavailable(self.env, "unreachable", f"no greeting from the terminal service: {exc}") from None
+            raise Unavailable(self.env, "unreachable", f"no greeting from the {self.label}: {exc}") from None
         hello = message.get("params") if isinstance(message, dict) and message.get("method") == "hello" else None
         if not isinstance(hello, dict):
             writer.close()
-            raise Unavailable(self.env, "unreachable", "the terminal service did not greet this host")
+            raise Unavailable(self.env, "unreachable", f"the {self.label} did not greet this host")
         if hello.get("protocol") != wire.PROTOCOL:
             writer.close()
             newer = isinstance(hello.get("protocol"), int) and hello["protocol"] > wire.PROTOCOL
             raise Unavailable(
                 self.env,
                 "protocol_mismatch",
-                f"the terminal service speaks protocol {hello.get('protocol')} and this build speaks {wire.PROTOCOL}: "
-                + ("update Daedalus" if newer else "recreate the terminals service, which ends its terminals"),
+                f"the {self.label} speaks protocol {hello.get('protocol')} and this build speaks {wire.PROTOCOL}: "
+                + ("update Daedalus" if newer else self.outdated),
             )
         self.hello = hello
         self._reader, self._writer = reader, writer
@@ -180,7 +191,7 @@ class PtydClient:
     async def call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float = CALL_TIMEOUT) -> Any:
         """One JSON-RPC call; raises ``wire.RpcError`` for the daemon's errors, ``Unavailable`` when gone."""
         if not self.connected:
-            raise Unavailable(self.env, "unreachable", self.lost_reason or "not connected to the terminal service")
+            raise Unavailable(self.env, "unreachable", self.lost_reason or f"not connected to the {self.label}")
         self._next_id += 1
         call_id = self._next_id
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -225,7 +236,7 @@ class PtydClient:
                 await writer.drain()
             except (OSError, RuntimeError) as exc:
                 self._lose(f"write failed: {exc}")
-                raise Unavailable(self.env, "unreachable", f"the terminal service went away: {exc}") from None
+                raise Unavailable(self.env, "unreachable", f"the {self.label} went away: {exc}") from None
 
     def _send_nowait(self, channel: int, payload: bytes) -> None:
         if self._writer is not None and not self._closed.is_set():
@@ -233,7 +244,7 @@ class PtydClient:
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
-        reason = "the terminal service closed the connection"
+        reason = f"the {self.label} closed the connection"
         try:
             while True:
                 channel, payload = await wire.read_frame(self._reader)
@@ -242,7 +253,8 @@ class PtydClient:
                     continue
                 target = self._channels.get(channel)
                 if target is None:
-                    if not payload:
+                    if not payload and channel in self._closing:
+                        self._closing.discard(channel)
                         continue  # the answer to a close this side already sent
                     target = self._channels[channel] = Channel(self, channel)  # kept for whoever asked for it
                 target._deliver(payload)
@@ -264,7 +276,7 @@ class PtydClient:
         try:
             message = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            logger.warning("terminal service %s sent a frame that is not JSON", self.env)
+            logger.warning("%s %s sent a frame that is not JSON", self.label, self.env)
             return
         if not isinstance(message, dict):
             return
@@ -293,7 +305,7 @@ class PtydClient:
             try:
                 await self.on_notification(*item)
             except Exception:  # noqa: BLE001 — one event handled badly must not stop the next
-                logger.exception("terminal service %s: handling %s failed", self.env, item[0])
+                logger.exception("%s %s: handling %s failed", self.label, self.env, item[0])
 
     def _lose(self, reason: str) -> None:
         if self._closed.is_set():

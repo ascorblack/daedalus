@@ -582,8 +582,9 @@ class SessionManager:
         # A tool this installation cannot honour is not registered at all: an unusable name in the
         # list is an invitation the model accepts and a failure it cannot understand.
         disabled = self.capabilities.selfdev.disabled_tools
+        browser = self.capabilities.browser.configured
         for tool in discover_tools():
-            if tool.name in disabled:
+            if tool.name in disabled or (not browser and tool.name.startswith(capabilities.BROWSER_TOOL_PREFIX)):
                 continue
             self.tools.register(tool)
         for tool in build_memory_tools(self.memory):
@@ -855,6 +856,11 @@ class SessionManager:
                 state.services.tool_timeout_seconds = config.limits.tool_timeout_seconds
                 state.services.max_tool_output_chars = config.tools.exec.max_output_chars
         self._apply_tool_visibility_all()
+
+    def vision_model(self) -> tuple[Any, str, FileBlobStore, str] | None:
+        """The vision model as a tool that looks at an image needs it, or ``None`` without one: for a
+        caller with no session of its own (a command-line member's browser)."""
+        return self._vision()
 
     def _vision(self) -> tuple[Any, str, FileBlobStore, str] | None:
         found = self.config.vision_preset()
@@ -4119,6 +4125,10 @@ class SessionManager:
             base_dir=base_dir,
         )
 
+    def sealed_ports(self) -> tuple[int, ...]:
+        """The installation's own loopback doors, for the browser daemon's network wall natively."""
+        return self._sealed_ports()
+
     def _sealed_ports(self) -> tuple[int, ...]:
         """The installation's own doors on the loopback interface: the app's API, and the launcher's
         action page where a launcher is holding this installation.
@@ -4190,6 +4200,42 @@ class SessionManager:
             return prompts.STAFF_POLICY_HINT if state is not None and self.is_staff(state) else None
 
         return PolicyAdapter(decide, ask_hint=ask_hint)
+
+    def browser_gate(self, session_id: str, ask: Any) -> tuple[bool, str]:
+        """A sensitive browser action of this session, asked about the way the policy asks.
+
+        The policy judges a call from its arguments before it runs; whether a click buys something is
+        known only once the browser has looked at the element, inside the tool. So the tool asks here,
+        and the answer follows the policy's own rules: a grant for the key lets that one action through
+        once, otherwise the request is recorded and announced once and the agent is refused with the
+        key. It always goes to the operator — for a staff member too, whose other requests go to its
+        orchestrator: money, messages and a person's accounts are the operator's to approve.
+        """
+        state = self._states.get(session_id)
+        decision = ask.decision
+        if state is None:
+            return False, "this session is not loaded; the action was not taken"
+        now = time.time()
+        grants = {k for k, until in (state.metadata.get("policy_grants") or {}).items() if float(until) > now}
+        if decision.key in grants:
+            self._consume_grant(state, decision.key)
+            return True, ""
+        pending = dict(state.metadata.get("policy_pending") or {})
+        fresh = decision.key not in pending
+        said = f"{ask.action} “{ask.element}”" + (f" (the page calls it “{ask.name}”)" if ask.name and ask.name.casefold() not in ask.element.casefold() else "") + f" on {ask.origin}"
+        pending[decision.key] = {"tool": ask.tool, "text": self.redactor.redact(said)[:300], "at": datetime.now(UTC).isoformat()}
+        for meta in (state.metadata, state.session.metadata):
+            meta["policy_pending"] = dict(list(pending.items())[-20:])
+        if fresh:
+            payload = self._permission_payload(state, decision, pending[decision.key])
+            # Answered in the app, never from a lock screen: whoever holds the phone should not be
+            # the whole check on a purchase. The picture of the element rides along for the card.
+            payload.update({"risk": "elevated", "quick": False, "routed_to": "operator", "browser": {"group_id": ask.group, "kinds": list(ask.kinds), "origin": ask.origin, "element": ask.element, "name": ask.name, "thumbnail": ask.thumbnail}})
+            self._publish_soon(state, "permission.pending", payload)
+        head = f"needs the operator's approval: {decision.reason} (rule {decision.rule}). Approval key: {decision.key}. "
+        if self.is_staff(state):
+            return False, head + prompts.STAFF_BROWSER_HINT
+        return False, head + "Ask the operator with AskUser, quoting the key and what the action does; once they grant it (/allow <key>, or the Mini App), the same action passes once."
 
     async def flush_background(self) -> None:
         """Wait for the fire-and-forget writes (timing rows, egress rows, grant updates) to land."""
